@@ -16,7 +16,7 @@ from awcp.temporal.activities.mcp_gateway import (
     mcp_run_tool,
     mcp_select_tools,
     mcp_synthesize_answer,
-    mcp_search_arxiv,
+    # mcp_search_arxiv,
 )
 
 async def main():
@@ -41,7 +41,7 @@ async def main():
             mcp_select_tools,
             mcp_run_tool,
             mcp_synthesize_answer,
-            mcp_search_arxiv,
+            # mcp_search_arxiv,
         ],
     )
 

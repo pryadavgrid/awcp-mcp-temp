@@ -254,23 +254,3 @@ async def mcp_synthesize_answer(payload: dict) -> str:
         logger.exception("synthesize_answer failed")
         raise
 
-
-@activity.defn(name="search_arxiv")
-async def mcp_search_arxiv(payload: dict) -> list[dict]:
-    """Search academic papers on arXiv."""
-    query = payload["query"]
-    max_results = payload.get("max_results", 5)
-    logger.info("Starting search_arxiv activity query=%s max_results=%s", query, max_results)
-    
-    raw = await _call_mcp("search_arxiv", {"query": query, "max_results": max_results})
-    
-    try:
-        return json.loads(raw)
-    except Exception:
-        import ast
-        try:
-            return ast.literal_eval(raw)
-        except Exception:
-            logger.exception("Failed to parse arXiv search results from MCP")
-            return [{"raw_output": raw}]
-

@@ -7,6 +7,21 @@ def search_arxiv(
     query: str,
     max_results: int = 5
 ) -> list[dict]:
+    """Search academic papers on arXiv for research and scientific publications.
+    
+    Use this tool for:
+    - Research papers and scholarly articles
+    - Scientific publications and academic content
+    - Technical research on specific topics
+    - Latest studies and academic findings
+    
+    Args:
+        query: Search query for academic papers (e.g., "quantum computing", "machine learning transformers")
+        max_results: Maximum number of papers to return (default: 5)
+        
+    Returns:
+        List of papers with title, authors, summary, publication date, and PDF URL
+    """
 
     try:
 

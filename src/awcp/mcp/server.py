@@ -313,10 +313,34 @@ You are the first-pass answerer in a durable Temporal workflow.
 Return ONLY JSON with this schema:
 {{"final": true|false, "answer": string, "reason": string}}
 
-Set final=false when the user asks for live, current, recent, price, news,
-weather, market, ranking, date-sensitive, or externally verifiable facts.
-Set final=true only when the answer can be safely produced from stable general
-knowledge, reasoning, writing, math, or coding knowledge.
+CRITICAL RULES:
+Set final=false when the query requires:
+- Research papers or academic publications
+- Latest/recent/current information or studies
+- Scientific references or technical literature
+- Arxiv papers or scholarly articles
+- Live data, news, weather, prices, market data
+- Rankings, statistics, or date-sensitive facts
+- External verification or citations
+- Documentation or API references
+- Factual information that may have changed
+
+Set final=true ONLY when:
+- Pure reasoning, logic, or math problems
+- Code writing or explanation tasks
+- Creative writing or text generation
+- Definitional questions about stable concepts
+- Questions that explicitly say "from your knowledge" or "don't search"
+
+When in doubt, set final=false to enable tool discovery.
+
+Examples:
+"latest research papers on AI" → final=false (needs research tool)
+"find arxiv papers about transformers" → final=false (needs research tool)
+"recent studies on quantum computing" → final=false (needs research tool)
+"what is recursion" → final=true (stable knowledge)
+"write a python function to sort a list" → final=true (code generation)
+"who is the current CEO of OpenAI" → final=false (current information)
 
 User query:
 {query}
@@ -370,11 +394,20 @@ Return ONLY JSON:
   "reason": "brief selection rationale"
 }}
 
-Rules:
-- Prefer tools whose required parameters can be filled from the user query.
-- For a parameter named query, pass the user's query.
-- Select at most 3 tools.
-- If no tool applies, return an empty tool_calls list.
+Tool Selection Rules:
+- For research papers, academic content, scientific queries, or scholarly information: use search_arxiv if available
+- For web content, current events, news, general facts, or recent information: use web_search or advanced_web_search
+- Prefer tools whose required parameters can be filled from the user query
+- For a parameter named 'query', pass the user's query text
+- Select at most 3 tools
+- If no tool applies, return an empty tool_calls list
+
+Examples:
+- "latest research on quantum computing" → search_arxiv
+- "papers about machine learning" → search_arxiv  
+- "who is the CEO of OpenAI" → web_search or advanced_web_search
+- "current weather in London" → web_search or advanced_web_search
+- "explain transformer architecture papers" → search_arxiv
 
 User query:
 {query}
@@ -427,8 +460,8 @@ Discovered tools:
 
 @mcp.tool(
     description=(
-        "Synthesize a final answer from runtime tool results. The answer must "
-        "be grounded in the provided tool outputs."
+        "Synthesize a final answer from runtime tool results. For research tools, "
+        "provides a brief summary. Returns a concise, factual answer."
     )
 )
 def synthesize_tool_results(
@@ -440,6 +473,7 @@ def synthesize_tool_results(
         query,
         len(tool_results or []),
     )
+    
     successful = [
         result
         for result in tool_results
@@ -452,70 +486,67 @@ def synthesize_tool_results(
             "Check the failed tool activity details in Temporal UI."
         )
 
-    compact_results = []
+    # Categorize tools
+    research_tools = []
+    other_tools = []
+    
     for result in successful:
-        output = str(result.get("output", ""))
-        if len(output) > _MAX_SYNTHESIS_OUTPUT_CHARS:
-            output = (
-                output[:_MAX_SYNTHESIS_OUTPUT_CHARS]
-                + "\n\n[Output truncated for synthesis prompt]"
-            )
+        tool_name = result.get("tool_name", "")
+        research_keywords = ["arxiv", "research", "paper", "scholar", "academic", "publication"]
+        
+        if any(keyword in tool_name.lower() for keyword in research_keywords):
+            research_tools.append(result)
+        else:
+            other_tools.append(result)
 
-        compact_results.append(
-            {
-                "tool_name": result.get("tool_name"),
-                "tool_input": result.get("tool_input"),
-                "output": output,
-            }
-        )
+    # Build synthesis prompt
+    tool_summaries = []
+    
+    # Add research tool summaries (just counts)
+    for result in research_tools:
+        tool_name = result.get("tool_name", "unknown_tool")
+        output = str(result.get("output", "")).strip()
+        tool_summaries.append(f"Tool: {tool_name}\n{output}")
+    
+    # Add other tool outputs
+    for result in other_tools:
+        tool_name = result.get("tool_name", "unknown_tool")
+        output = str(result.get("output", "")).strip()
+        
+        # Limit each tool output for synthesis
+        if len(output) > 1500:
+            output = output[:1500] + "\n[Output truncated]"
+        
+        tool_summaries.append(f"Tool: {tool_name}\nOutput:\n{output}")
 
     prompt = f"""
-You are a factual QA assistant.
+You are a factual QA assistant. Provide a clear, concise answer to the user's query.
 
-Answer the user using only the successful tool outputs below. Be concise.
-If the outputs do not contain the answer, say that the tools did not provide
-enough information.
+RULES:
+1. Answer ONLY using the tool outputs provided below
+2. Be direct and factual
+3. For research tools: Just mention how many papers were found
+4. For other tools: Summarize the key findings
+5. Keep the answer under 100 words for research queries
+6. Do NOT list all paper details - that's in the structured response
+7. Do NOT add speculation or external knowledge
 
 User query:
 {query}
 
 Tool outputs:
-{json.dumps(compact_results, indent=2)}
+{chr(10).join(tool_summaries)}
 
-Answer:
+Your brief answer:
 """
 
     try:
         answer = ask_ollama(prompt, _DEFAULT_MODEL)
         logger.info("Completed synthesize_tool_results answer_chars=%s", len(answer))
-        return answer
+        return answer.strip()
     except Exception:
-        logger.exception("synthesize_tool_results LLM failed; returning tool-output fallback")
-        return _fallback_tool_answer(query, successful)
-
-
-def _fallback_tool_answer(query: str, tool_results: list[dict]) -> str:
-    excerpts = []
-    for result in tool_results:
-        output = str(result.get("output", "")).strip()
-        if not output:
-            continue
-        excerpts.append(
-            f"{result.get('tool_name', 'tool')} result:\n"
-            f"{output[:1500]}"
-        )
-
-    if not excerpts:
-        return (
-            "I could not synthesize a final answer because the tools did not "
-            "return usable output."
-        )
-
-    return (
-        f"I could not complete LLM synthesis for: {query}\n\n"
-        "Here is the most relevant fetched tool output:\n\n"
-        + "\n\n".join(excerpts)
-    )
+        logger.exception("synthesize_tool_results LLM failed")
+        raise RuntimeError("Synthesis LLM call failed - fallback will be used")
 
 
 @mcp.tool(
