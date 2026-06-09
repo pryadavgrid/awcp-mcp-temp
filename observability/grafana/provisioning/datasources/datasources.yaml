@@ -1,0 +1,57 @@
+# Grafana auto-provisioned datasources
+# Grafana will configure these automatically on first start
+
+apiVersion: 1
+
+datasources:
+
+  # ── Prometheus ─────────────────────────────────────────────────────────
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: tempo-uid
+
+  # ── Tempo (Traces) ─────────────────────────────────────────────────────
+  - name: Tempo
+    type: tempo
+    uid: tempo-uid
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki-uid
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{job=~"awcp.*"} | trace_id="${__trace.traceId}"'
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+
+  # ── Loki (Logs) ────────────────────────────────────────────────────────
+  - name: Loki
+    type: loki
+    uid: loki-uid
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      derivedFields:
+        - name: TraceID
+          matcherRegex: 'trace_id=([a-f0-9]+)'
+          url: "$${__value.raw}"
+          datasourceUid: tempo-uid
+          urlDisplayLabel: "Open Trace in Tempo"

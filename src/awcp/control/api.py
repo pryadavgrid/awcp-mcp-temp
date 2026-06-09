@@ -11,10 +11,12 @@ No agent logic lives here — it reuses the existing registry and Temporal piece
 
 import os
 import logging
+import time
 import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from opentelemetry import propagate
 from pydantic import BaseModel
 from temporalio.client import Client, WorkflowExecutionStatus
 
@@ -24,9 +26,15 @@ from awcp.runtime.tool_runtime import discover_tools
 from awcp.temporal.config import TEMPORAL_SERVER_URL, TASK_QUEUE_NAME
 from awcp.temporal.workflows.agent_execution import AgentGovernanceWorkflow
 from awcp.temporal.workflows.dynamic_ask import DynamicAskWorkflow
+from awcp.observability.setup import setup_otel
+from awcp.observability.middleware import instrument_fastapi, instrument_requests, AWCPMetrics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize OpenTelemetry
+setup_otel("awcp-control-api")
+_metrics = AWCPMetrics()
 
 # Temporal Web UI base (dev server default). Used only to build deep links.
 TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
@@ -43,6 +51,8 @@ _STEP_SEQUENCE = [
 ]
 
 app = FastAPI(title="AWCP Control Surface")
+instrument_fastapi(app)
+instrument_requests()
 
 # Populate the in-memory registry so the agent picker has data (same bootstrap
 # pattern as the MCP server and the FastAPI agent service).
@@ -85,9 +95,13 @@ async def run(req: RunRequest) -> dict:
     workflow_id = f"awcp-exec-{req.agent_name}-{uuid.uuid4().hex[:8]}"
     client = await _client()
 
+    carrier: dict = {}
+    propagate.inject(carrier)
+    _metrics.workflow_started.add(1)
+
     await client.start_workflow(
         AgentGovernanceWorkflow.run,
-        {"agent_name": req.agent_name, "input": req.input},
+        {"agent_name": req.agent_name, "input": req.input, "_otel_ctx": carrier},
         id=workflow_id,
         task_queue=TASK_QUEUE_NAME,
     )
@@ -105,17 +119,23 @@ async def ask(req: AskRequest) -> dict:
     workflow_id = f"awcp-ask-{uuid.uuid4().hex[:8]}"
     logger.info("Starting /ask workflow_id=%s query=%r", workflow_id, query)
 
+    start = time.time()
+    carrier: dict = {}
+    propagate.inject(carrier)
+
     try:
         client = await _client()
 
         handle = await client.start_workflow(
             DynamicAskWorkflow.run,
-            {"query": query},
+            {"query": query, "_otel_ctx": carrier},
             id=workflow_id,
             task_queue=TASK_QUEUE_NAME,
         )
         result = await handle.result()
+        _metrics.record_ask_request(time.time() - start, "success")
     except Exception as e:
+        _metrics.record_ask_request(time.time() - start, "failed")
         logger.exception("/ask workflow failed workflow_id=%s", workflow_id)
         raise HTTPException(
             status_code=502,

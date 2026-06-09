@@ -18,6 +18,12 @@ from awcp.temporal.activities.mcp_gateway import (
     mcp_synthesize_answer,
     # mcp_search_arxiv,
 )
+from awcp.observability.setup import setup_otel
+from awcp.observability.middleware import instrument_requests
+
+# Initialize OpenTelemetry
+setup_otel("awcp-temporal-worker")
+instrument_requests()
 
 async def main():
     logging.basicConfig(level=logging.INFO)

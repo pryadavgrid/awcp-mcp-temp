@@ -1,0 +1,4 @@
+# This file is intentionally empty.
+# Dashboard provisioning config lives at provisioning/dashboards/dashboards.yaml
+apiVersion: 1
+datasources: []

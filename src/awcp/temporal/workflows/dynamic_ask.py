@@ -36,6 +36,7 @@ class DynamicAskWorkflow:
     @workflow.run
     async def run(self, workflow_input: dict) -> dict:
         query = workflow_input["query"].strip()
+        _otel_ctx = workflow_input.get("_otel_ctx", {})
         
         # Initialize clean response structure
         response = {
@@ -68,7 +69,7 @@ class DynamicAskWorkflow:
         
         first_attempt = await workflow.execute_activity(
             mcp_call_llm,
-            {"query": query},
+            {"query": query, "_otel_ctx": _otel_ctx},
             start_to_close_timeout=timedelta(minutes=2),
             retry_policy=FAST_INTERNAL_RETRY,
         )
@@ -101,6 +102,7 @@ class DynamicAskWorkflow:
         
         tools = await workflow.execute_activity(
             mcp_discover_tools,
+            {"_otel_ctx": _otel_ctx},
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=FAST_INTERNAL_RETRY,
         )
@@ -117,7 +119,7 @@ class DynamicAskWorkflow:
         
         selection = await workflow.execute_activity(
             mcp_select_tools,
-            {"query": query, "tools": tools},
+            {"query": query, "tools": tools, "_otel_ctx": _otel_ctx},
             start_to_close_timeout=timedelta(minutes=2),
             retry_policy=FAST_INTERNAL_RETRY,
         )
@@ -141,7 +143,7 @@ class DynamicAskWorkflow:
             try:
                 result = await workflow.execute_activity(
                     mcp_run_tool,
-                    {"tool_name": tool_name, "tool_input": tool_input},
+                    {"tool_name": tool_name, "tool_input": tool_input, "_otel_ctx": _otel_ctx},
                     start_to_close_timeout=timedelta(minutes=5),
                     retry_policy=TOOL_EXECUTION_RETRY,
                 )
@@ -249,6 +251,7 @@ class DynamicAskWorkflow:
 
         # Try synthesis with LLM
         try:
+            synthesis_input["_otel_ctx"] = _otel_ctx
             answer = await workflow.execute_activity(
                 mcp_synthesize_answer,
                 synthesis_input,

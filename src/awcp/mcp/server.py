@@ -26,8 +26,15 @@ from awcp.runtime.config import SEARCH_MODEL
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
+from awcp.observability.setup import setup_otel
+from awcp.observability.middleware import instrument_requests
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize OpenTelemetry
+setup_otel("awcp-mcp-server")
+instrument_requests()
 logger = logging.getLogger(__name__)
 
 # Initialize the FastMCP server. FastMCP auto-generates each tool's JSON schema

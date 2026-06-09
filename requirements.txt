@@ -31,3 +31,13 @@ aiohttp>=3.8.4
 # --- Academic Research ---
 arxiv>=2.1.0
 
+# --- OpenTelemetry (observability) ---
+# Pinned for Python 3.14 compatibility (protobuf C-ext is broken on 3.14 below these)
+opentelemetry-api>=1.42.1
+opentelemetry-sdk>=1.42.1
+opentelemetry-exporter-otlp-proto-grpc>=1.42.1
+opentelemetry-instrumentation-fastapi>=0.63b1
+opentelemetry-instrumentation-requests>=0.63b1
+opentelemetry-instrumentation-logging>=0.63b1
+protobuf>=6.33.6
+

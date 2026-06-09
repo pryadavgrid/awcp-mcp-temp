@@ -1,0 +1,121 @@
+# AWCP Observability Stack
+# Runs: OTel Collector → Prometheus + Tempo + Loki → Grafana
+#
+# Start: docker compose -f observability/docker-compose.yml up -d
+# Stop:  docker compose -f observability/docker-compose.yml down
+# Logs:  docker compose -f observability/docker-compose.yml logs -f
+
+version: "3.8"
+
+networks:
+  awcp-obs:
+    driver: bridge
+
+volumes:
+  prometheus_data: {}
+  tempo_data: {}
+  loki_data: {}
+  grafana_data: {}
+
+services:
+
+  # ══════════════════════════════════════════
+  # OTel Collector — receives from Python apps
+  # ══════════════════════════════════════════
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.98.0
+    container_name: awcp-otel-collector
+    restart: unless-stopped
+    command: [ "--config=/etc/otel-collector-config.yaml" ]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC  ← your Python apps send here
+      - "4318:4318" # OTLP HTTP  ← alternative
+      - "8888:8888" # Collector's own Prometheus metrics
+      - "8889:8889" # Prometheus exporter (metrics from your app)
+    networks:
+      - awcp-obs
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+
+  # ══════════════════════════════════════════
+  # Prometheus — metrics storage
+  # ══════════════════════════════════════════
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: awcp-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-remote-write-receiver"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090" # Prometheus UI → http://localhost:9090
+    networks:
+      - awcp-obs
+
+  # ══════════════════════════════════════════
+  # Tempo — distributed traces storage
+  # ══════════════════════════════════════════
+  tempo:
+    image: grafana/tempo:2.4.1
+    container_name: awcp-tempo
+    restart: unless-stopped
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200" # Tempo HTTP API
+      - "4317" # OTLP gRPC (internal, used by collector)
+    networks:
+      - awcp-obs
+
+  # ══════════════════════════════════════════
+  # Loki — logs storage
+  # ══════════════════════════════════════════
+  loki:
+    image: grafana/loki:2.9.7
+    container_name: awcp-loki
+    restart: unless-stopped
+    command: [ "-config.file=/etc/loki/local-config.yaml" ]
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100" # Loki HTTP API
+    networks:
+      - awcp-obs
+
+  # ══════════════════════════════════════════
+  # Grafana — dashboards & visualization
+  # ══════════════════════════════════════════
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: awcp-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=awcp1234
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000" # Grafana UI → http://localhost:3000
+    networks:
+      - awcp-obs
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
