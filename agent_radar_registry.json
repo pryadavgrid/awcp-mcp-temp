@@ -1,0 +1,39 @@
+{
+  "agents": [
+    {
+      "id": "proc-16388-1780840340",
+      "name": "temporal",
+      "kind": "orchestrator",
+      "framework": "temporal-server",
+      "source": "scan",
+      "status": "quarantined",
+      "quarantine_reason": "missing control hooks: telemetry/observability, feature flags, policy callbacks",
+      "autonomy_profile": "active",
+      "autonomy_reason": null,
+      "failure_count": 0,
+      "owner": "ssrivastava",
+      "runtime": "temporal",
+      "version": "unknown",
+      "write_scopes": [],
+      "feature_flags": {},
+      "telemetry_enabled": false,
+      "policy_callbacks": [],
+      "risk": "medium",
+      "autonomy_ladder": [],
+      "failure_budget": null,
+      "endpoint": "localhost:7233",
+      "transport": "grpc",
+      "capabilities": [],
+      "pid": 16388,
+      "user": "ssrivastava",
+      "cwd": "/Users/ssrivastava/Downloads/files/awcp_agents",
+      "cmdline": "temporal server start-dev",
+      "detected_via": "cmdline",
+      "onboarding_state": "done",
+      "onboarding_workflow_id": "onboard-proc-16388-1780840340",
+      "first_seen": 1780840340.998762,
+      "last_seen": 1781161547.866,
+      "alive": true
+    }
+  ]
+}
