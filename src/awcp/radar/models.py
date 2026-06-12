@@ -63,6 +63,7 @@ class AgentEntry(BaseModel):
     risk: str = "medium"                    # low | medium | high (risk tier)
     autonomy_ladder: list[str] = Field(default_factory=list)
     failure_budget: int | None = None
+    token_budget: int | None = None         # magazine-assigned token budget
 
     # --- connectivity / capability ---
     endpoint: str | None = None

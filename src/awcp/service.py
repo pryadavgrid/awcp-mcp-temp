@@ -152,11 +152,42 @@ def register_agents():
     # Wire up all agent routes
     for agent in _agent_specs:
         app.post(agent.route)(build_agent_endpoint(agent))
-    
+        
     print(f"\n{'='*60}")
-    print(f"✓ Registered {len(_agent_specs)} agents:")
+    print(f"✓ Registered {len(_agent_specs)} agents internally:")
     for agent in _agent_specs:
         print(f"  - {agent.name} -> {agent.route}")
+
+    # Register each discovered agent with the AWCP Radar UI
+    import os
+    import hashlib
+    import getpass
+    
+    radar_url = os.getenv("AWCP_RADAR_URL", "http://localhost:8090")
+    print("\n✓ Pushing agents to Radar registry:")
+    for agent in _agent_specs:
+        try:
+            # Replicate the stable ID logic from registry/service.py
+            stable_id = f"agt_{hashlib.md5(agent.route.encode()).hexdigest()[:8]}"
+            payload = {
+                "id": stable_id,
+                "name": agent.name,
+                "kind": "agent_framework",
+                "framework": "awcp_internal",
+                "runtime": agent.runtime,
+                "owner": agent.owner or os.getenv("AWCP_DEFAULT_OWNER", getpass.getuser()),
+                "endpoint": f"http://localhost:8000{agent.route}",
+                "telemetry_enabled": True,
+                "write_scopes": agent.write_scopes
+            }
+            resp = httpx.post(f"{radar_url}/agents/register", json=payload, timeout=2.0)
+            if resp.status_code == 200:
+                print(f"  - Radar accepted {agent.name} ({stable_id})")
+            else:
+                print(f"  - Radar rejected {agent.name}: {resp.status_code} {resp.text}")
+        except Exception as e:
+            print(f"  - Failed to register {agent.name} with radar: {e}")
+            
     print(f"{'='*60}\n")
 
 
