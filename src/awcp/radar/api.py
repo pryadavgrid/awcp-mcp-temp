@@ -16,7 +16,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -43,8 +43,9 @@ from awcp.radar.temporal.activities.execution import (
 )
 
 # --- Telemetry: link the registry into the shared awcp.observability stack ---
+# (HTTP-route tracing is applied by the gateway via instrument_fastapi(app); this
+# module only exposes an APIRouter, so it does no FastAPI instrumentation itself.)
 from awcp.observability.setup import setup_otel
-from awcp.observability.middleware import instrument_fastapi
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
 setup_otel("awcp-radar")
@@ -271,8 +272,11 @@ async def lifespan(app: FastAPI):
         log.info("radar.shutdown complete")
 
 
-app = FastAPI(title="Agent Radar", lifespan=lifespan)
-instrument_fastapi(app)   # auto-trace every radar HTTP route
+# The radar is no longer a standalone FastAPI app — it is an APIRouter included
+# into the gateway app (awcp.gateway.app). HTTP routes are auto-traced by the
+# gateway's instrument_fastapi(app); an APIRouter has no middleware stack of its
+# own and cannot be instrumented directly.
+router = APIRouter()
 
 
 def _slug(name: str) -> str:
@@ -291,12 +295,12 @@ def _to_dict(e: AgentEntry) -> dict:
     return d
 
 
-@app.get("/agents")
+@router.get("/agents")
 def list_agents() -> list[dict]:
     return [_to_dict(e) for e in REGISTRY.all()]
 
 
-@app.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}")
 def get_agent(agent_id: str) -> dict:
     e = REGISTRY.get(agent_id)
     if not e:
@@ -304,7 +308,7 @@ def get_agent(agent_id: str) -> dict:
     return _to_dict(e)
 
 
-@app.post("/agents/register")
+@router.post("/agents/register")
 def register(req: RegisterRequest) -> dict:
     entry = AgentEntry(
         id=req.id or f"reg-{_slug(req.name)}",
@@ -360,7 +364,7 @@ def _require(agent_id: str) -> AgentEntry:
     return e
 
 
-@app.post("/agents/{agent_id}/gate")
+@router.post("/agents/{agent_id}/gate")
 def gate(agent_id: str, req: GateRequest) -> dict:
     """Evaluate whether an agent may perform an action (the write-action gate).
     An external agent/interceptor calls this before a state-changing action."""
@@ -385,7 +389,7 @@ def gate(agent_id: str, req: GateRequest) -> dict:
             "status": e.status, "autonomy_profile": e.autonomy_profile}
 
 
-@app.post("/agents/{agent_id}/signal")
+@router.post("/agents/{agent_id}/signal")
 def signal(agent_id: str, req: SignalRequest) -> dict:
     """Report an execution outcome. Failures step autonomy down the ladder once
     the failure budget is exhausted (graceful degradation)."""
@@ -425,7 +429,7 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
     }
 
 
-@app.post("/agents/{agent_id}/autonomy")
+@router.post("/agents/{agent_id}/autonomy")
 def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     """Operator override — set the autonomy profile directly (e.g. restore to active)."""
     e = _require(agent_id)
@@ -440,7 +444,7 @@ def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     return {"agent_id": agent_id, "autonomy_profile": updated.autonomy_profile}
 
 
-@app.delete("/agents/{agent_id}")
+@router.delete("/agents/{agent_id}")
 def deregister(agent_id: str) -> dict:
     """Operator action — remove an entry from the inventory (registry hygiene).
     A still-running scanned process will be re-detected on the next scan."""
@@ -481,7 +485,7 @@ class TaskExecCompleteRequest(BaseModel):
     error: str = ""
 
 
-@app.post("/tasks/execution/start")
+@router.post("/tasks/execution/start")
 async def execution_start(req: TaskExecStartRequest) -> dict:
     """Start an AgentExecutionWorkflow for a task prompt."""
     if not (STATE["temporal"] and STATE["client"]):
@@ -508,7 +512,7 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@app.post("/tasks/execution/{task_id}/event")
+@router.post("/tasks/execution/{task_id}/event")
 async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     """Forward a real-time execution event to the running AgentExecutionWorkflow."""
     wf_id = STATE["exec_workflows"].get(task_id)
@@ -526,7 +530,7 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@app.post("/tasks/execution/{task_id}/complete")
+@router.post("/tasks/execution/{task_id}/complete")
 async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> dict:
     """Signal the AgentExecutionWorkflow that the task is done."""
     wf_id = STATE["exec_workflows"].pop(task_id, None)
@@ -547,14 +551,14 @@ async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> d
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@app.get("/events")
+@router.get("/events")
 def events(limit: int = 50) -> list[dict]:
     """The recent-decisions log (newest first). A live registry audit view — not
     the durable Evidence Ledger."""
     return list(_EVENTS)[: max(1, min(limit, _EVENTS.maxlen or 200))]
 
 
-@app.get("/healthz")
+@router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
     by_kind: dict[str, int] = {}
@@ -574,6 +578,6 @@ def healthz() -> dict:
     }
 
 
-@app.get("/")
+@router.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))

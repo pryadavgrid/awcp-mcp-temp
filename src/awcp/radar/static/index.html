@@ -138,7 +138,7 @@ function showTab(t){ TAB=t;
 }
 async function removeAgent(id){
   if(!confirm('Remove "'+id+'" from the registry?')) return;
-  try{ await fetch('/agents/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){}
+  try{ await fetch('agents/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){}
   tick();
 }
 
@@ -191,7 +191,7 @@ function renderInventory(){
 
 async function renderEvents(){
   const box=document.getElementById('events'), empty=document.getElementById('ev-empty');
-  let evs=[]; try{ evs=await (await fetch('/events?limit=80')).json(); }catch(e){ return; }
+  let evs=[]; try{ evs=await (await fetch('events?limit=80')).json(); }catch(e){ return; }
   empty.style.display = evs.length ? 'none':'block';
   box.innerHTML = evs.map(e=>`
     <div class="ev">
@@ -204,8 +204,8 @@ async function renderEvents(){
 
 async function tick(){
   let health={};
-  try{ AGENTS=await (await fetch('/agents')).json(); }catch(e){ return; }
-  try{ health=await (await fetch('/healthz')).json(); }catch(e){}
+  try{ AGENTS=await (await fetch('agents')).json(); }catch(e){ return; }
+  try{ health=await (await fetch('healthz')).json(); }catch(e){}
   document.getElementById('s-total').textContent = AGENTS.length;
   document.getElementById('s-quar').textContent  = health.quarantined ?? AGENTS.filter(a=>a.status==='quarantined').length;
   document.getElementById('s-scans').textContent = health.scan_count ?? '–';
