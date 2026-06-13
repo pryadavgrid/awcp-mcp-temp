@@ -29,6 +29,10 @@ export const API_BASE = API
 
 export const listAgents = () => call('GET', '/user/agents')
 
+// Per-agent token usage + budget (the token monitor feed). Optional: returns []
+// when the laminar module isn't mounted or no agent has reported usage yet.
+export const getUsage = () => call('GET', '/laminar/usage')
+
 export const submitTask = (agent, input) =>
   call('POST', '/user/submit', { agent, input })
 

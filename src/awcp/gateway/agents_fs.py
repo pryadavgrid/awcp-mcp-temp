@@ -37,7 +37,7 @@ AGENTS_DIR = os.getenv(
 # wired up end to end. (The agent kit reads AGENT_RADAR_URL at import time, so it
 # must be in the child env BEFORE the agent starts.)
 AGENT_RADAR_URL = os.getenv(
-    "AWCP_AGENT_RADAR_URL", "http://localhost:8000/awcp/registry"
+    "AWCP_AGENT_RADAR_URL", "http://localhost:8000"
 )
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 AGENT_HOST = os.getenv("AWCP_AGENT_HOST", "localhost")

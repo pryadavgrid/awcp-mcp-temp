@@ -4,10 +4,12 @@
       GET  /user/agents   list every agent in the external bundle (dynamic)
       POST /user/ask       run a chosen agent on a prompt and return the result
 
-  AWCP control-plane routes (/awcp/*)
-      1. Registry (radar)  -> mounted at /awcp/registry  (reuses awcp/radar/api.py
-         verbatim: discovery, onboarding, the write-action gate, the agent-task
-         execution workflows the bundle agents report into, and the web UI)
+  AWCP control-plane routes (mounted at the ROOT, so everything is one port)
+      /agents , /tasks/execution/* , /events , /healthz   the Registry (radar):
+         discovery, onboarding, the write-action gate, the agent-task execution
+         workflows the bundle agents report into, and the web UI at "/"
+      /laminar/*                                            the token monitor
+         (awcp.laminar): per-agent token usage + budgets + the /laminar/ui board
 
 The bundle agents (LangGraph / CrewAI / PydanticAI / arXiv, and any folder you
 add) self-instrument: each one emits its own OTel traces/metrics/logs and pushes
@@ -78,32 +80,40 @@ instrument_requests()          # outbound HTTP calls are auto-traced
 # ── USER routes ───────────────────────────────────────────────────────────────
 app.include_router(user_router)
 
-# ── AWCP control-plane routes ────────────────────────────────────────────────
-#   1. Registry (radar): the full radar API + its web UI, included as a router.
-#      Endpoints become /awcp/registry/agents, /awcp/registry/agents/register,
-#      /awcp/registry/tasks/execution/*, /awcp/registry/healthz, /awcp/registry/.
-app.include_router(radar_router, prefix="/awcp/registry", tags=["AWCP Registry"])
+# ── AWCP control-plane routes (mounted at ROOT for a single-port surface) ────
+#   The radar router carries the REGISTRY endpoints (/agents, /tasks/execution/*,
+#   /events, /healthz) plus the registry web UI at "/", and it has the token
+#   monitor (awcp.laminar) included under /laminar/* (+ /laminar/ui). Mounting at
+#   the root — rather than under a prefix — keeps the bundled web UIs' absolute
+#   links (/laminar/ui, /laminar/usage, /agents …) working, so EVERYTHING is
+#   reachable on this one port:  /user/*  ·  /agents+/tasks+/events  ·  /laminar/*
+app.include_router(radar_router)
 
 
-@app.get("/", tags=["gateway"])
-def index() -> dict:
-    """A map of the gateway's two route groups."""
+@app.get("/api", tags=["gateway"])
+def api_map() -> dict:
+    """Machine-readable map of the gateway's three route groups. The registry
+    dashboard itself is the home page (GET /); the token monitor is /laminar/ui."""
     return {
         "service": "awcp-gateway",
-        "user_routes": {
+        "note": "single port — everything below is on this same host:port",
+        "user": {
             "list_agents": "GET /user/agents",
             "ask": 'POST /user/ask   body: {"agent": "<id from /user/agents>", "input": "<prompt>"}',
         },
-        "awcp_control_plane": {
-            "registry_radar": {
-                "base": "/awcp/registry",
-                "ui": "/awcp/registry/",
-                "list_agents": "GET /awcp/registry/agents",
-                "register": "POST /awcp/registry/agents/register",
-                "gate": "POST /awcp/registry/agents/{agent_id}/gate",
-                "exec_start": "POST /awcp/registry/tasks/execution/start",
-                "events": "GET /awcp/registry/events",
-                "health": "GET /awcp/registry/healthz",
-            }
+        "agents": {
+            "dashboard": "GET /            (registry web UI)",
+            "list": "GET /agents",
+            "register": "POST /agents/register",
+            "gate": "POST /agents/{agent_id}/gate",
+            "exec_start": "POST /tasks/execution/start",
+            "events": "GET /events",
+            "health": "GET /healthz",
+        },
+        "laminar": {
+            "dashboard": "GET /laminar/ui  (token monitor)",
+            "status": "GET /laminar/status",
+            "usage": "GET /laminar/usage",
+            "set_budget": "POST /laminar/budgets/{agent_id}",
         },
     }

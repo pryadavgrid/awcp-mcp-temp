@@ -311,7 +311,11 @@ try:
     _laminar.init_laminar(get_agent=REGISTRY.get,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
-    app.include_router(_laminar.router)
+    # Mount onto the radar's OWN router (not a FastAPI `app` — this module has
+    # none; it is included into the gateway, and into the standalone `app` built
+    # at the bottom of this file). Under the gateway the routes become
+    # /awcp/registry/laminar/*; in a radar-only deployment they sit at /laminar/*.
+    router.include_router(_laminar.router)
     _LAMINAR = True
     log.info("radar.laminar.mounted ui=/laminar/ui")
 except Exception as _exc:                       # radar runs fine without the package
@@ -635,3 +639,24 @@ def healthz() -> dict:
 @router.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+# ----------------------------------------------------------------------
+# Standalone ASGI app — radar-only deployments.
+#
+# The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it under
+# /awcp/registry, so it does NOT use this object. But the radar-centric runners
+# (scripts/run_all.sh, run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app`
+# directly on :8090, with every route — including /laminar/* and the web UI —
+# living at the ROOT, which is what the bundled UI's absolute links expect.
+#
+# Defining `app` at import time is required so `uvicorn awcp.radar.api:app` can
+# find it. When the gateway imports this module the object is simply created and
+# left unused (its lifespan only runs if uvicorn actually serves it).
+# ----------------------------------------------------------------------
+from awcp.observability.middleware import instrument_fastapi, instrument_requests
+
+app = FastAPI(title="Agent Radar", lifespan=lifespan)
+instrument_fastapi(app)        # every radar HTTP route is auto-traced
+instrument_requests()          # outbound HTTP calls (link_mcp, etc.) are traced
+app.include_router(router)     # radar routes + the mounted /laminar/* routes

@@ -177,3 +177,22 @@ body {
 .spinner { width: 13px; height: 13px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.2); border-top-color: var(--blue); display: inline-block; animation: spin 0.7s linear infinite; }
 .spinner.sm { width: 10px; height: 10px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Token budget bar (per-agent token usage / remaining) ─ */
+.tokenbar { margin: 12px 0 2px; padding: 11px 13px; background: var(--panel2); border: 1px solid var(--line); border-radius: 11px; }
+.tb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.tb-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--mut); }
+.tb-state { font-size: 11px; font-family: ui-monospace, monospace; padding: 2px 9px; border-radius: 999px; text-transform: capitalize; }
+.tb-s-ok { color: var(--ok); background: rgba(34, 197, 94, 0.10); }
+.tb-s-warn { color: var(--warn); background: rgba(245, 158, 11, 0.12); }
+.tb-s-exhausted { color: var(--red); background: rgba(239, 68, 68, 0.12); }
+.tb-track { position: relative; height: 9px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.tb-track i { position: absolute; inset: 0 auto 0 0; display: block; border-radius: 6px; transition: width 0.4s ease; }
+.tb-ok .tb-track i { background: var(--ok); }
+.tb-warn .tb-track i { background: var(--warn); }
+.tb-exhausted .tb-track i { background: var(--red); }
+.tb-nums { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--mut); }
+.tb-nums b { color: var(--fg); }
+.tb-rem b { color: var(--ok); }
+.tb-exhausted .tb-rem b { color: var(--red); }
+.tb-tot { margin-left: auto; }

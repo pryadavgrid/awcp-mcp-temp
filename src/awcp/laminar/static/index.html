@@ -98,12 +98,17 @@ async function refresh(){
   $('rows').innerHTML = us.map(u=>{
     const b=u.budget||{}, w=u.window||{};
     const pct=Math.min(100,Math.round((b.ratio||0)*100));
+    // used vs remaining for this sliding window (remaining clamps at 0 once exhausted)
+    const used=(b.used_tokens??w.total_tokens??0);
+    const bud=(b.budget_tokens||0);
+    const rem=Math.max(0, bud-used);
     return `<tr>
       <td><b>${esc(u.name)}</b><br><span class="mono" style="color:var(--muted)">${esc(u.agent_id)}</span></td>
       <td class="mono">${esc(u.autonomy_profile||'—')}</td>
-      <td><div class="bar b-${b.state}"><i style="width:${pct}%"></i></div>
-          <span class="mono">${(w.total_tokens||0).toLocaleString()} tok (${pct}%)</span></td>
-      <td class="mono">${(b.budget_tokens||0).toLocaleString()}</td>
+      <td><div class="bar b-${b.state}" title="${used.toLocaleString()} of ${bud.toLocaleString()} tokens used (${pct}%) · ${rem.toLocaleString()} remaining"><i style="width:${pct}%"></i></div>
+          <span class="mono">${used.toLocaleString()} / ${bud.toLocaleString()} tok (${pct}%)</span>
+          <span class="mono" style="color:var(--muted)"> · ${rem.toLocaleString()} left</span></td>
+      <td class="mono">${bud.toLocaleString()}</td>
       <td><span class="pill s-${b.state}">${b.state}</span></td>
       <td class="mono">${w.calls||0}</td>
       <td class="mono">${esc(w.last_model||'—')}</td>

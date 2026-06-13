@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { API_BASE, listAgents, submitTask, getStatus, approveTask } from './api.js'
+import { API_BASE, listAgents, getUsage, submitTask, getStatus, approveTask } from './api.js'
 import AgentPicker from './components/AgentPicker.jsx'
 import Timeline from './components/Timeline.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import TokenBar from './components/TokenBar.jsx'
 
 const TERMINAL = new Set(['done', 'failed', 'blocked'])
 
@@ -15,9 +16,13 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [backendOk, setBackendOk] = useState(null)
+  const [usage, setUsage] = useState([]) // /laminar/usage rows (per agent)
 
   const selected = agents.find((a) => a.id === selectedId) || null
   const running = status && !TERMINAL.has(status.status)
+  // token usage for the selected agent, matched on the radar/Temporal agent_id
+  const myUsage =
+    usage.find((u) => selected && u.agent_id && u.agent_id === selected.agent_id) || null
 
   // Load agents on mount, then refresh periodically so running-state stays live.
   useEffect(() => {
@@ -31,6 +36,12 @@ export default function App() {
         setSelectedId((prev) => prev || (a[0] && a[0].id) || '')
       } catch {
         if (alive) setBackendOk(false)
+      }
+      try {
+        const u = await getUsage()
+        if (alive) setUsage(u || [])
+      } catch {
+        /* token monitor is optional — leave usage as-is */
       }
     }
     load()
@@ -51,6 +62,12 @@ export default function App() {
         const s = await getStatus(task.agent, task.task_id, task.workflow_id)
         if (!alive) return
         setStatus(s)
+        try {
+          const u = await getUsage()
+          if (alive) setUsage(u || [])
+        } catch {
+          /* token monitor optional */
+        }
         if (TERMINAL.has(s.status)) return // settled — stop polling
       } catch {
         /* transient — keep trying */
@@ -132,6 +149,8 @@ export default function App() {
             onSelect={setSelectedId}
             disabled={busy || running}
           />
+
+          <TokenBar usage={myUsage} />
 
           {selected && (selected.examples || []).length > 0 && (
             <div className="examples">
