@@ -1,0 +1,19 @@
+{
+    "pydantic-writer": {
+        "risk": "medium",
+        "token_budget": 2000,
+        "write_scopes": [
+            "file_system"
+        ]
+    },
+    "ollama": {
+        "risk": "low",
+        "token_budget": 50000,
+        "write_scopes": []
+    },
+    "__default__": {
+        "risk": "high",
+        "token_budget": 500,
+        "write_scopes": []
+    }
+}

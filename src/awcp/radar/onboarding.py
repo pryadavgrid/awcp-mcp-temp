@@ -8,6 +8,8 @@ identically either way.
 from __future__ import annotations
 
 import getpass
+import json
+import os
 
 from awcp.radar.models import AgentEntry, KIND_MCP_SERVER
 
@@ -15,11 +17,33 @@ from awcp.radar.models import AgentEntry, KIND_MCP_SERVER
 def map_identity_patch(entry: AgentEntry) -> dict:
     """Normalize identity fields (owner/runtime/version) like the magazine's
     'map owner, runtime, and declared scope' step. Fills gaps, never overwrites."""
-    return {
+    patch = {
         "owner": entry.owner or getpass.getuser(),
         "runtime": entry.runtime or entry.framework or "unknown",
         "version": entry.version or "unknown",
     }
+
+    # Load centralized magazine to enforce governance policies
+    try:
+        magazine_path = os.path.join(os.path.dirname(__file__), "awcp_magazine.json")
+        with open(magazine_path, "r") as f:
+            magazine = json.load(f)
+            
+        # Lookup the agent by name, or fallback to __default__
+        profile = magazine.get(entry.name) or magazine.get("__default__")
+        
+        if profile:
+            # Overwrite the agent's requested values with the magazine's ground truth
+            patch["risk"] = profile.get("risk", "high")
+            if "token_budget" in profile:
+                patch["token_budget"] = profile["token_budget"]
+            if "write_scopes" in profile:
+                patch["write_scopes"] = profile["write_scopes"]
+    except Exception:
+        # If magazine fails to load, fail closed (high risk)
+        patch["risk"] = "high"
+
+    return patch
 
 
 def decide_status(entry: AgentEntry) -> tuple[str, str | None]:

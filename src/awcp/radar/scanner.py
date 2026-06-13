@@ -10,7 +10,7 @@ from awcp.radar.detectors import scan_all
 from awcp.radar.store import REGISTRY
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
-SCAN_INTERVAL = float(os.getenv("AGENT_RADAR_SCAN_INTERVAL", "5"))
+SCAN_INTERVAL = float(os.getenv("AGENT_RADAR_SCAN_INTERVAL", "30"))
 
 
 class Scanner:

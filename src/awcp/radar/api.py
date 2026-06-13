@@ -278,6 +278,46 @@ async def lifespan(app: FastAPI):
 # own and cannot be instrumented directly.
 router = APIRouter()
 
+# ----------------------------------------------------------------------
+# Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
+# The laminar package never imports radar internals; the radar injects the
+# three hooks it needs right here. A token-budget breach is mapped onto the
+# EXISTING degradation ladder (policy.next_profile), so the EXISTING
+# write-action gate enforces it — no second enforcement mechanism. Removing
+# the src/awcp/laminar folder simply turns all of this off.
+# ----------------------------------------------------------------------
+try:
+    from awcp import laminar as _laminar
+
+    def _on_token_breach(agent_id: str, evaluation: dict) -> None:
+        """Token budget exhausted -> step the agent one rung down its OWN
+        ladder (same path a failure-budget breach takes in /signal)."""
+        e = REGISTRY.get(agent_id)
+        if not e:
+            return
+        ladder = policy.ladder_for(e)
+        if e.autonomy_profile == ladder[-1]:
+            return                              # already at the hard stop
+        new_profile = policy.next_profile(e.autonomy_profile, ladder)
+        why = (f"token budget exhausted "
+               f"({evaluation['used_tokens']}/{evaluation['budget_tokens']} tokens/window)")
+        REGISTRY.patch(agent_id, autonomy_profile=new_profile,
+                       autonomy_reason=why, failure_count=0)
+        METRICS.record_signal(ok=False, degraded=True)
+        _record_event("degraded", agent_id, f"-> {new_profile}", reason=why)
+        log.warning("radar.token.degraded agent_id=%s -> %s (%s)",
+                    agent_id, new_profile, why)
+
+    _laminar.init_laminar(get_agent=REGISTRY.get,
+                          on_breach=_on_token_breach,
+                          record_event=_record_event)
+    app.include_router(_laminar.router)
+    _LAMINAR = True
+    log.info("radar.laminar.mounted ui=/laminar/ui")
+except Exception as _exc:                       # radar runs fine without the package
+    _LAMINAR = False
+    log.warning("radar.laminar.unavailable error=%r", _exc)
+
 
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "agent"
@@ -488,6 +528,10 @@ class TaskExecCompleteRequest(BaseModel):
 @router.post("/tasks/execution/start")
 async def execution_start(req: TaskExecStartRequest) -> dict:
     """Start an AgentExecutionWorkflow for a task prompt."""
+    # token monitor learns task->agent BEFORE any Temporal gating, so token
+    # accounting keeps working when Temporal is unavailable
+    if _LAMINAR:
+        _laminar.on_execution_start(req.model_dump())
     if not (STATE["temporal"] and STATE["client"]):
         log.debug("radar.exec.start.skipped reason=temporal_unavailable task_id=%s", req.task_id)
         return {"ok": False, "reason": "temporal_unavailable"}
@@ -515,24 +559,33 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
 @router.post("/tasks/execution/{task_id}/event")
 async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     """Forward a real-time execution event to the running AgentExecutionWorkflow."""
+    event = req.model_dump()
+    # token monitor taps EVERY event first (taxonomy-free: any event carrying
+    # token counts in .extra/top level is recorded; others are ignored). The
+    # budget evaluation is returned to the agent so a cooperative runtime can
+    # slow down / stop on warn|exhausted — advisory control on top of the
+    # authoritative gate, which starts denying once the breach degrades autonomy.
+    token_budget = _laminar.on_execution_event(task_id, event) if _LAMINAR else None
+
     wf_id = STATE["exec_workflows"].get(task_id)
     if not wf_id or not (STATE["temporal"] and STATE["client"]):
-        return {"ok": False, "reason": "no_active_workflow"}
+        return {"ok": False, "reason": "no_active_workflow", "token_budget": token_budget}
 
-    event = req.model_dump()
     try:
         handle = STATE["client"].get_workflow_handle(wf_id)
         await handle.signal(AgentExecutionWorkflow.push_event, event)
         log.debug("radar.exec.event task_id=%s type=%s", task_id, req.type)
-        return {"ok": True}
+        return {"ok": True, "token_budget": token_budget}
     except Exception as exc:
         log.warning("radar.exec.event.failed task_id=%s error=%r", task_id, exc)
-        return {"ok": False, "reason": str(exc)[:200]}
+        return {"ok": False, "reason": str(exc)[:200], "token_budget": token_budget}
 
 
 @router.post("/tasks/execution/{task_id}/complete")
 async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> dict:
     """Signal the AgentExecutionWorkflow that the task is done."""
+    if _LAMINAR:
+        _laminar.on_execution_complete(task_id, req.model_dump())
     wf_id = STATE["exec_workflows"].pop(task_id, None)
     if not wf_id or not (STATE["temporal"] and STATE["client"]):
         return {"ok": False, "reason": "no_active_workflow"}
@@ -575,6 +628,7 @@ def healthz() -> dict:
         "by_autonomy": by_autonomy,
         "temporal_connected": STATE["temporal"],
         "otel_enabled": _OTEL_ENABLED,
+        "laminar": _laminar.status_summary() if _LAMINAR else {"enabled": False},
     }
 
 

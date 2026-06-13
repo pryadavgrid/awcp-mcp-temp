@@ -50,6 +50,7 @@
   .kind{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--border2)}
   .k-agent_framework{color:var(--k-agent)} .k-mcp_server{color:var(--k-mcp)}
   .k-llm_runtime{color:var(--k-llm)} .k-orchestrator{color:var(--k-orch)}
+  .agid{font-family:var(--mono);font-size:10px;color:var(--muted);user-select:all;word-break:break-all}
   .caps{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .ob{font-size:11px;color:var(--muted)}
   .miss{display:block;font-size:10.5px;color:var(--quar);margin-top:3px}
@@ -70,6 +71,13 @@
   .ev-degraded,.ev-signal{background:var(--quar-bg);color:var(--quar)}
   .ev-onboarded,.ev-registered{background:var(--active-bg);color:var(--active)}
   .ev-removed,.ev-autonomy{background:var(--red-bg);color:var(--red)}
+  /* token-governance events + per-agent token cell (fed by awcp.laminar when
+     mounted; everything degrades to '–' when the laminar package is absent) */
+  .ev-token_warn{background:var(--quar-bg);color:var(--quar)}
+  .ev-token_exhausted{background:var(--red-bg);color:var(--red)}
+  .ev-token_reset{background:var(--active-bg);color:var(--active)}
+  .tok{font-family:var(--mono);font-size:11px}
+  .tok.ok{color:var(--active)} .tok.warn{color:var(--quar)} .tok.exhausted{color:var(--red)}
   .ev .a{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .hidden{display:none}
 </style>
@@ -84,6 +92,8 @@
       <div class="stat"><div class="n" id="s-scans">0</div><div class="l">scans</div></div>
       <div class="stat"><div class="n"><span class="tflag off" id="s-temporal">temporal</span></div><div class="l">onboarding</div></div>
       <div class="stat"><div class="n"><span class="tflag off" id="s-otel">telemetry</span></div><div class="l">observability</div></div>
+      <!-- link to the token control UI (awcp.laminar); the JS keeps it shown when mounted -->
+      <div class="stat" id="s-lam-box"><div class="n"><a href="/laminar/ui" id="s-lam" class="tflag on">Token Monitor ↗</a></div><div class="l">token control</div></div>
     </div>
   </header>
 
@@ -109,7 +119,7 @@
     <table>
       <thead><tr>
         <th>Name</th><th>Kind</th><th>Framework</th><th>Status</th><th>Autonomy</th>
-        <th>Risk</th><th>Budget</th><th>Ladder</th><th>Onboarding</th><th>Caps</th><th>Owner</th><th>Live</th><th></th>
+        <th>Risk</th><th>Budget</th><th>Tokens</th><th>Ladder</th><th>Onboarding</th><th>Caps</th><th>Owner</th><th>Live</th><th></th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -126,7 +136,18 @@
 </div>
 
 <script>
-let TAB='inv', AGENTS=[];
+let TAB='inv', AGENTS=[], TOKENS={};   // TOKENS: agent_id -> /laminar/usage row (when mounted)
+
+// Per-agent token cell — "used/budget (state)" from the laminar monitor.
+// Degrades to '–' when laminar isn't mounted or the agent has no usage yet.
+function tokCell(id){
+  const u=TOKENS[id];
+  if(!u||!u.budget) return '<span class="tok">–</span>';
+  const b=u.budget, w=u.window||{};
+  const pct=Math.min(999,Math.round((b.ratio||0)*100));
+  return `<a href="/laminar/ui" style="text-decoration:none;"><span class="tok ${b.state}" title="window: ${w.total_tokens||0} of ${b.budget_tokens} tokens (${pct}%) · state ${b.state} · open /laminar/ui for detail">`+
+         `${(w.total_tokens||0).toLocaleString()}/${(b.budget_tokens||0).toLocaleString()} ${b.state==='ok'?'':'· '+b.state}</span></a>`;
+}
 function ago(ts){ if(!ts) return ''; const s=Math.max(0,Math.floor(Date.now()/1000-ts)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); }
 function esc(s){ return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 function showTab(t){ TAB=t;
@@ -172,13 +193,14 @@ function renderInventory(){
     const miss=(a.status==='quarantined'&&a.quarantine_reason)?`<span class="miss">${esc(a.quarantine_reason)}</span>`:'';
     const ladder=(a.effective_ladder||[]).join(' → ');
     tr.innerHTML=`
-      <td>${esc(a.name)}</td>
+      <td>${esc(a.name)}<br><span class="agid" title="agent id (as used by /agents and the gate)">${esc(a.id)}</span></td>
       <td><span class="kind k-${a.kind}">${a.kind}</span></td>
       <td class="mono">${a.framework||'–'}</td>
       <td><span class="pill s-${a.status}">${a.status}</span>${miss}</td>
       <td><span class="pill au-${a.autonomy_profile}" title="${esc(a.autonomy_reason||'')}">${(a.autonomy_profile||'active').replace('recommendation_only','rec-only')}</span></td>
       <td><span class="pill risk-${a.risk||'medium'}">${a.risk||'medium'}</span></td>
       <td class="mono" title="failures tolerated before autonomy steps down">${a.effective_budget ?? '–'}</td>
+      <td>${tokCell(a.id)}</td>
       <td><span class="ladder" title="${esc(ladder)}">${ladder}</span></td>
       <td>${ob}</td>
       <td>${caps}</td>
@@ -213,6 +235,17 @@ async function tick(){
   tf.textContent = health.temporal_connected ? 'temporal ✓' : 'inline'; tf.className='tflag '+(health.temporal_connected?'on':'off');
   const ot=document.getElementById('s-otel');
   ot.textContent = health.otel_enabled ? 'OTel ✓' : 'off'; ot.className='tflag '+(health.otel_enabled?'on':'off');
+  // token monitor (awcp.laminar) — guarded: header chip + per-agent cells only
+  // appear when the package is mounted; otherwise the UI is unchanged.
+  const lam=(health.laminar||{});
+  // token-control link is always shown (laminar is part of temp2); per-agent
+  // token cells still only populate when the package reports enabled.
+  if(lam.enabled){
+    try{
+      TOKENS={};
+      (await (await fetch('/laminar/usage')).json()).forEach(u=>{ TOKENS[u.agent_id]=u; });
+    }catch(e){ TOKENS={}; }
+  }
   if(TAB==='inv') renderInventory(); else renderEvents();
 }
 ['f-status','f-kind','f-auton','f-live','f-text'].forEach(id=>
