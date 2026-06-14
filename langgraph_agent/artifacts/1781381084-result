@@ -1,0 +1,1 @@
+The control plane is the part of the router architecture that establishes the network topology and defines what to do with incoming packets.

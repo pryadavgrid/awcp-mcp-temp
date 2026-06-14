@@ -1,0 +1,7 @@
+The recent arXiv paper "Value Bonuses using Ensemble Errors for Exploration in Reinforcement Learning" by Abdul Wahab, Raksha Kumaraswamy, and Martha White proposes a new approach to directed exploration in reinforcement learning. The authors introduce an algorithm called Value Bonuses with Ensemble errors (VBE) that maintains a value bonus for each state-action pair, which is updated based on the ensemble errors of the value function estimates.
+
+The VBE algorithm encourages the agent to visit new states and actions by increasing the value bonus for unvisited state-action pairs. This approach is more efficient than traditional methods, such as optimistic value estimates, which only increase the value bonus retroactively after seeing a higher reward bonus.
+
+The authors demonstrate the effectiveness of VBE in several benchmark environments, showing that it outperforms other exploration strategies in terms of cumulative rewards and visitation counts.
+
+Overall, this paper provides a new perspective on directed exploration in reinforcement learning and offers a promising approach for improving the efficiency of RL algorithms.

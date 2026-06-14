@@ -1,0 +1,15 @@
+Based on the search results, the key ideas in recent mixture-of-experts papers include:
+
+1. **Improved performance**: Mixture of experts (MoE) has shown excellent performance and broad application prospects in various tasks, including language modeling.
+2. **Hierarchical and sparse MoE configurations**: Recent papers have explored hierarchical and sparse MoE configurations to improve model efficiency and scalability.
+3. **Meta-learning approaches**: Meta-learning approaches have been applied to MoE to enable fast adaptation to new tasks and environments.
+4. **Multimodal and multitask learning scenarios**: MoE has been extended to multimodal and multitask learning scenarios, enabling models to handle multiple inputs and outputs simultaneously.
+5. **Real-world deployment cases**: Recent papers have presented real-world deployment cases of MoE in large language models, highlighting its potential for practical applications.
+
+Some notable papers include:
+
+* "A Comprehensive Survey of Mixture-of-Experts: Algorithms, Theory, and Applications" (2023)
+* "Mixture of Experts in Large Language Models" (2025)
+* "A Survey on Mixture of Experts in Large Language Models" (2025)
+
+These papers provide a comprehensive overview of the latest research in MoE, including its algorithms, theory, and applications.
