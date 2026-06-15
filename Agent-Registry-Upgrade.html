@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Registry — Completion Upgrade (Items 1–5)</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --mut:#555; --line:#d9d9d9; --bg:#ffffff;
+    --add:#0a7d33; --addbg:#eafaf0; --old:#9a4a00; --oldbg:#fdf3e7;
+    --code:#0b1020; --codefg:#e7e9ee; --cm:#7fd18b; --kw:#c792ea; --str:#ecc48d; --fn:#82aaff;
+    --accent:#1f6feb; --quar:#b45309; --active:#0a7d33; --red:#b91c1c;
+  }
+  *{box-sizing:border-box}
+  body{font-family:"Times New Roman",Georgia,serif;color:var(--ink);background:var(--bg);
+       line-height:1.6;margin:0}
+  .page{max-width:980px;margin:0 auto;padding:48px 40px 90px}
+  h1{font-size:30px;margin:0 0 4px;border-bottom:3px solid var(--ink);padding-bottom:10px}
+  h2{font-size:23px;margin:46px 0 6px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:18px;margin:26px 0 4px;color:#222}
+  p,li{font-size:16px}
+  .sub{color:var(--mut);font-size:15px;margin-top:0}
+  code{font-family:"SFMono-Regular",Consolas,monospace;background:#f2f3f5;padding:1px 5px;border-radius:4px;font-size:14px}
+  pre{background:var(--code);color:var(--codefg);border-radius:9px;padding:16px 18px;overflow-x:auto;
+      font-family:"SFMono-Regular",Consolas,monospace;font-size:13px;line-height:1.55}
+  pre .cm{color:var(--cm)} pre .kw{color:var(--kw)} pre .str{color:var(--str)} pre .fn{color:var(--fn)}
+  pre .hl{background:rgba(120,200,140,.16);display:inline-block;width:100%}
+  .tag{display:inline-block;font-family:Consolas,monospace;font-size:12px;padding:2px 9px;border-radius:100px;font-weight:bold}
+  .t-before{background:var(--oldbg);color:var(--old);border:1px solid #e8c79a}
+  .t-after{background:var(--addbg);color:var(--add);border:1px solid #aee0bf}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:15px}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:#f6f7f9}
+  .lead{background:#f6f8fc;border-left:4px solid var(--accent);padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0}
+  .note{background:#fff8ec;border-left:4px solid var(--quar);padding:10px 15px;border-radius:0 8px 8px 0;margin:14px 0;font-size:15px}
+  figure{margin:22px 0;text-align:center}
+  figcaption{color:var(--mut);font-size:14px;margin-top:6px;font-style:italic}
+  .legend{font-size:13px;color:var(--mut);margin:6px 0 0}
+  .pill{font-family:Consolas,monospace;font-size:12px;padding:1px 7px;border-radius:100px}
+  .p-active{background:var(--addbg);color:var(--active)} .p-quar{background:var(--oldbg);color:var(--quar)}
+  .p-susp{background:#fdecea;color:var(--red)}
+  ul.tight{margin:6px 0 6px 0}
+  .toc{columns:2;font-size:15px} .toc a{color:var(--accent);text-decoration:none} .toc a:hover{text-decoration:underline}
+  svg{max-width:100%;height:auto}
+  .small{font-size:14px;color:var(--mut)}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Agent Registry — Completion Upgrade</h1>
+<p class="sub">Items 1–5 implemented in <code>telemetry-included/awcp-mcp-temp-main/src/awcp/radar</code> · documents <em>what existed before</em> and <em>what was added</em> · aligned to the AWCP magazine</p>
+
+<div class="lead">
+<b>Purpose.</b> The agent registry (<code>awcp.radar</code>) already covered the magazine's core loop — <i>register → quarantine → gate → degrade → observe</i>. This upgrade closes the gaps that the <b>registry itself</b> owns, deferring the items that belong to other subsystems (approval tokens, the durable evidence ledger, replay/recovery, runtime adapters, Grafana dashboards). After this change the registry is "complete" as a standalone registry.
+</div>
+
+<h2>Contents</h2>
+<div class="toc">
+<a href="#overview">0 · Architecture overview (before → after)</a><br>
+<a href="#item1">1 · Complete the quarantine rule (3 hooks)</a><br>
+<a href="#item2">2 · Per-agent risk tier → degradation budget</a><br>
+<a href="#item3">3 · Operator remove + CLI exclude</a><br>
+<a href="#item4">4 · Inventory UI completeness</a><br>
+<a href="#item5">5 · Recent-decisions (audit) log</a><br>
+<a href="#api">A · New / changed API surface</a><br>
+<a href="#verify">B · Verification (live test output)</a><br>
+</div>
+
+<!-- ============================================================= -->
+<h2 id="overview">0 · Architecture overview</h2>
+<p>The registry is a pipeline. Boxes shaded <span class="pill p-active">green</span> were <b>changed or added</b> in this upgrade; white boxes were already present and untouched.</p>
+
+<figure>
+<svg viewBox="0 0 940 250" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, serif" font-size="13">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#555"/>
+    </marker>
+  </defs>
+  <!-- row 1 pipeline -->
+  <g>
+    <rect x="10"  y="30" width="120" height="48" rx="8" fill="#fff" stroke="#bbb"/>
+    <text x="70"  y="50" text-anchor="middle">Discover</text>
+    <text x="70"  y="66" text-anchor="middle" fill="#777" font-size="11">scanner (psutil)</text>
+
+    <rect x="160" y="30" width="120" height="48" rx="8" fill="#fff" stroke="#bbb"/>
+    <text x="220" y="50" text-anchor="middle">Register</text>
+    <text x="220" y="66" text-anchor="middle" fill="#777" font-size="11">scan + self-declare</text>
+
+    <rect x="310" y="22" width="150" height="64" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+    <text x="385" y="44" text-anchor="middle" font-weight="bold">Onboard / Quarantine</text>
+    <text x="385" y="60" text-anchor="middle" fill="#0a7d33" font-size="11">① now 3 control hooks</text>
+    <text x="385" y="74" text-anchor="middle" fill="#777" font-size="11">Temporal workflow</text>
+
+    <rect x="490" y="30" width="120" height="48" rx="8" fill="#fff" stroke="#bbb"/>
+    <text x="550" y="50" text-anchor="middle">Write Gate</text>
+    <text x="550" y="66" text-anchor="middle" fill="#777" font-size="11">allow / deny</text>
+
+    <rect x="640" y="22" width="140" height="64" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+    <text x="710" y="44" text-anchor="middle" font-weight="bold">Degrade</text>
+    <text x="710" y="60" text-anchor="middle" fill="#0a7d33" font-size="11">② risk-tiered budget</text>
+    <text x="710" y="74" text-anchor="middle" fill="#777" font-size="11">autonomy ladder</text>
+
+    <rect x="810" y="30" width="120" height="48" rx="8" fill="#fff" stroke="#bbb"/>
+    <text x="870" y="50" text-anchor="middle">Observe</text>
+    <text x="870" y="66" text-anchor="middle" fill="#777" font-size="11">OTel traces/metrics</text>
+
+    <line x1="130" y1="54" x2="158" y2="54" stroke="#555" marker-end="url(#ar)"/>
+    <line x1="280" y1="54" x2="308" y2="54" stroke="#555" marker-end="url(#ar)"/>
+    <line x1="460" y1="54" x2="488" y2="54" stroke="#555" marker-end="url(#ar)"/>
+    <line x1="610" y1="54" x2="638" y2="54" stroke="#555" marker-end="url(#ar)"/>
+    <line x1="780" y1="54" x2="808" y2="54" stroke="#555" marker-end="url(#ar)"/>
+  </g>
+  <!-- row 2: cross-cutting additions -->
+  <g>
+    <rect x="310" y="150" width="180" height="58" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+    <text x="400" y="172" text-anchor="middle" font-weight="bold">⑤ Recent-decisions log</text>
+    <text x="400" y="190" text-anchor="middle" fill="#777" font-size="11">ring buffer · GET /events</text>
+
+    <rect x="540" y="150" width="180" height="58" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+    <text x="630" y="172" text-anchor="middle" font-weight="bold">③ Operator actions</text>
+    <text x="630" y="190" text-anchor="middle" fill="#777" font-size="11">DELETE /agents/{id}</text>
+
+    <rect x="120" y="150" width="150" height="58" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+    <text x="195" y="172" text-anchor="middle" font-weight="bold">④ Inventory UI</text>
+    <text x="195" y="190" text-anchor="middle" fill="#777" font-size="11">filters · risk · remove</text>
+
+    <line x1="385" y1="88" x2="400" y2="148" stroke="#5cba7d" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+    <line x1="550" y1="80" x2="630" y2="148" stroke="#5cba7d" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+    <line x1="710" y1="88" x2="410" y2="150" stroke="#5cba7d" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+  </g>
+</svg>
+<figcaption>The five additions placed on the existing registry pipeline. ①–⑤ map to the sections below.</figcaption>
+</figure>
+
+<table>
+<tr><th>#</th><th>Item</th><th>Files touched</th><th>Belongs to the registry because…</th></tr>
+<tr><td>1</td><td>Quarantine requires all three control hooks</td><td><code>onboarding.py</code></td><td>onboarding/quarantine is the registry's job</td></tr>
+<tr><td>2</td><td>Per-agent risk tier → failure budget</td><td><code>models.py</code>, <code>policy.py</code></td><td>the degradation policy lives in the registry</td></tr>
+<tr><td>3</td><td>Operator remove + CLI exclude</td><td><code>store.py</code>, <code>api.py</code>, <code>detectors/base.py</code></td><td>inventory hygiene is the registry's job</td></tr>
+<tr><td>4</td><td>Inventory UI (filters, risk/budget/ladder, remove, missing-hooks)</td><td><code>static/index.html</code></td><td>the registry's control surface</td></tr>
+<tr><td>5</td><td>Recent-decisions log (live audit view)</td><td><code>api.py</code></td><td>registry-local; a stepping stone to the durable ledger</td></tr>
+<tr><td>—</td><td>Agents declare the new hooks/risk</td><td><code>agents/*/awcp_kit.py</code></td><td>so the stricter rule keeps them <span class="pill p-active">active</span></td></tr>
+</table>
+
+<!-- ============================================================= -->
+<h2 id="item1">1 · Complete the quarantine rule</h2>
+<p>The magazine's <i>Onboarding Quarantine</i> says an agent leaves quarantine only after <b>"telemetry, flag wiring, and policy callbacks … observed in execution."</b> The registry previously checked only <b>two</b> of those three.</p>
+
+<figure>
+<svg viewBox="0 0 900 200" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, serif" font-size="13">
+  <defs><marker id="ar2" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#555"/></marker></defs>
+  <rect x="10" y="80" width="90" height="42" rx="8" fill="#f6f7f9" stroke="#bbb"/><text x="55" y="106" text-anchor="middle">agent</text>
+  <!-- check 1 -->
+  <polygon points="150,101 205,72 260,101 205,130" fill="#fff" stroke="#888"/>
+  <text x="205" y="98" text-anchor="middle" font-size="12">telemetry?</text>
+  <text x="205" y="113" text-anchor="middle" font-size="11" fill="#777">hook 1</text>
+  <!-- check 2 (NEW) -->
+  <polygon points="320,101 380,72 440,101 380,130" fill="#eafaf0" stroke="#5cba7d"/>
+  <text x="380" y="98" text-anchor="middle" font-size="12" font-weight="bold">feature</text>
+  <text x="380" y="112" text-anchor="middle" font-size="12" font-weight="bold">flags?</text>
+  <text x="380" y="150" text-anchor="middle" font-size="11" fill="#0a7d33">▲ added</text>
+  <!-- check 3 -->
+  <polygon points="500,101 560,72 620,101 560,130" fill="#fff" stroke="#888"/>
+  <text x="560" y="98" text-anchor="middle" font-size="12">policy</text>
+  <text x="560" y="112" text-anchor="middle" font-size="12">callbacks?</text>
+  <!-- outcomes -->
+  <rect x="690" y="35" width="190" height="40" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+  <text x="785" y="60" text-anchor="middle" font-weight="bold" fill="#0a7d33">ACTIVE (all 3 present)</text>
+  <rect x="690" y="128" width="190" height="44" rx="8" fill="#fdf3e7" stroke="#e0a85b"/>
+  <text x="785" y="148" text-anchor="middle" font-weight="bold" fill="#b45309">QUARANTINED</text>
+  <text x="785" y="164" text-anchor="middle" font-size="11" fill="#b45309">reason = missing hook(s)</text>
+
+  <line x1="100" y1="101" x2="148" y2="101" stroke="#555" marker-end="url(#ar2)"/>
+  <line x1="260" y1="101" x2="318" y2="101" stroke="#555" marker-end="url(#ar2)"/>
+  <line x1="440" y1="101" x2="498" y2="101" stroke="#555" marker-end="url(#ar2)"/>
+  <line x1="620" y1="92" x2="688" y2="60" stroke="#555" marker-end="url(#ar2)"/>
+  <line x1="205" y1="130" x2="700" y2="150" stroke="#b45309" stroke-dasharray="3 3" marker-end="url(#ar2)"/>
+  <text x="430" y="186" font-size="11" fill="#b45309">any "no" → collect into the quarantine reason</text>
+</svg>
+<figcaption>The onboarding gate: a third diamond (<b>feature flags</b>) was inserted between the two existing checks.</figcaption>
+</figure>
+
+<h3><span class="tag t-before">BEFORE</span> &nbsp; <code>radar/onboarding.py · decide_status()</code></h3>
+<pre><span class="kw">def</span> <span class="fn">decide_status</span>(entry):
+    missing = []
+    <span class="kw">if</span> <span class="kw">not</span> entry.telemetry_enabled:
+        missing.append(<span class="str">"telemetry/observability"</span>)
+    <span class="kw">if</span> <span class="kw">not</span> entry.policy_callbacks:        <span class="cm"># only 2 of the magazine's 3 hooks</span>
+        missing.append(<span class="str">"policy callbacks"</span>)
+    <span class="kw">if</span> missing:
+        <span class="kw">return</span> <span class="str">"quarantined"</span>, <span class="str">"missing control hooks: "</span> + <span class="str">", "</span>.join(missing)
+    <span class="kw">return</span> <span class="str">"active"</span>, <span class="kw">None</span></pre>
+
+<h3><span class="tag t-after">AFTER</span></h3>
+<pre><span class="kw">def</span> <span class="fn">decide_status</span>(entry):
+    missing = []
+    <span class="kw">if</span> <span class="kw">not</span> entry.telemetry_enabled:
+        missing.append(<span class="str">"telemetry/observability"</span>)
+<span class="hl">    <span class="kw">if</span> <span class="kw">not</span> entry.feature_flags:           <span class="cm"># ADDED — hook 2: "flag wiring" (magazine)</span></span>
+<span class="hl">        missing.append(<span class="str">"feature flags"</span>)</span>
+    <span class="kw">if</span> <span class="kw">not</span> entry.policy_callbacks:
+        missing.append(<span class="str">"policy callbacks"</span>)
+    <span class="kw">if</span> missing:
+        <span class="kw">return</span> <span class="str">"quarantined"</span>, <span class="str">"missing control hooks: "</span> + <span class="str">", "</span>.join(missing)
+    <span class="kw">return</span> <span class="str">"active"</span>, <span class="kw">None</span></pre>
+
+<div class="note"><b>Knock-on change.</b> Because the rule is now stricter, the four runtime agents had to <b>declare a feature flag</b> at registration or they would have fallen into quarantine. Their shared <code>awcp_kit.register()</code> now sends all three hooks (see the snippet under item 2).</div>
+
+<!-- ============================================================= -->
+<h2 id="item2">2 · Per-agent risk tier → degradation budget</h2>
+<p>The magazine says <b>"each workflow can override thresholds and ladders by risk."</b> Previously the failure budget was a single global constant. Now every agent carries a <b>risk tier</b> that selects how many failures it tolerates before autonomy steps down — and an agent may still pin an explicit budget that wins over its tier.</p>
+
+<figure>
+<svg viewBox="0 0 900 250" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, serif" font-size="13">
+  <defs><marker id="ar3" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- risk tiers -->
+  <rect x="20" y="20" width="150" height="34" rx="17" fill="#eafaf0" stroke="#5cba7d"/><text x="95" y="42" text-anchor="middle">risk = low &nbsp;→ budget 5</text>
+  <rect x="20" y="64" width="150" height="34" rx="17" fill="#fdf3e7" stroke="#e0a85b"/><text x="95" y="86" text-anchor="middle">risk = medium → 3</text>
+  <rect x="20" y="108" width="150" height="34" rx="17" fill="#fdecea" stroke="#d98b86"/><text x="95" y="130" text-anchor="middle">risk = high &nbsp;→ budget 1</text>
+  <text x="95" y="170" text-anchor="middle" font-size="12" fill="#777">explicit failure_budget</text>
+  <text x="95" y="185" text-anchor="middle" font-size="12" fill="#777">overrides the tier</text>
+
+  <rect x="250" y="64" width="150" height="44" rx="8" fill="#fff" stroke="#888"/>
+  <text x="325" y="82" text-anchor="middle">failure_count++</text>
+  <text x="325" y="98" text-anchor="middle" font-size="11" fill="#777">on each /signal failure</text>
+
+  <polygon points="460,86 530,52 600,86 530,120" fill="#fff" stroke="#888"/>
+  <text x="530" y="84" text-anchor="middle" font-size="12">count ≥ budget?</text>
+
+  <!-- ladder -->
+  <rect x="680" y="20" width="200" height="34" rx="8" fill="#eafaf0" stroke="#5cba7d"/><text x="780" y="42" text-anchor="middle"><tspan font-weight="bold">active</tspan> (writes allowed)</text>
+  <rect x="680" y="86" width="200" height="34" rx="8" fill="#fdf3e7" stroke="#e0a85b"/><text x="780" y="108" text-anchor="middle">recommendation_only (deny)</text>
+  <rect x="680" y="152" width="200" height="34" rx="8" fill="#fdecea" stroke="#d98b86"/><text x="780" y="174" text-anchor="middle">suspended (hard stop)</text>
+
+  <line x1="170" y1="86" x2="248" y2="86" stroke="#555" marker-end="url(#ar3)"/>
+  <line x1="400" y1="86" x2="458" y2="86" stroke="#555" marker-end="url(#ar3)"/>
+  <line x1="600" y1="86" x2="678" y2="103" stroke="#555" marker-end="url(#ar3)"/>
+  <text x="618" y="80" font-size="11" fill="#0a7d33">yes → step down one rung</text>
+  <line x1="780" y1="54" x2="780" y2="84" stroke="#999" marker-end="url(#ar3)"/>
+  <line x1="780" y1="120" x2="780" y2="150" stroke="#999" marker-end="url(#ar3)"/>
+</svg>
+<figcaption>Risk tier picks the budget; exhausting the budget steps the agent one rung down its ladder. The gate reads the agent's <i>position</i> on the ladder (index&nbsp;0 = allow, last = hard stop), so rung names are not hardcoded.</figcaption>
+</figure>
+
+<h3><span class="tag t-before">BEFORE</span> &nbsp; <code>radar/policy.py</code></h3>
+<pre><span class="cm"># one global budget for everyone — could not vary "by risk"</span>
+FAILURE_BUDGET = int(os.getenv(<span class="str">"AGENT_RADAR_FAILURE_BUDGET"</span>, <span class="str">"3"</span>))
+
+<span class="kw">def</span> <span class="fn">budget_for</span>(entry):
+    <span class="kw">return</span> entry.failure_budget <span class="kw">if</span> entry.failure_budget <span class="kw">else</span> FAILURE_BUDGET</pre>
+
+<h3><span class="tag t-after">AFTER</span></h3>
+<pre>DEFAULT_FAILURE_BUDGET = int(os.getenv(<span class="str">"AGENT_RADAR_FAILURE_BUDGET"</span>, <span class="str">"3"</span>))
+
+<span class="hl"><span class="cm"># NEW — risk tier maps to a budget; env-tunable so NOTHING is hardcoded.</span></span>
+<span class="hl"><span class="cm"># AGENT_RADAR_RISK_BUDGET="low:5,medium:3,high:1" (tier names + values free)</span></span>
+<span class="hl">RISK_BUDGET = _parse_risk_budget()      <span class="cm"># default seed used only if env unset</span></span>
+
+<span class="kw">def</span> <span class="fn">budget_for</span>(entry):
+    <span class="cm"># precedence: explicit override → risk tier → system default</span>
+    <span class="kw">if</span> entry.failure_budget:
+        <span class="kw">return</span> entry.failure_budget
+<span class="hl">    <span class="kw">return</span> RISK_BUDGET.get(entry.risk, DEFAULT_FAILURE_BUDGET)   <span class="cm"># ADDED</span></span></pre>
+
+<p>The model gained one field (defaulting to <code>"medium"</code>, so existing data is unaffected):</p>
+<pre><span class="cm"># radar/models.py — AgentEntry (and RegisterRequest)</span>
+<span class="hl">risk: str = <span class="str">"medium"</span>            <span class="cm"># low | medium | high  (ADDED)</span></span>
+autonomy_ladder: list[str] = Field(default_factory=list)   <span class="cm"># (already per-agent)</span>
+failure_budget: int | None = None</pre>
+
+<p>And the agents now declare the three hooks + their risk:</p>
+<pre><span class="cm"># agents/*/awcp_kit.py — register() payload</span>
+payload = {
+    <span class="str">"telemetry_enabled"</span>: <span class="kw">True</span>,                          <span class="cm"># hook 1</span>
+<span class="hl">    <span class="str">"feature_flags"</span>: feature_flags <span class="kw">or</span> {<span class="str">"governed_writes"</span>: <span class="kw">True</span>},  <span class="cm"># hook 2 (ADDED)</span></span>
+    <span class="str">"policy_callbacks"</span>: [<span class="str">"pre_write_gate"</span>, <span class="str">"on_signal"</span>],     <span class="cm"># hook 3</span>
+    <span class="str">"write_scopes"</span>: write_scopes,
+<span class="hl">    <span class="str">"risk"</span>: risk,                                       <span class="cm"># ADDED (default "medium")</span></span>
+}</pre>
+
+<!-- ============================================================= -->
+<h2 id="item3">3 · Operator remove + CLI exclude</h2>
+<p>A real registry lets an operator <b>forget</b> an entry (hygiene), and should not list developer CLIs that merely embed an LLM SDK.</p>
+
+<h3><span class="tag t-after">ADDED</span> &nbsp; <code>radar/store.py</code> — a removal method</h3>
+<pre><span class="kw">def</span> <span class="fn">remove</span>(self, agent_id):
+    <span class="cm"># operator action — drop an entry. A still-running scanned process</span>
+    <span class="cm"># will simply be re-detected on the next scan; a stale entry stays gone.</span>
+    <span class="kw">with</span> self._lock:
+        existed = self._entries.pop(agent_id, <span class="kw">None</span>) <span class="kw">is</span> <span class="kw">not</span> <span class="kw">None</span>
+        <span class="kw">if</span> existed: self._persist()
+        <span class="kw">return</span> existed</pre>
+
+<h3><span class="tag t-after">ADDED</span> &nbsp; <code>radar/api.py</code> — the DELETE endpoint</h3>
+<pre><span class="fn">@app.delete</span>(<span class="str">"/agents/{agent_id}"</span>)
+<span class="kw">def</span> <span class="fn">deregister</span>(agent_id):
+    <span class="kw">if</span> <span class="kw">not</span> REGISTRY.remove(agent_id):
+        <span class="kw">raise</span> HTTPException(404, <span class="str">"agent not found"</span>)
+    _record_event(<span class="str">"removed"</span>, agent_id, <span class="str">"operator removed entry"</span>)   <span class="cm"># audit (item 5)</span>
+    <span class="kw">return</span> {<span class="str">"ok"</span>: <span class="kw">True</span>, <span class="str">"removed"</span>: agent_id}</pre>
+
+<h3><span class="tag t-after">ADDED</span> &nbsp; <code>radar/detectors/base.py</code> — exclude developer CLIs</h3>
+<pre>EXCLUDE_HINTS = (
+    <span class="str">"claude.app"</span>, <span class="str">"cursor.app"</span>, <span class="str">"vscode"</span>, <span class="str">"slack"</span>, <span class="str">"spotify"</span>, ...,
+<span class="hl">    <span class="cm"># developer CLIs that embed an LLM SDK but are not governable agents</span></span>
+<span class="hl">    <span class="str">"cloudcode_cli"</span>, <span class="str">"claude-code"</span>, <span class="str">"claude code"</span>,        <span class="cm"># ADDED</span></span>
+)   <span class="cm"># still extensible at runtime via the AGENT_RADAR_EXCLUDE env var</span></pre>
+
+<!-- ============================================================= -->
+<h2 id="item4">4 · Inventory UI completeness</h2>
+<p>The UI became a real control surface rather than a flat list. Additions (in <code>radar/static/index.html</code>):</p>
+<ul class="tight">
+<li><b>Filter bar</b> — by status, kind, autonomy, liveness, and free-text search.</li>
+<li><b>New columns</b> — <code>Risk</code>, <code>Budget</code> (effective), and <code>Ladder</code>.</li>
+<li><b>Missing-hooks</b> — a quarantined row now shows <i>which</i> hooks are missing inline, not just on hover.</li>
+<li><b>Remove (✕)</b> per row → calls <code>DELETE /agents/{id}</code>.</li>
+<li><b>Tabs</b> — <i>Inventory</i> and <i>Recent decisions</i> (item 5).</li>
+</ul>
+
+<p>To feed the new columns, the API now returns the <b>effective</b> policy on each agent:</p>
+<pre><span class="cm"># radar/api.py — _to_dict()</span>
+d = e.model_dump()
+<span class="hl">d[<span class="str">"effective_budget"</span>] = policy.budget_for(e)    <span class="cm"># ADDED — after risk/override resolution</span></span>
+<span class="hl">d[<span class="str">"effective_ladder"</span>] = policy.ladder_for(e)    <span class="cm"># ADDED</span></span>
+<span class="kw">return</span> d</pre>
+
+<pre><span class="cm">// index.html — client-side filtering (excerpt)</span>
+<span class="kw">function</span> <span class="fn">passesFilters</span>(a){
+  <span class="kw">if</span>(fStatus && a.status !== fStatus) <span class="kw">return</span> <span class="kw">false</span>;
+  <span class="kw">if</span>(fKind   && a.kind   !== fKind)   <span class="kw">return</span> <span class="kw">false</span>;
+  <span class="kw">if</span>(fAuton  && a.autonomy_profile !== fAuton) <span class="kw">return</span> <span class="kw">false</span>;
+  <span class="cm">// …live + free-text search…</span>
+  <span class="kw">return</span> <span class="kw">true</span>;
+}
+<span class="cm">// a quarantined row surfaces the reason (which hooks are missing):</span>
+<span class="kw">const</span> miss = (a.status===<span class="str">'quarantined'</span> && a.quarantine_reason)
+    ? <span class="str">`&lt;span class="miss"&gt;${a.quarantine_reason}&lt;/span&gt;`</span> : <span class="str">''</span>;</pre>
+
+<figure>
+<svg viewBox="0 0 900 150" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, monospace" font-size="12">
+  <rect x="10" y="10" width="880" height="130" rx="8" fill="#fff" stroke="#ccc"/>
+  <line x1="10" y1="40" x2="890" y2="40" stroke="#eee"/>
+  <text x="22" y="30" fill="#777">Name</text><text x="150" y="30" fill="#777">Status</text>
+  <text x="300" y="30" fill="#777">Autonomy</text><text x="420" y="30" fill="#777">Risk</text>
+  <text x="490" y="30" fill="#777">Budget</text><text x="560" y="30" fill="#777">Ladder</text><text x="850" y="30" fill="#777">✕</text>
+  <text x="22" y="62">high-risk</text>
+  <rect x="150" y="50" width="56" height="16" rx="8" fill="#eafaf0"/><text x="158" y="62" fill="#0a7d33">active</text>
+  <rect x="300" y="50" width="100" height="16" rx="8" fill="#fdf3e7"/><text x="308" y="62" fill="#b45309">rec-only</text>
+  <rect x="420" y="50" width="40" height="16" rx="8" fill="#fdecea"/><text x="427" y="62" fill="#b91c1c">high</text>
+  <text x="505" y="62">1</text><text x="560" y="62" fill="#777">active → recommendation_only → suspended</text>
+  <text x="850" y="62" fill="#b91c1c">✕</text>
+  <text x="22" y="100">no-flags-bot</text>
+  <rect x="150" y="88" width="92" height="16" rx="8" fill="#fdf3e7"/><text x="158" y="100" fill="#b45309">quarantined</text>
+  <text x="150" y="120" fill="#b45309" font-size="11">missing control hooks: feature flags</text>
+  <text x="420" y="100" fill="#777">medium</text><text x="505" y="100" fill="#777">3</text>
+  <text x="850" y="100" fill="#b91c1c">✕</text>
+</svg>
+<figcaption>Mock of the upgraded inventory rows: risk/budget/ladder columns, an inline missing-hooks note on the quarantined row, and a per-row remove control.</figcaption>
+</figure>
+
+<!-- ============================================================= -->
+<h2 id="item5">5 · Recent-decisions (audit) log</h2>
+<p>A registry-local, in-memory ring buffer captures the last N governance events so operators can <b>see what the registry just did</b>. This is explicitly <b>not</b> the durable Evidence Ledger (a separate subsystem) — it is the runnable stepping-stone toward it.</p>
+
+<figure>
+<svg viewBox="0 0 900 230" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, serif" font-size="13">
+  <defs><marker id="ar5" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#555"/></marker></defs>
+  <!-- producers -->
+  <rect x="20" y="20" width="190" height="30" rx="6" fill="#fff" stroke="#bbb"/><text x="30" y="40">POST /gate → record_event("gate")</text>
+  <rect x="20" y="60" width="190" height="30" rx="6" fill="#fff" stroke="#bbb"/><text x="30" y="80">POST /signal → "degraded"/"signal"</text>
+  <rect x="20" y="100" width="190" height="30" rx="6" fill="#fff" stroke="#bbb"/><text x="30" y="120">onboard → "onboarded"</text>
+  <rect x="20" y="140" width="190" height="30" rx="6" fill="#fff" stroke="#bbb"/><text x="30" y="160">register / DELETE → "registered"/"removed"</text>
+  <!-- buffer -->
+  <rect x="330" y="60" width="190" height="90" rx="8" fill="#eafaf0" stroke="#5cba7d"/>
+  <text x="425" y="86" text-anchor="middle" font-weight="bold">_EVENTS</text>
+  <text x="425" y="104" text-anchor="middle" font-size="11" fill="#777">deque(maxlen=200)</text>
+  <text x="425" y="122" text-anchor="middle" font-size="11" fill="#777">newest first, bounded</text>
+  <!-- consumers -->
+  <rect x="630" y="50" width="240" height="34" rx="6" fill="#fff" stroke="#bbb"/><text x="640" y="72">GET /events?limit=N</text>
+  <rect x="630" y="110" width="240" height="34" rx="6" fill="#fff" stroke="#bbb"/><text x="640" y="132">UI "Recent decisions" tab</text>
+
+  <line x1="210" y1="35"  x2="328" y2="80"  stroke="#555" marker-end="url(#ar5)"/>
+  <line x1="210" y1="75"  x2="328" y2="95"  stroke="#555" marker-end="url(#ar5)"/>
+  <line x1="210" y1="115" x2="328" y2="110" stroke="#555" marker-end="url(#ar5)"/>
+  <line x1="210" y1="155" x2="328" y2="125" stroke="#555" marker-end="url(#ar5)"/>
+  <line x1="520" y1="95"  x2="628" y2="67"  stroke="#555" marker-end="url(#ar5)"/>
+  <line x1="520" y1="115" x2="628" y2="127" stroke="#555" marker-end="url(#ar5)"/>
+</svg>
+<figcaption>Every governance decision appends an event; the bounded buffer is read by the API and the UI. No durable store, no extra dependency.</figcaption>
+</figure>
+
+<h3><span class="tag t-after">ADDED</span> &nbsp; <code>radar/api.py</code> — the buffer, recorder, and endpoint</h3>
+<pre><span class="kw">from</span> collections <span class="kw">import</span> deque
+
+<span class="cm"># in-memory ring buffer — bounded, newest-first, registry-local audit view</span>
+_EVENTS = deque(maxlen=int(os.getenv(<span class="str">"AGENT_RADAR_EVENTS_MAX"</span>, <span class="str">"200"</span>)))
+
+<span class="kw">def</span> <span class="fn">_record_event</span>(kind, agent_id=<span class="str">""</span>, detail=<span class="str">""</span>, **extra):
+    _EVENTS.appendleft({<span class="str">"ts"</span>: time.time(), <span class="str">"kind"</span>: kind,
+                        <span class="str">"agent_id"</span>: agent_id, <span class="str">"detail"</span>: detail, **extra})
+
+<span class="fn">@app.get</span>(<span class="str">"/events"</span>)
+<span class="kw">def</span> <span class="fn">events</span>(limit: int = 50):
+    <span class="kw">return</span> list(_EVENTS)[:limit]      <span class="cm"># newest first</span></pre>
+
+<p>Recorders were threaded into the existing decision points (alongside the OTel counters that were already there):</p>
+<pre><span class="cm"># gate endpoint</span>
+_m_gate.add(1, {<span class="str">"decision"</span>: decision[<span class="str">"decision"</span>], <span class="str">"mode"</span>: decision[<span class="str">"mode"</span>]})  <span class="cm"># existed</span>
+<span class="hl">_record_event(<span class="str">"gate"</span>, agent_id, <span class="str">f"{decision['decision']} ({decision['mode']})"</span>)  <span class="cm"># ADDED</span></span>
+
+<span class="cm"># signal endpoint — only when the ladder actually steps down</span>
+<span class="kw">if</span> result[<span class="str">"degraded"</span>]:
+    _m_degrade.add(1, {<span class="str">"to"</span>: updated.autonomy_profile})                       <span class="cm"># existed</span>
+<span class="hl">    _record_event(<span class="str">"degraded"</span>, agent_id, <span class="str">f"-> {updated.autonomy_profile}"</span>)   <span class="cm"># ADDED</span></span></pre>
+
+<!-- ============================================================= -->
+<h2 id="api">A · New / changed API surface</h2>
+<table>
+<tr><th>Method &amp; path</th><th>Status</th><th>What it does now</th></tr>
+<tr><td><code>POST /agents/register</code></td><td>changed</td><td>accepts <code>risk</code>, <code>feature_flags</code>, <code>autonomy_ladder</code>, <code>failure_budget</code>; logs a <code>registered</code> event</td></tr>
+<tr><td><code>GET /agents</code></td><td>changed</td><td>each agent now includes <code>risk</code>, <code>effective_budget</code>, <code>effective_ladder</code></td></tr>
+<tr><td><code>POST /agents/{id}/gate</code></td><td>changed</td><td>position-based ladder (no hardcoded rung names); logs a <code>gate</code> event</td></tr>
+<tr><td><code>POST /agents/{id}/signal</code></td><td>changed</td><td>uses the agent's risk-derived budget; logs <code>signal</code>/<code>degraded</code></td></tr>
+<tr><td><code>DELETE /agents/{id}</code></td><td><b>new</b></td><td>operator removal; logs a <code>removed</code> event</td></tr>
+<tr><td><code>GET /events?limit=N</code></td><td><b>new</b></td><td>the recent-decisions log (newest first)</td></tr>
+</table>
+
+<!-- ============================================================= -->
+<h2 id="verify">B · Verification (live test output)</h2>
+<p>All five items were exercised against a running radar:</p>
+<pre><span class="cm"># 1) quarantine now requires feature flags</span>
+register {telemetry:true, policy_callbacks:[x]}  (no flags)
+   → status = <span style="color:#ffb454">quarantined</span> | reason = "missing control hooks: feature flags"
+
+<span class="cm"># 2) risk → budget, with the effective ladder exposed</span>
+high-risk  risk=high   effective_budget=1   ladder=[active, recommendation_only, suspended]
+low-risk   risk=low    effective_budget=5   ladder=[active, recommendation_only, suspended]
+
+<span class="cm"># 3) high-risk (budget 1) degrades after a single failure</span>
+POST /signal {ok:false}  → degraded=True  → recommendation_only
+
+<span class="cm"># 4) the gate then denies the degraded agent</span>
+POST /gate  → decision=deny  ("autonomy reduced ('recommendation_only') — recommend, do not execute")
+
+<span class="cm"># 5) the recent-decisions log (newest first)</span>
+gate        hi   deny (recommendation_only)
+degraded    hi   -> recommendation_only
+registered  lo   low-risk
+registered  hi   high-risk
+
+<span class="cm"># operator removal</span>
+DELETE /agents/lo  → {"ok": true, "removed": "lo"}</pre>
+
+<div class="lead" style="margin-top:34px">
+<b>Scope note.</b> Everything here lives inside the registry (<code>awcp.radar</code>) plus the agents' shared <code>awcp_kit.py</code>. The deferred items — expiring approval tokens, the durable evidence ledger, replay/recovery, runtime workflow adapters, and Grafana dashboards — are separate subsystems and were intentionally <b>not</b> built here. With items 1–5 the registry is complete as a standalone agent registry.
+</div>
+
+<p class="small" style="margin-top:30px;border-top:1px solid var(--line);padding-top:12px">
+Generated as project documentation for the AWCP agent-registry upgrade. Backward compatible: the new model fields default safely (<code>risk="medium"</code>, empty ladder/flags), so pre-existing persisted entries load unchanged.
+</p>
+
+</div>
+</body>
+</html>

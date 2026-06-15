@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AWCP · temp2 — Architecture & Flow</title>
+<style>
+  :root{
+    --paper:#F4EFE3; --paper2:#EDE6D5; --card:#FBF8F0; --ink:#1A1712; --ink2:#5A5247;
+    --line:#1A1712; --hair:#CDC3AC;
+    --orange:#9A3412; --orange-bg:rgba(154,52,18,.10);
+    --teal:#0F6E63;   --teal-bg:rgba(15,110,99,.12);
+    --cyan:#1D5C84;   --cyan-bg:rgba(29,92,132,.12);
+    --gold:#9A6B12;   --gold-bg:rgba(154,107,18,.12);
+    --plum:#6D3A6A;   --plum-bg:rgba(109,58,106,.12);
+    --green:#3F6B1E;  --green-bg:rgba(63,107,30,.12);
+    --shadow:0 1px 0 rgba(26,23,18,.12), 0 6px 20px rgba(26,23,18,.06);
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.5;
+       -webkit-font-smoothing:antialiased;padding:0 0 80px}
+  .wrap{max-width:1240px;margin:0 auto;padding:0 24px}
+  header.top{border-bottom:2px solid var(--line);padding:34px 0 24px;margin-bottom:8px;background:
+    linear-gradient(180deg,var(--paper2),var(--paper))}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--orange);font-weight:700}
+  h1{font-size:34px;margin:8px 0 6px;letter-spacing:-.02em}
+  h1 em{font-style:normal;color:var(--orange)}
+  .sub{color:var(--ink2);max-width:880px;font-size:15px}
+  .meta{font-family:var(--mono);font-size:11.5px;color:var(--ink2);margin-top:14px;display:flex;gap:18px;flex-wrap:wrap}
+  .meta b{color:var(--ink)}
+
+  h2.section{font-size:13px;font-family:var(--mono);letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink);margin:46px 0 16px;padding-bottom:8px;border-bottom:1px solid var(--hair);
+    display:flex;align-items:center;gap:10px}
+  h2.section .n{display:inline-flex;width:24px;height:24px;border:1.5px solid var(--line);border-radius:6px;
+    align-items:center;justify-content:center;font-size:12px;background:var(--card)}
+
+  /* tech legend */
+  .legend{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:10px}
+  .chip{background:var(--card);border:1px solid var(--hair);border-radius:10px;padding:11px 13px;box-shadow:var(--shadow)}
+  .chip .name{font-weight:700;font-size:13.5px;display:flex;align-items:center;gap:8px}
+  .chip .role{color:var(--ink2);font-size:12px;margin-top:3px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .d-orange{background:var(--orange)} .d-teal{background:var(--teal)} .d-cyan{background:var(--cyan)}
+  .d-gold{background:var(--gold)} .d-plum{background:var(--plum)} .d-green{background:var(--green)}
+
+  /* layered architecture */
+  .stack{display:flex;flex-direction:column;gap:0}
+  .layer{position:relative;border:1px solid var(--hair);border-radius:14px;background:var(--paper2);
+    padding:14px 16px 16px;margin:0 0 10px;box-shadow:var(--shadow)}
+  .layer > .ltitle{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink2);margin-bottom:11px;display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+  .layer > .ltitle .tag{font-weight:700;color:var(--ink)}
+  .layer > .ltitle .hint{font-weight:400;text-transform:none;letter-spacing:0;font-family:var(--sans);font-size:12px}
+  .row{display:grid;gap:10px}
+  .cols-5{grid-template-columns:repeat(5,1fr)} .cols-4{grid-template-columns:repeat(4,1fr)}
+  .cols-3{grid-template-columns:repeat(3,1fr)} .cols-2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:900px){.cols-5,.cols-4,.cols-3{grid-template-columns:repeat(2,1fr)}}
+
+  .node{background:var(--card);border:1px solid var(--hair);border-left:3px solid var(--ink2);
+    border-radius:10px;padding:11px 12px;min-height:74px}
+  .node h4{margin:0;font-size:13.5px;display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .node .port{font-family:var(--mono);font-size:10px;color:#fff;background:var(--ink);border-radius:5px;padding:1px 6px}
+  .node p{margin:5px 0 0;font-size:11.7px;color:var(--ink2)}
+  .node .techs{margin-top:8px;display:flex;flex-wrap:wrap;gap:4px}
+  .t{font-family:var(--mono);font-size:9.5px;border-radius:5px;padding:1px 6px;border:1px solid transparent;white-space:nowrap}
+  .t.orange{color:var(--orange);background:var(--orange-bg);border-color:rgba(154,52,18,.25)}
+  .t.teal{color:var(--teal);background:var(--teal-bg);border-color:rgba(15,110,99,.25)}
+  .t.cyan{color:var(--cyan);background:var(--cyan-bg);border-color:rgba(29,92,132,.25)}
+  .t.gold{color:var(--gold);background:var(--gold-bg);border-color:rgba(154,107,18,.25)}
+  .t.plum{color:var(--plum);background:var(--plum-bg);border-color:rgba(109,58,106,.25)}
+  .t.green{color:var(--green);background:var(--green-bg);border-color:rgba(63,107,30,.25)}
+  .b-orange{border-left-color:var(--orange)} .b-teal{border-left-color:var(--teal)}
+  .b-cyan{border-left-color:var(--cyan)} .b-gold{border-left-color:var(--gold)}
+  .b-plum{border-left-color:var(--plum)} .b-green{border-left-color:var(--green)}
+
+  .flowdown{display:flex;justify-content:center;margin:-2px 0 8px}
+  .flowdown span{font-family:var(--mono);font-size:10.5px;color:var(--ink2);background:var(--paper);
+    border:1px solid var(--hair);border-radius:20px;padding:3px 12px}
+
+  /* magazine ribbon */
+  .ribbon{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+  @media(max-width:900px){.ribbon{grid-template-columns:repeat(2,1fr)}}
+  .step{background:var(--card);border:1px solid var(--hair);border-radius:12px;padding:12px;box-shadow:var(--shadow)}
+  .step .num{font-family:var(--mono);font-size:10px;color:var(--orange);font-weight:700}
+  .step h4{margin:4px 0 5px;font-size:13px}
+  .step p{margin:0;font-size:11.3px;color:var(--ink2)}
+  .step .built{margin-top:8px;font-family:var(--mono);font-size:9.5px;padding:2px 7px;border-radius:5px;display:inline-block}
+  .ok{color:var(--green);background:var(--green-bg)}
+  .partial{color:var(--gold);background:var(--gold-bg)}
+  .concept{color:var(--ink2);background:rgba(90,82,71,.10)}
+
+  /* loops */
+  .loops{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:900px){.loops{grid-template-columns:1fr}}
+  .loop{background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:16px;box-shadow:var(--shadow)}
+  .loop h3{margin:0 0 4px;font-size:15px}
+  .loop .lead{font-size:12px;color:var(--ink2);margin-bottom:10px}
+  .loop svg{width:100%;height:auto;display:block}
+
+  /* numbered flow list */
+  .flowlist{counter-reset:s;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:900px){.flowlist{grid-template-columns:1fr}}
+  .fl{background:var(--card);border:1px solid var(--hair);border-radius:10px;padding:11px 13px 11px 44px;position:relative;font-size:12.5px}
+  .fl::before{counter-increment:s;content:counter(s);position:absolute;left:11px;top:11px;width:22px;height:22px;
+    background:var(--ink);color:var(--paper);border-radius:50%;font-family:var(--mono);font-size:11px;
+    display:flex;align-items:center;justify-content:center}
+  .fl b{color:var(--ink)} .fl code{font-family:var(--mono);font-size:11px;background:var(--paper2);padding:1px 5px;border-radius:4px}
+
+  .note{background:var(--orange-bg);border:1px solid rgba(154,52,18,.25);border-radius:10px;padding:12px 14px;font-size:12.5px;color:var(--ink);margin-top:14px}
+  .note b{color:var(--orange)}
+  footer{margin-top:50px;border-top:1px solid var(--hair);padding-top:16px;font-size:11.5px;color:var(--ink2);font-family:var(--mono)}
+  .keyrow{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--ink2)}
+  .keyrow span{display:flex;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+
+<header class="top"><div class="wrap">
+  <div class="eyebrow">AWCP · MCP · temp2 — System Reference</div>
+  <h1>Agent Workforce Control Plane — <em>Architecture &amp; Flow</em></h1>
+  <p class="sub">A control plane that sits <b>above</b> existing agent runtimes: it registers and onboards agents, gates their write actions, accounts for tokens, degrades autonomy gracefully on failure, and records everything as telemetry. This diagram maps every component actually built in <code>awcp-mcp-temp2</code> onto the six-step operating model from the AWCP Magazine, and names the technology behind each box.</p>
+  <div class="meta">
+    <span><b>Radar / Registry</b> :8090</span>
+    <span><b>MCP server</b> :8002 (SSE+stdio)</span>
+    <span><b>Temporal</b> engine :7233 · UI :8233</span>
+    <span><b>Grafana</b> :3000</span>
+    <span><b>Prometheus</b> :9090</span>
+    <span><b>Ollama</b> :11434</span>
+    <span><b>OTLP</b> :4317</span>
+  </div>
+  <div class="keyrow">
+    <span><i class="dot d-orange"></i>Edge / API</span>
+    <span><i class="dot d-teal"></i>Control-plane core</span>
+    <span><i class="dot d-cyan"></i>Orchestration</span>
+    <span><i class="dot d-gold"></i>Observability &amp; tokens</span>
+    <span><i class="dot d-plum"></i>Execution / agents</span>
+    <span><i class="dot d-green"></i>Models &amp; external</span>
+  </div>
+</div></header>
+
+<div class="wrap">
+
+  <!-- ============ MAGAZINE RIBBON ============ -->
+  <h2 class="section"><span class="n">M</span>Magazine operating model — and what temp2 actually implements</h2>
+  <div class="ribbon">
+    <div class="step"><div class="num">STEP 01</div><h4>Register &amp; attach control hooks</h4>
+      <p>Detect/register agents; quarantine the under-instrumented until telemetry, flags &amp; policy callbacks are present.</p>
+      <span class="built ok">BUILT · radar registry + onboarding + observed-telemetry loop</span></div>
+    <div class="step"><div class="num">STEP 02</div><h4>Orchestrate workflows</h4>
+      <p>Drive each agent step as a durable activity over existing runtimes; never replace them.</p>
+      <span class="built ok">BUILT · Temporal workflows + MCP primitives</span></div>
+    <div class="step"><div class="num">STEP 03</div><h4>Gate write actions</h4>
+      <p>Every state-changing call evaluated against policy; quarantined / degraded agents are denied.</p>
+      <span class="built partial">BUILT · position-based gate (OPA / approval tokens = roadmap)</span></div>
+    <div class="step"><div class="num">STEP 04</div><h4>Degrade autonomy gracefully</h4>
+      <p>On failure/token-budget signals, step autonomy active → recommendation-only → suspended.</p>
+      <span class="built ok">BUILT · degradation ladder + Laminar token budgets</span></div>
+    <div class="step"><div class="num">STEP 05</div><h4>Replay &amp; recover</h4>
+      <p>Replayable ledger with step history &amp; safe resume points.</p>
+      <span class="built partial">PARTIAL · Temporal history + events log (Evidence Ledger = roadmap)</span></div>
+    <div class="step"><div class="num">STEP 06</div><h4>Generate instrumentation patches</h4>
+      <p>For agents missing hooks, propose a telemetry/flag/policy patch before they leave quarantine.</p>
+      <span class="built concept">CONCEPT · Codex / Claude Code patch step</span></div>
+  </div>
+
+  <!-- ============ TECH LEGEND ============ -->
+  <h2 class="section"><span class="n">T</span>Technology stack — what each piece does</h2>
+  <div class="legend">
+    <div class="chip"><div class="name"><span class="dot d-orange"></span>FastAPI · Uvicorn · Starlette</div><div class="role">ASGI services: Agent Service, MCP SSE app, Radar API, Control Surface. Routes auto-traced by OTel middleware.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-orange"></span>Pydantic v2</div><div class="role">Typed models &amp; validation — <code>AgentEntry</code>, <code>AgentSpec</code>, request/response schemas, registry persistence shape.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-teal"></span>MCP / FastMCP</div><div class="role">Control server exposing governed primitives over stdio + SSE; MCP <i>client</i> used by Temporal activities &amp; radar <code>link_mcp</code> tool enumeration.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-cyan"></span>Temporal (temporalio)</div><div class="role">Durable orchestration — onboarding &amp; execution workflows, activities, in-process workers, signals, two namespaced task queues.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-gold"></span>OpenTelemetry SDK</div><div class="role">Traces + metrics + logs per service; <code>radar_span()</code>, auto-instrumentation, <code>traceparent</code> propagation, trace_id in logs.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-gold"></span>OTel Collector → Tempo / Prometheus / Loki / Grafana</div><div class="role">OTLP:4317 ingest fanned out to traces (Tempo), metrics (Prometheus), logs (Loki); dashboards in Grafana. Docker-composed.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-gold"></span>Laminar (awcp.laminar + lmnr)</div><div class="role">Per-agent token ledger + budget control; emits <code>gen_ai.*</code> spans, fires breach → degradation; optional dual-export to Laminar cloud; <code>/laminar/ui</code>.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-teal"></span>psutil + lsof</div><div class="role">Radar scanner — framework-agnostic process detection: module match, AI-name regex, and behavioural LLM-port connections.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-green"></span>Ollama</div><div class="role">Local LLM runtime (gemma2:2b, llama3.1:8b) via <code>ollama_client</code> — also the behavioural detection signal (:11434).</div></div>
+    <div class="chip"><div class="name"><span class="dot d-green"></span>OpenAI SDK → NVIDIA NIM / Groq</div><div class="role">OpenAI-compatible calls to hosted models: DeepSeek, Llama-3.3-70B, Llama-3.2-Vision, and Groq advanced search.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-plum"></span>DDGS · arXiv · Groq search</div><div class="role">Tool layer: <code>web_search</code> (DuckDuckGo), <code>advanced_web_search</code> (Groq/DDGS), <code>arxiv_search</code>.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-plum"></span>Pillow</div><div class="role">Image validation / downscale / re-encode for the llama-vision agent before the VLM call.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-teal"></span>JSON persistence</div><div class="role">Registry store (<code>agent_radar_registry.json</code>, self-registered survivors) + Laminar JSONL evidence ledger.</div></div>
+    <div class="chip"><div class="name"><span class="dot d-cyan"></span>OPA · Approval Tokens</div><div class="role">Magazine target for the write gate. Today implemented as a position-based policy gate; OPA &amp; expiring tokens are the roadmap.</div></div>
+  </div>
+
+  <!-- ============ LAYERED ARCHITECTURE ============ -->
+  <h2 class="section"><span class="n">A</span>Layered architecture (top = operators, bottom = models)</h2>
+  <div class="stack">
+
+    <!-- L0 -->
+    <div class="layer">
+      <div class="ltitle"><span class="tag">① Operator &amp; UI surface</span><span class="hint">browsers — humans watch and intervene here</span></div>
+      <div class="row cols-5">
+        <div class="node b-orange"><h4>Control UI</h4><p>Prompt entry, per-step progress, links to Temporal history.</p><div class="techs"><span class="t orange">FastAPI static</span></div></div>
+        <div class="node b-orange"><h4>Radar Dashboard <span class="port">:8090</span></h4><p>Live registry, status, gate &amp; degradation, events log.</p><div class="techs"><span class="t orange">FastAPI</span><span class="t gold">OTel</span></div></div>
+        <div class="node b-gold"><h4>Laminar UI</h4><p>Token usage / budget per agent — <code>/laminar/ui</code>.</p><div class="techs"><span class="t gold">Laminar</span></div></div>
+        <div class="node b-cyan"><h4>Temporal Web <span class="port">:8233</span></h4><p>Workflow &amp; activity event history, replay view.</p><div class="techs"><span class="t cyan">Temporal</span></div></div>
+        <div class="node b-gold"><h4>Grafana <span class="port">:3000</span></h4><p>awcp-overview dashboards: traces, metrics, logs.</p><div class="techs"><span class="t gold">Grafana</span><span class="t gold">Tempo/Prom/Loki</span></div></div>
+      </div>
+    </div>
+    <div class="flowdown"><span>HTTP / SSE ↓ &nbsp; OTLP telemetry ↑</span></div>
+
+    <!-- L1 -->
+    <div class="layer">
+      <div class="ltitle"><span class="tag">② Edge / API services</span><span class="hint">ASGI entrypoints — every route is OTel-instrumented</span></div>
+      <div class="row cols-4">
+        <div class="node b-orange"><h4>Control Surface API</h4><p>Browser↔Temporal bridge; starts governed workflow, injects <code>traceparent</code>, polls history.</p><div class="techs"><span class="t orange">FastAPI</span><span class="t cyan">Temporal client</span><span class="t gold">OTel</span></div></div>
+        <div class="node b-orange"><h4>Agent Service <span class="port">:8001</span></h4><p>Direct agent endpoints; quarantine gate + governance profile (<code>CURRENT_PROFILE</code>) + execution events.</p><div class="techs"><span class="t orange">FastAPI</span><span class="t plum">agents</span></div></div>
+        <div class="node b-teal"><h4>MCP Control Server <span class="port">:8002</span></h4><p>Governed primitives over SSE + stdio: <code>agent_route</code> · <code>execute_tool</code> · <code>agent_generate</code> + workspace/registry tools.</p><div class="techs"><span class="t teal">FastMCP</span><span class="t orange">Starlette SSE</span></div></div>
+        <div class="node b-orange"><h4>Radar API <span class="port">:8090</span></h4><p><code>/agents</code> · <code>/gate</code> · <code>/signal</code> · <code>/tasks/execution/*</code> · <code>/events</code>; mounts Laminar router.</p><div class="techs"><span class="t orange">FastAPI</span><span class="t gold">Laminar</span></div></div>
+      </div>
+    </div>
+    <div class="flowdown"><span>governed calls ↓</span></div>
+
+    <!-- L2 -->
+    <div class="layer">
+      <div class="ltitle"><span class="tag">③ Control-plane core — governance &amp; orchestration</span><span class="hint">the radar registry + Temporal engine</span></div>
+      <div class="row cols-4">
+        <div class="node b-teal"><h4>Scanner</h4><p>Framework-agnostic detection: known modules, AI-name regex, behavioural LLM-port connections; excludes IDE/desktop apps.</p><div class="techs"><span class="t teal">psutil</span><span class="t teal">lsof</span></div></div>
+        <div class="node b-teal"><h4>Registry Store</h4><p>In-memory + JSON persist; scan reconcile, liveness/prune, self-register upsert. Default status <b>quarantined</b>.</p><div class="techs"><span class="t teal">Pydantic</span><span class="t teal">JSON</span></div></div>
+        <div class="node b-teal"><h4>Onboarding pipeline</h4><p><code>map_identity</code> (magazine profile) → <code>quarantine_check</code> (<code>decide_status</code>) → <code>link_mcp</code> → <code>admit</code>. Temporal or inline.</p><div class="techs"><span class="t cyan">Temporal</span><span class="t teal">MCP client</span></div></div>
+        <div class="node b-teal"><h4>Write-action Gate</h4><p><code>evaluate_action</code>: reads always allowed; quarantined/degraded writes denied; position-based ladder.</p><div class="techs"><span class="t cyan">policy</span><span class="t cyan">OPA*</span></div></div>
+      </div>
+      <div class="row cols-4" style="margin-top:10px">
+        <div class="node b-teal"><h4>Degradation Ladder</h4><p><code>apply_signal</code> / <code>next_profile</code>: failure budget &amp; token breaches step autonomy active→recommendation→suspended, by risk.</p><div class="techs"><span class="t teal">policy</span><span class="t gold">Laminar breach</span></div></div>
+        <div class="node b-green"><h4>Telemetry Reconciler <span class="port">NEW</span></h4><p>Observed-telemetry closed loop: real events promote out of quarantine; silence &gt; TTL re-quarantines. Pure <code>decide_status</code>.</p><div class="techs"><span class="t green">observed OTel</span><span class="t teal">reconcile</span></div></div>
+        <div class="node b-cyan"><h4>Temporal Engine <span class="port">:7233</span></h4><p>Durable workflows + in-process workers on two namespaced queues (onboarding, execution).</p><div class="techs"><span class="t cyan">Temporal</span></div></div>
+        <div class="node b-teal"><h4>Events / Audit log</h4><p>Ring buffer of governance decisions (onboard/gate/degrade/telemetry) — live audit view.</p><div class="techs"><span class="t teal">in-memory</span></div></div>
+      </div>
+      <div class="row cols-3" style="margin-top:10px">
+        <div class="node b-cyan"><h4>Onboarding Workflow</h4><p>map_identity · quarantine_check · link_mcp · admit — each a recorded activity.</p><div class="techs"><span class="t cyan">workflow</span></div></div>
+        <div class="node b-cyan"><h4>Execution / Governance Workflow</h4><p>Drives reason→gate→tool→generate as discrete activities; signals <code>push_event</code>/<code>finish</code>; degrades on failure.</p><div class="techs"><span class="t cyan">workflow</span><span class="t teal">MCP gateway</span></div></div>
+        <div class="node b-cyan"><h4>Dynamic-Ask Workflow</h4><p>Interactive follow-up variant of the governed loop.</p><div class="techs"><span class="t cyan">workflow</span></div></div>
+      </div>
+    </div>
+    <div class="flowdown"><span>MCP tool calls ↓ (stdio / SSE)</span></div>
+
+    <!-- L3 -->
+    <div class="layer">
+      <div class="ltitle"><span class="tag">④ Execution layer — agents, tools, runtime adapters</span><span class="hint">driven step-by-step by the workflow via MCP</span></div>
+      <div class="row cols-3">
+        <div class="node b-plum"><h4>MCP Primitives</h4><p><code>agent_route</code> (reason) · <code>execute_tool</code> (gated) · <code>agent_generate</code> (synthesize). Self-declared per-agent router/tool/model.</p><div class="techs"><span class="t teal">FastMCP</span></div></div>
+        <div class="node b-plum"><h4>Runtime adapters</h4><p><code>ollama_client</code>, <code>tool_runtime</code>, <code>event_runtime</code> (execution events + governance ContextVars).</p><div class="techs"><span class="t plum">runtime</span></div></div>
+        <div class="node b-plum"><h4>Tools</h4><p><code>web_search</code>, <code>advanced_web_search</code>, <code>arxiv_search</code> — each tool call a recorded, gated activity.</p><div class="techs"><span class="t plum">DDGS</span><span class="t plum">Groq</span><span class="t plum">arXiv</span></div></div>
+      </div>
+      <div class="row cols-5" style="margin-top:10px">
+        <div class="node b-plum"><h4>ollama</h4><p>Direct chat (gemma2:2b).</p><div class="techs"><span class="t green">Ollama</span></div></div>
+        <div class="node b-plum"><h4>ollama-search</h4><p>Route→search→grounded answer (llama3.1:8b).</p><div class="techs"><span class="t green">Ollama</span><span class="t plum">DDGS</span></div></div>
+        <div class="node b-plum"><h4>ollama-advanced</h4><p>Advanced search variant.</p><div class="techs"><span class="t plum">Groq</span></div></div>
+        <div class="node b-plum"><h4>deepseek / llama-vision</h4><p>NVIDIA-hosted chat &amp; VLM.</p><div class="techs"><span class="t green">NVIDIA NIM</span><span class="t plum">Pillow</span></div></div>
+        <div class="node b-plum"><h4>triage</h4><p>Governed single-level delegation to a sub-agent.</p><div class="techs"><span class="t teal">delegation</span></div></div>
+      </div>
+    </div>
+    <div class="flowdown"><span>model &amp; web calls ↓</span></div>
+
+    <!-- L4 -->
+    <div class="layer">
+      <div class="ltitle"><span class="tag">⑤ Models &amp; external services</span><span class="hint">the runtimes the control plane governs but does not own</span></div>
+      <div class="row cols-4">
+        <div class="node b-green"><h4>Ollama runtime <span class="port">:11434</span></h4><p>Local gemma2:2b / llama3.1:8b.</p><div class="techs"><span class="t green">Ollama</span></div></div>
+        <div class="node b-green"><h4>NVIDIA NIM</h4><p>DeepSeek, Llama-3.3-70B, Llama-3.2-Vision (OpenAI-compatible).</p><div class="techs"><span class="t green">OpenAI SDK</span></div></div>
+        <div class="node b-green"><h4>Groq</h4><p>Fast inference for advanced web search.</p><div class="techs"><span class="t green">OpenAI SDK</span></div></div>
+        <div class="node b-green"><h4>DuckDuckGo / arXiv</h4><p>External search corpora behind the tools.</p><div class="techs"><span class="t plum">DDGS</span><span class="t plum">arXiv API</span></div></div>
+      </div>
+    </div>
+
+    <!-- cross-cut -->
+    <div class="layer" style="border-style:dashed;background:var(--card)">
+      <div class="ltitle"><span class="tag">⑥ Cross-cutting · Observability &amp; token control</span><span class="hint">every layer above emits into this — the magazine's "observability hooks"</span></div>
+      <div class="row cols-5">
+        <div class="node b-gold"><h4>OTel SDK</h4><p>Spans, metrics, logs per service; <code>traceparent</code> across process boundaries.</p><div class="techs"><span class="t gold">OpenTelemetry</span></div></div>
+        <div class="node b-gold"><h4>OTel Collector <span class="port">:4317</span></h4><p>OTLP ingest, fan-out pipelines.</p><div class="techs"><span class="t gold">Collector</span></div></div>
+        <div class="node b-gold"><h4>Tempo · Prometheus · Loki</h4><p>Traces · metrics · logs stores.</p><div class="techs"><span class="t gold">Tempo</span><span class="t gold">Prom</span><span class="t gold">Loki</span></div></div>
+        <div class="node b-gold"><h4>Laminar bridge + exporter</h4><p>Token ledger/budget; <code>gen_ai.*</code> spans; optional dual-export to Laminar cloud.</p><div class="techs"><span class="t gold">Laminar</span></div></div>
+        <div class="node b-gold"><h4>Grafana <span class="port">:3000</span></h4><p>Unified dashboards over all three signals.</p><div class="techs"><span class="t gold">Grafana</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ END-TO-END FLOWS ============ -->
+  <h2 class="section"><span class="n">F1</span>Flow A — Admission &amp; onboarding (how an agent earns trust)</h2>
+  <div class="flowlist">
+    <div class="fl"><b>Detect or self-register.</b> Scanner finds a process via <code>psutil/lsof</code> (module/regex/LLM-port), <i>or</i> an agent calls <code>POST /agents/register</code>.</div>
+    <div class="fl"><b>Land fail-closed.</b> Registry store upserts the entry as <code>status=quarantined</code>, <code>telemetry_enabled=false</code>.</div>
+    <div class="fl"><b>Onboard.</b> Temporal <code>AgentOnboardingWorkflow</code> (or inline) runs <code>map_identity</code> → <code>quarantine_check</code> → <code>link_mcp</code> → <code>admit</code>; each step is a recorded activity/span.</div>
+    <div class="fl"><b>Quarantine gate.</b> <code>decide_status</code> requires telemetry + feature-flags + policy-callbacks. Missing any ⇒ stays quarantined (visible, read-only).</div>
+    <div class="fl"><b>Prove telemetry.</b> A real execution event/signal triggers <code>_observe_telemetry</code> → hook proven → re-gate → <b>active</b>. <span class="t green">closed loop</span></div>
+    <div class="fl"><b>Stay honest.</b> Reconciler re-quarantines any agent whose telemetry goes silent past <code>AGENT_RADAR_TELEMETRY_TTL</code>.</div>
+  </div>
+
+  <h2 class="section"><span class="n">F2</span>Flow B — Governed execution (a prompt → answer, fully traced)</h2>
+  <div class="flowlist">
+    <div class="fl"><b>Prompt in.</b> Browser → Control Surface API; a <code>traceparent</code> is created and injected.</div>
+    <div class="fl"><b>Start workflow.</b> Control API starts the Temporal execution/governance workflow on the execution queue.</div>
+    <div class="fl"><b>Admission.</b> Workflow checks registry/quarantine status via the MCP gateway before any work.</div>
+    <div class="fl"><b>Reason → gate → tool.</b> <code>agent_route</code> decides SEARCH/ANSWER; the policy gate approves a tool call; <code>execute_tool</code> runs <code>web_search</code> etc.</div>
+    <div class="fl"><b>Generate.</b> <code>agent_generate</code> → <code>ollama_client</code> / OpenAI SDK → Ollama / NVIDIA / Groq returns tokens.</div>
+    <div class="fl"><b>Report telemetry.</b> Each step posts to <code>/tasks/execution/*</code> &amp; emits OTel spans; Laminar tallies tokens; <code>_observe_telemetry</code> keeps status fresh.</div>
+    <div class="fl"><b>Govern in-flight.</b> Failures → degradation ladder; token-budget breach → <code>on_breach</code> → autonomy steps down → gate starts denying writes.</div>
+    <div class="fl"><b>Return &amp; record.</b> Result flows back to the browser; Temporal UI holds the replayable history; Grafana + Laminar UI show traces/metrics/tokens.</div>
+  </div>
+
+  <!-- ============ GOVERNANCE LOOPS ============ -->
+  <h2 class="section"><span class="n">L</span>The two governance feedback loops</h2>
+  <div class="loops">
+
+    <div class="loop">
+      <h3>Loop 1 · Observed-telemetry quarantine <span class="t green" style="font-size:10px">added this session</span></h3>
+      <div class="lead">Quarantine status is a projection of <b>observed</b> telemetry, not a declared flag. Closes the gap between "claims instrumented" and "is instrumented."</div>
+      <svg viewBox="0 0 520 220" role="img" aria-label="Observed telemetry loop">
+        <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#1A1712"/></marker></defs>
+        <rect x="18" y="20" width="150" height="48" rx="9" fill="#FBF8F0" stroke="#0F6E63" stroke-width="1.5"/>
+        <text x="93" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#1A1712">QUARANTINED</text>
+        <text x="93" y="56" text-anchor="middle" font-size="10" fill="#5A5247">writes denied · reads ok</text>
+
+        <rect x="352" y="20" width="150" height="48" rx="9" fill="#FBF8F0" stroke="#3F6B1E" stroke-width="1.5"/>
+        <text x="427" y="40" text-anchor="middle" font-size="12" font-weight="700" fill="#1A1712">ACTIVE</text>
+        <text x="427" y="56" text-anchor="middle" font-size="10" fill="#5A5247">writes allowed</text>
+
+        <rect x="150" y="150" width="220" height="48" rx="9" fill="#FBF8F0" stroke="#9A6B12" stroke-width="1.5"/>
+        <text x="260" y="170" text-anchor="middle" font-size="11" font-weight="700" fill="#1A1712">OTel events / signals observed</text>
+        <text x="260" y="186" text-anchor="middle" font-size="10" fill="#5A5247">/tasks/execution/* · /signal</text>
+
+        <!-- arrows -->
+        <path d="M168,44 L348,44" fill="none" stroke="#1A1712" stroke-width="1.5" marker-end="url(#ah)"/>
+        <text x="258" y="36" text-anchor="middle" font-size="9.5" fill="#3F6B1E" font-weight="700">_observe_telemetry → decide_status</text>
+
+        <path d="M150,174 C90,174 60,120 70,70" fill="none" stroke="#3F6B1E" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M370,174 C440,174 460,120 450,70" fill="none" stroke="#9A6B12" stroke-width="1.5" marker-end="url(#ah)"/>
+        <path d="M427,68 C427,110 360,150 372,150" fill="none" stroke="#9A3412" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+        <text x="468" y="120" text-anchor="middle" font-size="9" fill="#9A3412">silence&gt;TTL ⇒ re-quarantine</text>
+      </svg>
+    </div>
+
+    <div class="loop">
+      <h3>Loop 2 · Failure / token budget → autonomy ladder</h3>
+      <div class="lead">Execution outcomes and token-budget breaches step autonomy down a per-agent, risk-tuned ladder; the write gate enforces it. The magazine's "degrade gracefully."</div>
+      <svg viewBox="0 0 520 220" role="img" aria-label="Degradation ladder loop">
+        <defs><marker id="ah2" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#1A1712"/></marker></defs>
+        <rect x="30" y="24" width="130" height="40" rx="9" fill="#FBF8F0" stroke="#3F6B1E" stroke-width="1.5"/>
+        <text x="95" y="48" text-anchor="middle" font-size="12" font-weight="700" fill="#1A1712">active</text>
+        <rect x="195" y="24" width="170" height="40" rx="9" fill="#FBF8F0" stroke="#9A6B12" stroke-width="1.5"/>
+        <text x="280" y="48" text-anchor="middle" font-size="12" font-weight="700" fill="#1A1712">recommendation-only</text>
+        <rect x="400" y="24" width="95" height="40" rx="9" fill="#FBF8F0" stroke="#9A3412" stroke-width="1.5"/>
+        <text x="447" y="48" text-anchor="middle" font-size="12" font-weight="700" fill="#1A1712">suspended</text>
+
+        <path d="M160,44 L193,44" fill="none" stroke="#1A1712" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <path d="M365,44 L398,44" fill="none" stroke="#1A1712" stroke-width="1.5" marker-end="url(#ah2)"/>
+
+        <rect x="120" y="135" width="280" height="56" rx="9" fill="#FBF8F0" stroke="#0F6E63" stroke-width="1.5"/>
+        <text x="260" y="157" text-anchor="middle" font-size="11" font-weight="700" fill="#1A1712">signals in</text>
+        <text x="260" y="173" text-anchor="middle" font-size="10" fill="#5A5247">/signal failures · Laminar on_breach (tokens)</text>
+        <text x="260" y="186" text-anchor="middle" font-size="9.5" fill="#5A5247">apply_signal · next_profile (by risk)</text>
+
+        <path d="M200,135 C150,110 110,90 95,66" fill="none" stroke="#9A6B12" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <path d="M300,135 C330,110 380,95 420,66" fill="none" stroke="#9A3412" stroke-width="1.5" marker-end="url(#ah2)"/>
+        <text x="262" y="120" text-anchor="middle" font-size="9" fill="#5A5247">budget exhausted ⇒ step down ⇒ write gate denies</text>
+      </svg>
+    </div>
+  </div>
+
+  <div class="note"><b>Scope note.</b> This diagram reflects <b>awcp-mcp-temp2</b> as built. "Observed-telemetry quarantine" (Loop 1, the reconciler + <code>_observe_telemetry</code>) was added in this session; the token <i>instant-block</i> guard lives in the separate <code>awcp_agents</code> build, whereas temp2's Laminar performs <i>graceful</i> degradation (Loop 2). Boxes marked <span class="t cyan">OPA*</span>, Approval Tokens, and the Evidence Ledger are the magazine's roadmap targets — today represented by the position-based policy gate, Temporal history, and the in-memory events log respectively.</div>
+
+  <footer>
+    AWCP · MCP · temp2 — architecture &amp; flow reference · generated from source under <code>src/awcp/</code> + <code>observability/</code> · aligned to docs/Agent-Workforce-Control-Plane-Magazine.html
+  </footer>
+</div>
+</body>
+</html>

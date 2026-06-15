@@ -1,0 +1,1017 @@
+{
+    "__inputs": [],
+    "__requires": [],
+    "annotations": {
+        "list": []
+    },
+    "description": "AWCP Agent Workforce Control Plane \u2014 Observability Overview",
+    "editable": true,
+    "graphTooltip": 1,
+    "id": null,
+    "panels": [
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 0,
+                "y": 0
+            },
+            "id": 1,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "orientation": "auto",
+                "textMode": "auto",
+                "colorMode": "background"
+            },
+            "title": "Total /ask Requests (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_ask_requests_total[1h])",
+                    "legendFormat": "Requests"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 6,
+                "y": 0
+            },
+            "id": 2,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background",
+                "thresholds": {
+                    "steps": [
+                        {
+                            "color": "green",
+                            "value": null
+                        },
+                        {
+                            "color": "yellow",
+                            "value": 0.9
+                        },
+                        {
+                            "color": "red",
+                            "value": 0.95
+                        }
+                    ]
+                }
+            },
+            "title": "Success Rate",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "rate(awcp_awcp_ask_requests_total{status=\"success\"}[5m]) / rate(awcp_awcp_ask_requests_total[5m])",
+                    "legendFormat": "Success Rate"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 12,
+                "y": 0
+            },
+            "id": 3,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "P95 /ask Latency (s)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_ask_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 Latency"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 18,
+                "y": 0
+            },
+            "id": 4,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background",
+                "thresholds": {
+                    "steps": [
+                        {
+                            "color": "green",
+                            "value": null
+                        },
+                        {
+                            "color": "yellow",
+                            "value": 1
+                        },
+                        {
+                            "color": "red",
+                            "value": 5
+                        }
+                    ]
+                }
+            },
+            "title": "Tool Failures (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_tool_failures_total[1h])",
+                    "legendFormat": "Failures"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 3
+            },
+            "id": 5,
+            "title": "/ask Duration Over Time",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.50, rate(awcp_awcp_ask_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P50"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_ask_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.99, rate(awcp_awcp_ask_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P99"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 3
+            },
+            "id": 6,
+            "title": "Tool Calls Rate by Tool Name",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "rate(awcp_awcp_tool_calls_total[5m])",
+                    "legendFormat": "{{tool}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 11
+            },
+            "id": 7,
+            "title": "Ollama LLM Latency P95 by Model",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_ollama_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 {{model}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 11
+            },
+            "id": 8,
+            "title": "LLM Decision: Direct vs Tools",
+            "type": "piechart",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_llm_decision_total[1h])",
+                    "legendFormat": "{{decision}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 10,
+                "w": 24,
+                "x": 0,
+                "y": 19
+            },
+            "id": 9,
+            "title": "Recent Error Logs (Loki)",
+            "type": "logs",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "loki",
+                        "uid": "loki-uid"
+                    },
+                    "expr": "{job=~\"awcp.*\"} |= \"ERROR\"",
+                    "legendFormat": ""
+                }
+            ]
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 29
+            },
+            "id": 10,
+            "title": "Temporal Orchestration",
+            "type": "row"
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 0,
+                "y": 30
+            },
+            "id": 11,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "Workflows Started (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_workflow_started_total[1h])",
+                    "legendFormat": "Started"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 6,
+                "y": 30
+            },
+            "id": 12,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "Workflows Completed (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_workflow_completed_total[1h])",
+                    "legendFormat": "Completed"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 12,
+                "y": 30
+            },
+            "id": 13,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "Workflow P95 Duration (s)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_workflow_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 18,
+                "y": 30
+            },
+            "id": 14,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background",
+                "thresholds": {
+                    "steps": [
+                        {
+                            "color": "green",
+                            "value": null
+                        },
+                        {
+                            "color": "yellow",
+                            "value": 1
+                        },
+                        {
+                            "color": "red",
+                            "value": 5
+                        }
+                    ]
+                }
+            },
+            "title": "Activity Failures (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_activity_failures_total[1h])",
+                    "legendFormat": "Failures"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 33
+            },
+            "id": 15,
+            "title": "Workflow Duration Over Time",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.50, rate(awcp_awcp_workflow_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P50 {{status}}"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_workflow_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 {{status}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 33
+            },
+            "id": 16,
+            "title": "Activity Duration by Activity Name",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_activity_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 {{activity}}"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.50, rate(awcp_awcp_activity_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P50 {{activity}}"
+                }
+            ]
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 41
+            },
+            "id": 17,
+            "title": "MCP & LLM",
+            "type": "row"
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 0,
+                "y": 42
+            },
+            "id": 18,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "MCP Subprocess Spawns (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_mcp_subprocess_spawns_total[1h])",
+                    "legendFormat": "Spawns"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 6,
+                "y": 42
+            },
+            "id": 19,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "MCP Call P95 Duration (s)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_mcp_call_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 12,
+                "y": 42
+            },
+            "id": 20,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background"
+            },
+            "title": "Ollama Calls (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_ollama_calls_total[1h])",
+                    "legendFormat": "{{model}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 3,
+                "w": 6,
+                "x": 18,
+                "y": 42
+            },
+            "id": 21,
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "background",
+                "thresholds": {
+                    "steps": [
+                        {
+                            "color": "green",
+                            "value": null
+                        },
+                        {
+                            "color": "yellow",
+                            "value": 1
+                        },
+                        {
+                            "color": "red",
+                            "value": 5
+                        }
+                    ]
+                }
+            },
+            "title": "Ollama Failures (1h)",
+            "type": "stat",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "increase(awcp_awcp_ollama_failures_total[1h])",
+                    "legendFormat": "Failures"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 45
+            },
+            "id": 22,
+            "title": "MCP Call Duration by Tool",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_mcp_call_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 {{tool}}"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.50, rate(awcp_awcp_mcp_call_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P50 {{tool}}"
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 45
+            },
+            "id": 23,
+            "title": "Ollama Duration by Model",
+            "type": "timeseries",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.95, rate(awcp_awcp_ollama_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P95 {{model}}"
+                },
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "histogram_quantile(0.50, rate(awcp_awcp_ollama_duration_seconds_bucket[5m]))",
+                    "legendFormat": "P50 {{model}}"
+                }
+            ]
+        },
+        {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 53
+            },
+            "id": 24,
+            "title": "Traces (Tempo)",
+            "type": "row"
+        },
+        {
+            "gridPos": {
+                "h": 12,
+                "w": 24,
+                "x": 0,
+                "y": 54
+            },
+            "id": 25,
+            "title": "Recent AWCP Traces",
+            "type": "traces",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "tempo",
+                        "uid": "tempo-uid"
+                    },
+                    "queryType": "nativeSearch",
+                    "refId": "A",
+                    "limit": 20,
+                    "serviceName": ""
+                }
+            ]
+        },
+        {
+            "gridPos": {
+                "h": 10,
+                "w": 24,
+                "x": 0,
+                "y": 66
+            },
+            "id": 26,
+            "title": "All Logs \u2014 All Services (Loki)",
+            "type": "logs",
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "loki",
+                        "uid": "loki-uid"
+                    },
+                    "expr": "{job=~\"awcp.*\"}",
+                    "legendFormat": ""
+                }
+            ]
+        },
+        {
+            "id": 90,
+            "type": "row",
+            "title": "Token Economics (Laminar)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 77
+            },
+            "panels": []
+        },
+        {
+            "id": 91,
+            "type": "stat",
+            "title": "Tokens (last 1h)",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 0,
+                "y": 78
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "value"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum(increase(awcp_awcp_laminar_tokens_total[1h]))"
+                }
+            ]
+        },
+        {
+            "id": 92,
+            "type": "stat",
+            "title": "LLM calls (last 1h)",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 6,
+                "y": 78
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "value"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum(increase(awcp_awcp_laminar_llm_calls_total[1h]))"
+                }
+            ]
+        },
+        {
+            "id": 93,
+            "type": "stat",
+            "title": "Budget WARN (1h)",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 12,
+                "y": 78
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "value"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum(increase(awcp_awcp_laminar_budget_breaches_total{level=\"warn\"}[1h]))"
+                }
+            ]
+        },
+        {
+            "id": 94,
+            "type": "stat",
+            "title": "Budget EXHAUSTED (1h)",
+            "gridPos": {
+                "h": 6,
+                "w": 6,
+                "x": 18,
+                "y": 78
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short"
+                },
+                "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "colorMode": "value"
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum(increase(awcp_awcp_laminar_budget_breaches_total{level=\"exhausted\"}[1h]))"
+                }
+            ]
+        },
+        {
+            "id": 95,
+            "type": "timeseries",
+            "title": "Tokens/sec by agent",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 0,
+                "y": 84
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum by (agent) (rate(awcp_awcp_laminar_tokens_total[5m]))",
+                    "legendFormat": "{{agent}}"
+                }
+            ]
+        },
+        {
+            "id": 96,
+            "type": "timeseries",
+            "title": "Tokens/sec by direction (input vs output)",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 84
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum by (direction) (rate(awcp_awcp_laminar_tokens_total[5m]))",
+                    "legendFormat": "{{direction}}"
+                }
+            ]
+        },
+        {
+            "id": 97,
+            "type": "timeseries",
+            "title": "LLM calls/sec by model",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 84
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "list",
+                    "placement": "bottom"
+                }
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus"
+                    },
+                    "expr": "sum by (model) (rate(awcp_awcp_laminar_llm_calls_total[5m]))",
+                    "legendFormat": "{{model}}"
+                }
+            ]
+        }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 39,
+    "tags": [
+        "awcp",
+        "observability"
+    ],
+    "time": {
+        "from": "now-3h",
+        "to": "now"
+    },
+    "title": "AWCP \u2014 Observability Overview",
+    "uid": "awcp-overview",
+    "version": 3
+}

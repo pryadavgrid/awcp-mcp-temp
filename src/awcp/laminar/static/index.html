@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AWCP · Token Monitor</title>
+<style>
+  /* Same slate theme as the radar UI (radar/static/index.html) so the two
+     consoles read as one product, while this page ships inside awcp.laminar. */
+  :root{
+    --bg:#0f172a;--panel:#1e293b;--border:#334155;--border2:#475569;
+    --text:#f1f5f9;--muted:#94a3b8;--accent:#38bdf8;
+    --ok:#34d399;--warn:#fbbf24;--bad:#f87171;--violet:#a78bfa
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{display:flex;align-items:center;gap:12px;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--panel)}
+  header h1{font-size:16px;margin:0}
+  header .sub{color:var(--muted);font-size:12px}
+  header a{color:var(--accent);font-size:12px;margin-left:auto;text-decoration:none}
+  .wrap{max-width:1100px;margin:0 auto;padding:20px 24px 60px}
+  .stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 16px;min-width:130px}
+  .stat .v{font-size:20px;font-weight:700}
+  .stat .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  .stat .v.on{color:var(--ok)} .stat .v.off{color:var(--muted)}
+  table{border-collapse:collapse;width:100%;background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+  th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;background:#16233b}
+  tr:last-child td{border-bottom:0}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .bar{position:relative;height:8px;border-radius:5px;background:#0b1220;border:1px solid var(--border);min-width:140px}
+  .bar i{position:absolute;inset:0;border-radius:5px;display:block}
+  .b-ok i{background:var(--ok)} .b-warn i{background:var(--warn)} .b-exhausted i{background:var(--bad)}
+  .pill{font-size:11px;padding:2px 9px;border-radius:99px;font-family:ui-monospace,monospace}
+  .s-ok{background:rgba(52,211,153,.12);color:var(--ok)}
+  .s-warn{background:rgba(251,191,36,.14);color:var(--warn)}
+  .s-exhausted{background:rgba(248,113,113,.14);color:var(--bad)}
+  .empty{color:var(--muted);text-align:center;padding:40px 0}
+  h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 10px}
+  .cost{color:var(--violet)}
+  button{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;padding:3px 10px;font-size:11px;cursor:pointer}
+  button:hover{color:var(--text);border-color:var(--accent)}
+  button.save{border-color:var(--accent);color:var(--accent)}
+  input,select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  input{width:88px}
+  /* operator token-policy editor */
+  .policy{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:18px}
+  .policy .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:10px}
+  .pf{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .ptitle{font-size:13px;font-weight:700;color:var(--text)}
+  .pmsg{color:var(--muted);font-size:11px;align-self:center}
+  .foot{color:var(--muted);font-size:11.5px;margin-top:22px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⛁ Token Monitor</h1>
+  <span class="sub">awcp.laminar — per-agent LLM token usage &amp; budget control</span>
+  <a href="/">← Agent Registry</a>
+</header>
+<div class="wrap">
+  <div class="stats" id="stats"></div>
+
+  <!-- operator-set token policy (replaces the LMNR_* env / CLI; applies live) -->
+  <div class="policy">
+    <span class="ptitle">Token policy</span>
+    <span class="sub" style="color:var(--muted);font-size:11px;margin-left:8px">operator-set · applies live to every agent · no restart</span>
+    <div class="row">
+      <label class="pf">default<input id="p-def" type="number" min="1"></label>
+      <label class="pf">low tier<input id="p-low" type="number" min="1"></label>
+      <label class="pf">medium tier<input id="p-med" type="number" min="1"></label>
+      <label class="pf">high tier<input id="p-high" type="number" min="1"></label>
+      <label class="pf">warn %<input id="p-warn" type="number" min="1" max="100" style="width:64px"></label>
+      <button class="save" onclick="savePolicy()">Save policy</button>
+      <span class="pmsg" id="p-msg"></span>
+    </div>
+  </div>
+
+  <h2>Per-agent usage (sliding window) — set each agent's risk tier &amp; budget here</h2>
+  <table>
+    <thead><tr>
+      <th>Agent</th><th>Risk</th><th>Window usage</th><th>Budget (set)</th>
+      <th>State</th><th>Calls</th><th>Last model</th><th>Cost ($)</th><th>Trace</th><th></th>
+    </tr></thead>
+    <tbody id="rows"><tr><td colspan="10" class="empty">No token usage recorded yet —
+      start an agent (it auto-reports), or it appears here on its first LLM call.</td></tr></tbody>
+  </table>
+
+  <div class="foot" id="foot"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+function stat(k,v,cls){return `<div class="stat"><div class="v ${cls||''}">${v}</div><div class="k">${k}</div></div>`}
+
+// ── per-agent operator controls (replace the CLI / env) ─────────────────────
+// risk tier → sets the agent's risk on the registry (drives its tier budget).
+function riskSelect(u){
+  const r=(u.risk||'medium'), opts=['low','medium','high'];
+  const extra = opts.includes(r)?'':`<option value="${esc(r)}" selected>${esc(r)}</option>`;
+  return `<select onchange="setRisk('${esc(u.agent_id)}',this.value)" title="risk tier — drives the token budget">`
+    + extra + opts.map(o=>`<option value="${o}"${o===r?' selected':''}>${o}</option>`).join('') + `</select>`;
+}
+// Budget cell: effective budget (read-only) + an input for an EXPLICIT per-agent
+// budget. The input shows the agent's DECLARED budget (or blank = "using tier");
+// clearing it (blank/0) falls the agent back to its risk tier.
+function budgetInput(u,b){
+  const eff=(b.budget_tokens||0).toLocaleString();
+  const src=(u.token_budget!=null)?'explicit':(u.budget&&u.budget.state!=null?'tier '+(u.risk||''):'');
+  return `<div class="mono" title="effective budget (source: ${esc(src)})">${eff}</div>`
+    + `<input type="number" min="0" placeholder="set…" value="${u.token_budget!=null?u.token_budget:''}" `
+    + `style="width:80px;margin-top:3px" onchange="setBudget('${esc(u.agent_id)}',this.value)" `
+    + `title="explicit per-agent budget; blank/0 = use the risk tier">`;
+}
+async function setRisk(id,risk){
+  try{ await fetch('/agents/'+encodeURIComponent(id)+'/risk',
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({risk})}); }catch(e){}
+  refresh();
+}
+async function setBudget(id,tokens){
+  const n=parseInt(tokens||'0',10)||0;   // 0/blank clears the explicit budget → use the tier
+  try{ await fetch('/agents/'+encodeURIComponent(id)+'/risk',
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token_budget:n})}); }catch(e){}
+  refresh();
+}
+// ── token policy editor ─────────────────────────────────────────────────────
+let POLICY_DIRTY=false;   // don't clobber the operator's typing on the 3s refresh
+async function loadPolicy(){
+  if(POLICY_DIRTY) return;
+  let p={}; try{ p=await (await fetch('/laminar/policy')).json(); }catch(e){ return; }
+  const t=p.tiers||{};
+  $('p-def').value=p.default??''; $('p-low').value=t.low??''; $('p-med').value=t.medium??'';
+  $('p-high').value=t.high??''; $('p-warn').value=Math.round((p.warn_ratio??0.8)*100);
+}
+['p-def','p-low','p-med','p-high','p-warn'].forEach(id=>{
+  document.addEventListener('input',e=>{ if(e.target&&e.target.id===id) POLICY_DIRTY=true; });
+});
+async function savePolicy(){
+  const body={ default:+$('p-def').value||null,
+    tiers:{ low:+$('p-low').value||null, medium:+$('p-med').value||null, high:+$('p-high').value||null },
+    warn_ratio:(+$('p-warn').value||0)/100||null };
+  try{
+    await fetch('/laminar/policy',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    $('p-msg').textContent='saved · applied live'; POLICY_DIRTY=false; setTimeout(()=>$('p-msg').textContent='',2500);
+  }catch(e){ $('p-msg').textContent='save failed'; }
+  refresh();
+}
+
+// latest LLM-call OTel trace id for an agent — a Tempo deep-link when
+// LMNR_TRACE_URL_TEMPLATE is configured, else the short id as plain text.
+function traceCell(u){
+  const id=u.last_trace_id; if(!id) return '<span style="color:var(--muted)">—</span>';
+  const short=id.slice(0,8);
+  return u.last_trace_url
+    ? `<a href="${esc(u.last_trace_url)}" target="_blank" title="open trace ${esc(id)} in Tempo">${short}↗</a>`
+    : `<span title="OTel trace ${esc(id)} (set LMNR_TRACE_URL_TEMPLATE for a link)">${short}</span>`;
+}
+
+async function refresh(){
+  loadPolicy();
+  let st={},us=[];
+  try{ st=await (await fetch('/laminar/status')).json(); }catch(e){}
+  try{ us=await (await fetch('/laminar/usage')).json(); }catch(e){}
+
+  $('stats').innerHTML =
+    stat('module', st.enabled?'enabled':'disabled', st.enabled?'on':'off') +
+    stat('laminar export', st.laminar_export?'attached':'local-only', st.laminar_export?'on':'off') +
+    stat('agents tracked', st.agents_tracked??0) +
+    stat('active tasks', st.active_tasks??0) +
+    stat('window', (st.window_s??0)/60 + ' min') +
+    stat('default budget', (st.default_budget_tokens??0).toLocaleString()+' tok');
+
+  if(!us.length){ return; }
+  $('rows').innerHTML = us.map(u=>{
+    const b=u.budget||{}, w=u.window||{};
+    const pct=Math.min(100,Math.round((b.ratio||0)*100));
+    return `<tr>
+      <td><b>${esc(u.name)}</b><br><span class="mono" style="color:var(--muted)">${esc(u.agent_id)}</span></td>
+      <td>${riskSelect(u)}</td>
+      <td><div class="bar b-${b.state}"><i style="width:${pct}%"></i></div>
+          <span class="mono">${(w.total_tokens||0).toLocaleString()} tok (${pct}%)</span></td>
+      <td>${budgetInput(u,b)}</td>
+      <td><span class="pill s-${b.state}">${b.state}</span></td>
+      <td class="mono">${w.calls||0}</td>
+      <td class="mono">${esc(w.last_model||'—')}</td>
+      <td class="mono cost">${(w.cost||0).toFixed(4)}</td>
+      <td class="mono">${traceCell(u)}</td>
+      <td><button onclick="resetAgent('${esc(u.agent_id)}')">reset window</button></td>
+    </tr>`;
+  }).join('');
+
+  $('foot').textContent = `budgets: risk defaults ${JSON.stringify(st.risk_budgets||{})} · `
+    + `warn at ${(st.warn_ratio||0)*100}% · price table models: `
+    + ((st.price_table_models||[]).join(', ')||'none (cost=0, local models)');
+}
+async function resetAgent(id){
+  try{ await fetch('/laminar/reset/'+encodeURIComponent(id),{method:'POST'}); }catch(e){}
+  refresh();
+}
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>
