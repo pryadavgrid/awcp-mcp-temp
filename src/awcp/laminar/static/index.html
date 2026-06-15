@@ -41,6 +41,15 @@
   .cost{color:var(--violet)}
   button{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;padding:3px 10px;font-size:11px;cursor:pointer}
   button:hover{color:var(--text);border-color:var(--accent)}
+  button.save{border-color:var(--accent);color:var(--accent)}
+  input,select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 6px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  input{width:88px}
+  /* operator token-policy editor */
+  .policy{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:18px}
+  .policy .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:10px}
+  .pf{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .ptitle{font-size:13px;font-weight:700;color:var(--text)}
+  .pmsg{color:var(--muted);font-size:11px;align-self:center}
   .foot{color:var(--muted);font-size:11.5px;margin-top:22px}
 </style>
 </head>
@@ -53,14 +62,29 @@
 <div class="wrap">
   <div class="stats" id="stats"></div>
 
-  <h2>Per-agent usage (sliding window)</h2>
+  <!-- operator-set token policy (replaces the LMNR_* env / CLI; applies live) -->
+  <div class="policy">
+    <span class="ptitle">Token policy</span>
+    <span class="sub" style="color:var(--muted);font-size:11px;margin-left:8px">operator-set · applies live to every agent · no restart</span>
+    <div class="row">
+      <label class="pf">default<input id="p-def" type="number" min="1"></label>
+      <label class="pf">low tier<input id="p-low" type="number" min="1"></label>
+      <label class="pf">medium tier<input id="p-med" type="number" min="1"></label>
+      <label class="pf">high tier<input id="p-high" type="number" min="1"></label>
+      <label class="pf">warn %<input id="p-warn" type="number" min="1" max="100" style="width:64px"></label>
+      <button class="save" onclick="savePolicy()">Save policy</button>
+      <span class="pmsg" id="p-msg"></span>
+    </div>
+  </div>
+
+  <h2>Per-agent usage (sliding window) — set each agent's risk tier &amp; budget here</h2>
   <table>
     <thead><tr>
-      <th>Agent</th><th>Autonomy</th><th>Window usage</th><th>Budget</th>
+      <th>Agent</th><th>Risk</th><th>Window usage</th><th>Budget (set)</th>
       <th>State</th><th>Calls</th><th>Last model</th><th>Cost ($)</th><th>Trace</th><th></th>
     </tr></thead>
     <tbody id="rows"><tr><td colspan="10" class="empty">No token usage recorded yet —
-      agents report it on /tasks/execution/{id}/event (extra.input_tokens / output_tokens).</td></tr></tbody>
+      start an agent (it auto-reports), or it appears here on its first LLM call.</td></tr></tbody>
   </table>
 
   <div class="foot" id="foot"></div>
@@ -70,6 +94,59 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
 function stat(k,v,cls){return `<div class="stat"><div class="v ${cls||''}">${v}</div><div class="k">${k}</div></div>`}
+
+// ── per-agent operator controls (replace the CLI / env) ─────────────────────
+// risk tier → sets the agent's risk on the registry (drives its tier budget).
+function riskSelect(u){
+  const r=(u.risk||'medium'), opts=['low','medium','high'];
+  const extra = opts.includes(r)?'':`<option value="${esc(r)}" selected>${esc(r)}</option>`;
+  return `<select onchange="setRisk('${esc(u.agent_id)}',this.value)" title="risk tier — drives the token budget">`
+    + extra + opts.map(o=>`<option value="${o}"${o===r?' selected':''}>${o}</option>`).join('') + `</select>`;
+}
+// Budget cell: effective budget (read-only) + an input for an EXPLICIT per-agent
+// budget. The input shows the agent's DECLARED budget (or blank = "using tier");
+// clearing it (blank/0) falls the agent back to its risk tier.
+function budgetInput(u,b){
+  const eff=(b.budget_tokens||0).toLocaleString();
+  const src=(u.token_budget!=null)?'explicit':(u.budget&&u.budget.state!=null?'tier '+(u.risk||''):'');
+  return `<div class="mono" title="effective budget (source: ${esc(src)})">${eff}</div>`
+    + `<input type="number" min="0" placeholder="set…" value="${u.token_budget!=null?u.token_budget:''}" `
+    + `style="width:80px;margin-top:3px" onchange="setBudget('${esc(u.agent_id)}',this.value)" `
+    + `title="explicit per-agent budget; blank/0 = use the risk tier">`;
+}
+async function setRisk(id,risk){
+  try{ await fetch('/agents/'+encodeURIComponent(id)+'/risk',
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({risk})}); }catch(e){}
+  refresh();
+}
+async function setBudget(id,tokens){
+  const n=parseInt(tokens||'0',10)||0;   // 0/blank clears the explicit budget → use the tier
+  try{ await fetch('/agents/'+encodeURIComponent(id)+'/risk',
+    {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token_budget:n})}); }catch(e){}
+  refresh();
+}
+// ── token policy editor ─────────────────────────────────────────────────────
+let POLICY_DIRTY=false;   // don't clobber the operator's typing on the 3s refresh
+async function loadPolicy(){
+  if(POLICY_DIRTY) return;
+  let p={}; try{ p=await (await fetch('/laminar/policy')).json(); }catch(e){ return; }
+  const t=p.tiers||{};
+  $('p-def').value=p.default??''; $('p-low').value=t.low??''; $('p-med').value=t.medium??'';
+  $('p-high').value=t.high??''; $('p-warn').value=Math.round((p.warn_ratio??0.8)*100);
+}
+['p-def','p-low','p-med','p-high','p-warn'].forEach(id=>{
+  document.addEventListener('input',e=>{ if(e.target&&e.target.id===id) POLICY_DIRTY=true; });
+});
+async function savePolicy(){
+  const body={ default:+$('p-def').value||null,
+    tiers:{ low:+$('p-low').value||null, medium:+$('p-med').value||null, high:+$('p-high').value||null },
+    warn_ratio:(+$('p-warn').value||0)/100||null };
+  try{
+    await fetch('/laminar/policy',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    $('p-msg').textContent='saved · applied live'; POLICY_DIRTY=false; setTimeout(()=>$('p-msg').textContent='',2500);
+  }catch(e){ $('p-msg').textContent='save failed'; }
+  refresh();
+}
 
 // latest LLM-call OTel trace id for an agent — a Tempo deep-link when
 // LMNR_TRACE_URL_TEMPLATE is configured, else the short id as plain text.
@@ -82,6 +159,7 @@ function traceCell(u){
 }
 
 async function refresh(){
+  loadPolicy();
   let st={},us=[];
   try{ st=await (await fetch('/laminar/status')).json(); }catch(e){}
   try{ us=await (await fetch('/laminar/usage')).json(); }catch(e){}
@@ -98,17 +176,12 @@ async function refresh(){
   $('rows').innerHTML = us.map(u=>{
     const b=u.budget||{}, w=u.window||{};
     const pct=Math.min(100,Math.round((b.ratio||0)*100));
-    // used vs remaining for this sliding window (remaining clamps at 0 once exhausted)
-    const used=(b.used_tokens??w.total_tokens??0);
-    const bud=(b.budget_tokens||0);
-    const rem=Math.max(0, bud-used);
     return `<tr>
       <td><b>${esc(u.name)}</b><br><span class="mono" style="color:var(--muted)">${esc(u.agent_id)}</span></td>
-      <td class="mono">${esc(u.autonomy_profile||'—')}</td>
-      <td><div class="bar b-${b.state}" title="${used.toLocaleString()} of ${bud.toLocaleString()} tokens used (${pct}%) · ${rem.toLocaleString()} remaining"><i style="width:${pct}%"></i></div>
-          <span class="mono">${used.toLocaleString()} / ${bud.toLocaleString()} tok (${pct}%)</span>
-          <span class="mono" style="color:var(--muted)"> · ${rem.toLocaleString()} left</span></td>
-      <td class="mono">${bud.toLocaleString()}</td>
+      <td>${riskSelect(u)}</td>
+      <td><div class="bar b-${b.state}"><i style="width:${pct}%"></i></div>
+          <span class="mono">${(w.total_tokens||0).toLocaleString()} tok (${pct}%)</span></td>
+      <td>${budgetInput(u,b)}</td>
       <td><span class="pill s-${b.state}">${b.state}</span></td>
       <td class="mono">${w.calls||0}</td>
       <td class="mono">${esc(w.last_model||'—')}</td>

@@ -36,6 +36,39 @@ from awcp.laminar import config
 _overrides: dict[str, int] = {}
 _lock = threading.Lock()
 
+# ── Runtime token POLICY (operator-editable from the console; no restart) ──────
+# Initialized from the env config so behaviour is identical until an operator
+# changes it via POST /laminar/policy. This is the magazine's "operators set
+# thresholds/ladders by risk", moved off the CLI onto the control surface.
+_policy_lock = threading.Lock()
+_policy: dict = {
+    "default": config.DEFAULT_TOKEN_BUDGET,
+    "tiers": dict(config.RISK_TOKEN_BUDGET),     # e.g. {"low":..,"medium":..,"high":..}
+    "warn_ratio": config.WARN_RATIO,
+}
+
+
+def get_policy() -> dict:
+    with _policy_lock:
+        return {"default": _policy["default"], "tiers": dict(_policy["tiers"]),
+                "warn_ratio": _policy["warn_ratio"]}
+
+
+def set_policy(default: int | None = None, tiers: dict | None = None,
+               warn_ratio: float | None = None) -> dict:
+    """Operator edits the token policy at runtime. Only valid values are applied;
+    everything else is left untouched (partial updates are fine)."""
+    with _policy_lock:
+        if isinstance(default, (int, float)) and default > 0:
+            _policy["default"] = int(default)
+        if isinstance(tiers, dict):
+            for k, v in tiers.items():
+                if isinstance(v, (int, float)) and v > 0:
+                    _policy["tiers"][str(k).strip().lower()] = int(v)
+        if isinstance(warn_ratio, (int, float)) and 0 < warn_ratio <= 1:
+            _policy["warn_ratio"] = float(warn_ratio)
+    return get_policy()
+
 
 def set_budget(agent_id: str, tokens: int) -> None:
     """Operator override (POST /laminar/budgets/{agent_id})."""
@@ -59,21 +92,23 @@ def budget_for(agent_id: str, risk: str | None = None, agent_budget: int | None 
     # The magazine's specific agent_budget overrides the generic risk budget
     if agent_budget is not None and agent_budget > 0:
         return agent_budget
+    pol = get_policy()                           # runtime policy (operator-editable)
     if risk:
-        b = config.RISK_TOKEN_BUDGET.get(risk.strip().lower())
+        b = pol["tiers"].get(risk.strip().lower())
         if b:
             return b
-    return config.DEFAULT_TOKEN_BUDGET
+    return pol["default"]
 
 
 def evaluate(agent_id: str, window_total_tokens: int, risk: str | None = None, agent_budget: int | None = None) -> dict:
     """Classify usage vs budget. Pure function of (usage, budget) — bridge.py
     owns the transition detection and side effects."""
     budget = budget_for(agent_id, risk, agent_budget)
+    warn_ratio = get_policy()["warn_ratio"]
     ratio = (window_total_tokens / budget) if budget > 0 else 0.0
     if ratio >= 1.0:
         state = "exhausted"
-    elif ratio >= config.WARN_RATIO:
+    elif ratio >= warn_ratio:
         state = "warn"
     else:
         state = "ok"
@@ -83,6 +118,6 @@ def evaluate(agent_id: str, window_total_tokens: int, risk: str | None = None, a
         "used_tokens": window_total_tokens,
         "budget_tokens": budget,
         "ratio": round(ratio, 4),
-        "warn_ratio": config.WARN_RATIO,
+        "warn_ratio": warn_ratio,
         "window_s": config.BUDGET_WINDOW_S,
     }

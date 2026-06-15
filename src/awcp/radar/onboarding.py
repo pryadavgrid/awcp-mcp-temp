@@ -48,17 +48,32 @@ def map_identity_patch(entry: AgentEntry) -> dict:
 
 def decide_status(entry: AgentEntry) -> tuple[str, str | None]:
     """AWCP onboarding gate: an agent leaves quarantine only once it has the
-    control hooks the magazine requires. The magazine names all three:
-    "telemetry, flag wiring, and policy callbacks ... observed in execution"
-    (Onboarding Quarantine). So we require observability (telemetry) AND feature
-    flags AND policy callbacks. Returns (status, quarantine_reason)."""
+    control hooks the magazine requires, "telemetry, flag wiring, and policy
+    callbacks ... observed in execution" (Onboarding Quarantine):
+
+      * telemetry      — OBSERVED (entry.telemetry_enabled is a projection of
+                         real telemetry arriving, not a declared flag);
+      * feature flags  — declared AND OBSERVED: registered, and the agent reports
+                         flag state in execution (sets entry.flags_observed);
+      * policy callbacks — declared AND OBSERVED: the agent must both register a
+                         policy callback and actually exercise its policy hook
+                         (consult the gate), which sets entry.policy_observed.
+
+    Each hook's declared-vs-observed strictness is governed by its
+    AGENT_RADAR_REQUIRE_OBSERVED_* flag (which controls how the *_observed fields
+    are seeded at registration), so this gate stays a pure read of the entry.
+    Returns (status, quarantine_reason)."""
     missing: list[str] = []
     if not entry.telemetry_enabled:
-        missing.append("telemetry/observability")
+        missing.append("telemetry/observability (not observed)")
     if not entry.feature_flags:
-        missing.append("feature flags")
+        missing.append("feature flags (none declared)")
+    elif not entry.flags_observed:
+        missing.append("feature flags (declared, not yet observed in execution)")
     if not entry.policy_callbacks:
-        missing.append("policy callbacks")
+        missing.append("policy callbacks (none declared)")
+    elif not entry.policy_observed:
+        missing.append("policy callbacks (declared, not yet observed in execution)")
 
     if missing:
         return "quarantined", "missing control hooks: " + ", ".join(missing)
