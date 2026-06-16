@@ -144,11 +144,9 @@ function tokCell(id){
   const u=TOKENS[id];
   if(!u||!u.budget) return '<span class="tok">–</span>';
   const b=u.budget, w=u.window||{};
-  const used=(b.used_tokens??w.total_tokens??0), bud=(b.budget_tokens||0);
-  const rem=Math.max(0, bud-used);              // tokens left in this window
   const pct=Math.min(999,Math.round((b.ratio||0)*100));
-  return `<a href="/laminar/ui" style="text-decoration:none;"><span class="tok ${b.state}" title="${used.toLocaleString()} of ${bud.toLocaleString()} tokens used (${pct}%) · ${rem.toLocaleString()} remaining · state ${b.state} · open /laminar/ui for detail">`+
-         `${used.toLocaleString()}/${bud.toLocaleString()} ${b.state==='ok'?'':'· '+b.state}</span></a>`;
+  return `<a href="/laminar/ui" style="text-decoration:none;"><span class="tok ${b.state}" title="window: ${w.total_tokens||0} of ${b.budget_tokens} tokens (${pct}%) · state ${b.state} · open /laminar/ui for detail">`+
+         `${(w.total_tokens||0).toLocaleString()}/${(b.budget_tokens||0).toLocaleString()} ${b.state==='ok'?'':'· '+b.state}</span></a>`;
 }
 function ago(ts){ if(!ts) return ''; const s=Math.max(0,Math.floor(Date.now()/1000-ts)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); }
 function esc(s){ return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
@@ -161,7 +159,7 @@ function showTab(t){ TAB=t;
 }
 async function removeAgent(id){
   if(!confirm('Remove "'+id+'" from the registry?')) return;
-  try{ await fetch('agents/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){}
+  try{ await fetch('/agents/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){}
   tick();
 }
 
@@ -215,7 +213,7 @@ function renderInventory(){
 
 async function renderEvents(){
   const box=document.getElementById('events'), empty=document.getElementById('ev-empty');
-  let evs=[]; try{ evs=await (await fetch('events?limit=80')).json(); }catch(e){ return; }
+  let evs=[]; try{ evs=await (await fetch('/events?limit=80')).json(); }catch(e){ return; }
   empty.style.display = evs.length ? 'none':'block';
   box.innerHTML = evs.map(e=>`
     <div class="ev">
@@ -228,8 +226,8 @@ async function renderEvents(){
 
 async function tick(){
   let health={};
-  try{ AGENTS=await (await fetch('agents')).json(); }catch(e){ return; }
-  try{ health=await (await fetch('healthz')).json(); }catch(e){}
+  try{ AGENTS=await (await fetch('/agents')).json(); }catch(e){ return; }
+  try{ health=await (await fetch('/healthz')).json(); }catch(e){}
   document.getElementById('s-total').textContent = AGENTS.length;
   document.getElementById('s-quar').textContent  = health.quarantined ?? AGENTS.filter(a=>a.status==='quarantined').length;
   document.getElementById('s-scans').textContent = health.scan_count ?? '–';

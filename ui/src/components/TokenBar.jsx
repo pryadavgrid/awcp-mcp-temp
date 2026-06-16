@@ -1,7 +1,23 @@
 // Live token-budget bar for the selected agent — how many tokens it has used
 // and how many remain in the current sliding window. Data comes from the
-// gateway's /laminar/usage; renders nothing until the agent has reported usage.
-export default function TokenBar({ usage }) {
+// gateway's /laminar/usage (when the agent has spent) or its resolved budget
+// (when it's registered but hasn't spent yet). `pending` is set when the agent
+// has no control-plane identity yet (not started), so we still show the slot.
+export default function TokenBar({ usage, pending, agentName }) {
+  if (pending) {
+    return (
+      <div className="tokenbar tb-pending">
+        <div className="tb-head">
+          <span className="tb-lbl">Token budget · sliding window</span>
+          <span className="tb-state tb-s-idle">not started</span>
+        </div>
+        <div className="tb-note">
+          Run {agentName ? `“${agentName}”` : 'this agent'} once — it registers with
+          the control plane and its token budget appears here.
+        </div>
+      </div>
+    )
+  }
   if (!usage || !usage.budget) return null
   const b = usage.budget
   const w = usage.window || {}

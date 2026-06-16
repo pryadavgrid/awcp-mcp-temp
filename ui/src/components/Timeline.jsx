@@ -1,73 +1,73 @@
-// Live step timeline. Each item is one Temporal activity the agent triggered,
-// streamed back from the gateway. The kind/label/detail are all data-driven, so
-// a brand-new step type the backend starts emitting still renders (it just gets
-// the fallback icon) — nothing here is hardcoded to a fixed set of steps.
+import { useEffect, useState } from 'react'
 
-const ICONS = {
-  setup: '🧩',
-  llm_called: '🧠',
-  web_search: '🔎',
-  tool_called: '⚙️',
-  synthesize: '✨',
-  complete: '✅',
+// Instead of listing raw governed steps (llm_called, tool_call, …), show ONE
+// friendly line that types itself out — "Thinking…", "Searching the web…",
+// "Analysing…" — like a chat assistant working. The phrase is driven by the
+// step the agent is currently on (read from the Temporal timeline), so it still
+// reflects what's really happening; it's just shown in plain language.
+
+const PHRASES = {
+  setup: 'Getting started',
+  llm_called: 'Thinking',
+  web_search: 'Searching the web',
+  tool_called: 'Working on it',
+  synthesize: 'Analysing',
+  complete: 'Wrapping up',
 }
 
-function detailLine(it) {
-  const bits = []
-  if (it.tool_name) bits.push(it.tool_name)
-  if (it.model) bits.push(it.model)
-  if (it.query) bits.push(`“${it.query}”`)
-  if (it.risk) bits.push(`risk ${it.risk}`)
-  if (it.gate && it.gate !== 'allowed') bits.push(`gate ${it.gate}`)
-  return bits.join('  ·  ')
+const TERMINAL = ['done', 'failed', 'blocked']
+
+// The step the agent is currently on: the latest running/scheduled one, else the
+// most recent step. Returns its kind (e.g. "web_search") or null when no steps.
+function currentKind(items) {
+  if (!items || items.length === 0) return null
+  const inflight = [...items]
+    .reverse()
+    .find((it) => it.status === 'running' || it.status === 'scheduled')
+  return (inflight || items[items.length - 1]).kind
+}
+
+// Typewriter: reveal `text` one character at a time while `animate` is true.
+function useTypewriter(text, animate) {
+  const [shown, setShown] = useState(animate ? '' : text)
+  useEffect(() => {
+    if (!animate) {
+      setShown(text)
+      return
+    }
+    setShown('')
+    let i = 0
+    const id = setInterval(() => {
+      i += 1
+      setShown(text.slice(0, i))
+      if (i >= text.length) clearInterval(id)
+    }, 45)
+    return () => clearInterval(id)
+  }, [text, animate])
+  return shown
 }
 
 export default function Timeline({ items, status }) {
-  const active = status && !['done', 'failed', 'blocked'].includes(status)
+  const active = status && !TERMINAL.includes(status)
+  const kind = currentKind(items)
+  const phrase = (kind && PHRASES[kind]) || (active ? 'Thinking' : '')
+  const typed = useTypewriter(phrase, active)
 
-  if (!items || items.length === 0) {
-    return (
-      <div className="tl-empty">
-        {active ? (
-          <>
-            <span className="spinner" /> Waiting for the agent to start working…
-          </>
-        ) : (
-          'No steps recorded yet.'
-        )}
-      </div>
-    )
+  if (!active) {
+    if (status === 'done') return <div className="think done">✓ Done</div>
+    if (status === 'failed') return <div className="think failed">✕ Couldn’t finish</div>
+    if (status === 'blocked') return <div className="think failed">⛔ Blocked by the control plane</div>
+    return <div className="think muted">Ready when you are.</div>
   }
 
   return (
-    <div className="timeline">
-      {items.map((it) => (
-        <div className={`tl-item s-${it.status}`} key={it.seq}>
-          <div className="tl-rail">
-            <div className="tl-dot">{ICONS[it.kind] || '•'}</div>
-          </div>
-          <div className="tl-card">
-            <div className="tl-head">
-              <span className="tl-label">{it.label}</span>
-              <span className={`tl-status s-${it.status}`}>
-                {it.status === 'running' && <span className="spinner sm" />}
-                {it.status}
-              </span>
-            </div>
-            {detailLine(it) && <div className="tl-detail">{detailLine(it)}</div>}
-          </div>
-        </div>
-      ))}
-      {active && (
-        <div className="tl-item s-pending">
-          <div className="tl-rail">
-            <div className="tl-dot pending">
-              <span className="spinner" />
-            </div>
-          </div>
-          <div className="tl-card muted">working…</div>
-        </div>
-      )}
+    <div className="think" aria-live="polite">
+      <span className="think-text">{typed}</span>
+      <span className="think-dots" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </span>
     </div>
   )
 }

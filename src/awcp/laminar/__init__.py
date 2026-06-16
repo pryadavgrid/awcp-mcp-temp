@@ -39,5 +39,8 @@ from awcp.laminar.bridge import (          # noqa: F401  (public surface)
     on_execution_event,
     on_execution_complete,
     status_summary,
+    budget_state,
+    is_exhausted,
+    record_usage,
 )
 from awcp.laminar.api import router        # noqa: F401

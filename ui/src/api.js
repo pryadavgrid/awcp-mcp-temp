@@ -30,8 +30,18 @@ export const API_BASE = API
 export const listAgents = () => call('GET', '/user/agents')
 
 // Per-agent token usage + budget (the token monitor feed). Optional: returns []
-// when the laminar module isn't mounted or no agent has reported usage yet.
+// when the laminar module isn't mounted or no agent has reported usage yet — so
+// it only lists agents that have ALREADY spent tokens. To show a budget bar for
+// every agent (incl. ones that haven't spent yet) we also read the budget policy
+// + the registry below and resolve each agent's budget client-side.
 export const getUsage = () => call('GET', '/laminar/usage')
+
+// Live token policy: { overrides, risk_defaults (tiers), system_default, window_s }.
+export const getBudgets = () => call('GET', '/laminar/budgets')
+
+// The radar registry — every governed agent with its risk tier + declared
+// token_budget, keyed by the same id the agent reports as `agent_id`.
+export const getRegistryAgents = () => call('GET', '/agents')
 
 export const submitTask = (agent, input) =>
   call('POST', '/user/submit', { agent, input })

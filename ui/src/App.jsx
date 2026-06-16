@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   API_BASE,
   listAgents,
   getUsage,
+  getBudgets,
+  getRegistryAgents,
   submitTask,
   getStatus,
   approveTask,
-  uploadFile,
 } from './api.js'
 import AgentPicker from './components/AgentPicker.jsx'
 import Timeline from './components/Timeline.jsx'
@@ -14,6 +15,42 @@ import ResultPanel from './components/ResultPanel.jsx'
 import TokenBar from './components/TokenBar.jsx'
 
 const TERMINAL = new Set(['done', 'failed', 'blocked'])
+
+// Resolve an agent's tokens-per-window budget, mirroring laminar's precedence
+// (operator override → declared token_budget → risk tier → system default) so a
+// registered agent shows its budget bar even before it has spent a single token.
+function resolveBudget(entry, budgets) {
+  if (!entry) return 0
+  const ov = (budgets.overrides || {})[entry.id]
+  if (ov && ov > 0) return ov
+  if (entry.token_budget && entry.token_budget > 0) return entry.token_budget
+  const tier = (budgets.risk_defaults || {})[entry.risk]
+  return tier || budgets.system_default || 0
+}
+
+// Build the token-bar view for the selected agent from the best data available:
+//   • a live /laminar/usage row → real used / budget / state;
+//   • else, if the agent has a control-plane identity (agent_id) but hasn't spent
+//     yet → 0 used against its resolved budget (a matching registry entry's
+//     declared budget, else the system default laminar would assign it);
+//   • else (no agent_id yet — agent not started/registered) → a placeholder.
+function tokenInfoFor(selected, usage, regAgents, budgets) {
+  if (!selected) return { info: null, pending: false }
+  const aid = selected.agent_id
+  if (!aid) return { info: null, pending: true }
+  const row = usage.find((u) => u.agent_id && u.agent_id === aid)
+  if (row && row.budget) return { info: row, pending: false }
+  const entry = regAgents.find((r) => r.id === aid)
+  const budget = entry ? resolveBudget(entry, budgets) : budgets.system_default || 0
+  return {
+    info: {
+      agent_id: aid,
+      budget: { used_tokens: 0, budget_tokens: budget, ratio: 0, state: 'ok' },
+      window: { total_tokens: 0, calls: 0 },
+    },
+    pending: false,
+  }
+}
 
 export default function App() {
   const [agents, setAgents] = useState([])
@@ -24,18 +61,21 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [backendOk, setBackendOk] = useState(null)
-  const [usage, setUsage] = useState([]) // /laminar/usage rows (per agent)
-  const [attached, setAttached] = useState(null) // { path, filename, size } for file agents
-  const [uploading, setUploading] = useState(false)
-  const [dragOver, setDragOver] = useState(false)
-  const fileInput = useRef(null)
+  const [usage, setUsage] = useState([]) // /laminar/usage rows (agents that spent)
+  const [budgets, setBudgets] = useState({}) // /laminar/budgets policy
+  const [regAgents, setRegAgents] = useState([]) // /agents registry entries
 
   const selected = agents.find((a) => a.id === selectedId) || null
   const acceptsFiles = !!(selected && selected.accepts_files)
   const running = status && !TERMINAL.has(status.status)
-  // token usage for the selected agent, matched on the radar/Temporal agent_id
-  const myUsage =
-    usage.find((u) => selected && u.agent_id && u.agent_id === selected.agent_id) || null
+  // token view for the selected agent: a live usage row, or its resolved budget
+  // (0 used) if registered but not spent yet, or a "not started" placeholder.
+  const { info: myUsage, pending: tokenPending } = tokenInfoFor(
+    selected,
+    usage,
+    regAgents,
+    budgets,
+  )
 
   // Load agents on mount, then refresh periodically so running-state stays live.
   useEffect(() => {
@@ -51,10 +91,17 @@ export default function App() {
         if (alive) setBackendOk(false)
       }
       try {
-        const u = await getUsage()
-        if (alive) setUsage(u || [])
+        const [u, b, ra] = await Promise.all([
+          getUsage().catch(() => null),
+          getBudgets().catch(() => null),
+          getRegistryAgents().catch(() => null),
+        ])
+        if (!alive) return
+        if (u) setUsage(u)
+        if (b) setBudgets(b)
+        if (ra) setRegAgents(ra)
       } catch {
-        /* token monitor is optional — leave usage as-is */
+        /* token monitor is optional — leave usage/budgets as-is */
       }
     }
     load()
@@ -194,7 +241,11 @@ export default function App() {
             disabled={busy || running}
           />
 
-          <TokenBar usage={myUsage} />
+          <TokenBar
+            usage={myUsage}
+            pending={tokenPending}
+            agentName={selected ? selected.name || selected.id : ''}
+          />
 
           {selected && (selected.examples || []).length > 0 && (
             <div className="examples">
@@ -315,7 +366,7 @@ export default function App() {
 
             <div className="run-cols">
               <div className="col card">
-                <div className="col-title">Timeline</div>
+                <div className="col-title">Status</div>
                 <Timeline items={status && status.timeline} status={status && status.status} />
               </div>
               <div className="col card">

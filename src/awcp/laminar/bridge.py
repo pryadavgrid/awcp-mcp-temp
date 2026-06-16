@@ -280,6 +280,7 @@ def usage_summary(agent_id: str) -> dict:
         "agent_id": agent_id,
         "name": getattr(entry, "name", None) or agent_id,
         "risk": getattr(entry, "risk", None),
+        "token_budget": getattr(entry, "token_budget", None),   # declared per-agent (or None → tier)
         "autonomy_profile": getattr(entry, "autonomy_profile", None),
         "window": window,
         "lifetime": LEDGER.lifetime_usage(agent_id),
@@ -287,6 +288,69 @@ def usage_summary(agent_id: str) -> dict:
         "last_trace_id": last_trace,
         "last_trace_url": config.trace_url(last_trace),
     }
+
+
+def budget_state(agent_id: str) -> dict:
+    """Authoritative, LIVE budget evaluation for one agent (ok|warn|exhausted).
+
+    A pure function of the current sliding-window ledger and the agent's
+    RESOLVED budget (operator override -> declared token_budget -> risk tier ->
+    default — all from budget.py, nothing hardcoded). Because it is recomputed
+    from the window every call, an over-budget agent reads 'exhausted' until its
+    window naturally clears or an operator resets it — there is no stored flag to
+    go stale. The radar uses this to HARD-STOP execution, so the control lives in
+    the control plane, not in the agent.
+    """
+    entry = _get_agent(agent_id)
+    window = LEDGER.window_usage(agent_id)
+    return budget.evaluate(agent_id, window["total_tokens"],
+                           getattr(entry, "risk", None),
+                           getattr(entry, "token_budget", None))
+
+
+def is_exhausted(agent_id: str) -> bool:
+    """True iff the agent has met/exceeded its token budget for the window.
+
+    Fail-open: returns False when this package is disabled or not initialised, so
+    turning laminar off simply removes token control and changes nothing else.
+    """
+    if not (config.ENABLED and _initialized and agent_id):
+        return False
+    return budget_state(agent_id)["state"] == "exhausted"
+
+
+def record_usage(agent_id: str, model: str, input_tokens: int, output_tokens: int,
+                 task_id: str = "llm-gateway", step: str = "llm_call") -> dict | None:
+    """Meter ONE model call straight into the ledger and run the same budget
+    evaluation + breach transition the execution-event path does.
+
+    Used by the token-aware LLM gateway, which counts tokens at the source (the
+    proxied model response) rather than waiting for the agent to self-report. So
+    even an autonomous, uncooperative agent is accounted for — its tokens are
+    measured the moment it calls the model, and crossing the budget fires the
+    SAME on_breach -> degrade -> process/remote hard-stop chain. Nothing here is
+    keyed on a specific agent or model name."""
+    if not (config.ENABLED and _initialized and agent_id):
+        return None
+    LEDGER.record(agent_id=agent_id, task_id=task_id, step=step,
+                  model=model or "unknown",
+                  input_tokens=max(0, int(input_tokens)),
+                  output_tokens=max(0, int(output_tokens)))
+    try:
+        if _m_tokens is not None:
+            _m_tokens.add(max(0, int(input_tokens)), {"agent": agent_id, "direction": "input"})
+            _m_tokens.add(max(0, int(output_tokens)), {"agent": agent_id, "direction": "output"})
+        if _m_calls is not None:
+            _m_calls.add(1, {"agent": agent_id, "model": model or "unknown"})
+    except Exception:                       # noqa: BLE001
+        pass
+    entry = _get_agent(agent_id)
+    window = LEDGER.window_usage(agent_id)
+    evaluation = budget.evaluate(agent_id, window["total_tokens"],
+                                 getattr(entry, "risk", None),
+                                 getattr(entry, "token_budget", None))
+    _handle_transition(agent_id, evaluation)
+    return evaluation
 
 
 def all_usage() -> list[dict]:
@@ -304,15 +368,16 @@ def reset_agent(agent_id: str) -> dict:
 
 
 def status_summary() -> dict:
+    pol = budget.get_policy()           # LIVE (operator-edited) policy, not the env seed
     return {
         "enabled": config.ENABLED,
         "initialized": _initialized,
         "laminar_export": exporter_attached(),
         "laminar_endpoint": config.OTLP_ENDPOINT if config.PROJECT_API_KEY else None,
         "window_s": config.BUDGET_WINDOW_S,
-        "default_budget_tokens": config.DEFAULT_TOKEN_BUDGET,
-        "risk_budgets": config.RISK_TOKEN_BUDGET,
-        "warn_ratio": config.WARN_RATIO,
+        "default_budget_tokens": pol["default"],
+        "risk_budgets": pol["tiers"],
+        "warn_ratio": pol["warn_ratio"],
         "price_table_models": sorted(config.PRICE_TABLE.keys()),
         "agents_tracked": len(LEDGER.agents()),
         "active_tasks": len(_tasks),

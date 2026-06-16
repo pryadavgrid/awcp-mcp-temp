@@ -53,8 +53,26 @@ class AgentEntry(BaseModel):
     version: str | None = None
     write_scopes: list[str] = Field(default_factory=list)
     feature_flags: dict[str, bool] = Field(default_factory=dict)
-    telemetry_enabled: bool = False        # observability / OTel hook present
+    # The feature-flag (flag-wiring) hook, same closed-loop model as telemetry /
+    # policy: the agent must be OBSERVED reporting flag state during execution
+    # before the hook counts (the magazine's "flag wiring ... observed in
+    # execution"). None => never observed.
+    flags_observed: bool = False
+    last_flags_ts: float | None = None
+    telemetry_enabled: bool = False        # observability / OTel hook OBSERVED present
+    # When the radar last OBSERVED real telemetry from this agent in execution
+    # (an execution event or signal arriving). This is what makes the telemetry
+    # hook a closed loop: `telemetry_enabled` above is a projection of this, not
+    # a value the agent can simply declare. None => never observed.
+    last_telemetry_ts: float | None = None
     policy_callbacks: list[str] = Field(default_factory=list)
+    # The policy-callback hook, same closed-loop model as telemetry: an agent
+    # leaves quarantine only once its policy hook is OBSERVED being exercised in
+    # execution (the magazine's "policy callbacks ... observed in execution") —
+    # i.e. it actually consults the control plane's policy (calls the gate), not
+    # merely declares a callback URL. None => never observed.
+    policy_observed: bool = False
+    last_policy_ts: float | None = None
 
     # --- per-agent degradation policy (magazine: "each workflow can override
     # thresholds and ladders by risk"). Empty/None => fall back to the system
@@ -69,6 +87,11 @@ class AgentEntry(BaseModel):
     endpoint: str | None = None
     transport: str | None = None           # stdio | sse | http
     capabilities: list[str] = Field(default_factory=list)  # MCP tools, etc.
+    # Optional control webhook. For a REMOTE agent (no local pid to SIGSTOP), the
+    # control plane POSTs {"action":"suspend"|"resume", ...} here to hard-stop /
+    # release it — the network analog of the local SIGSTOP. The decision is the
+    # control plane's; the remote side only obeys.
+    control_endpoint: str | None = None
 
     # --- process facts (scan source) ---
     pid: int | None = None
@@ -113,6 +136,7 @@ class RegisterRequest(BaseModel):
     owner: str | None = None
     endpoint: str | None = None
     transport: str | None = None
+    control_endpoint: str | None = None     # remote hard-stop webhook (see AgentEntry)
     write_scopes: list[str] = Field(default_factory=list)
     feature_flags: dict[str, bool] = Field(default_factory=dict)
     policy_callbacks: list[str] = Field(default_factory=list)

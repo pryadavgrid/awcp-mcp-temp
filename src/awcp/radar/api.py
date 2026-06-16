@@ -10,11 +10,16 @@ uninstrumented agents stay 'quarantined' until they have telemetry + policy hook
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+
+import httpx
+import psutil
 
 from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
@@ -22,7 +27,7 @@ from pydantic import BaseModel
 
 from awcp.radar import onboarding, policy
 from awcp.radar.models import AgentEntry, RegisterRequest
-from awcp.radar.store import REGISTRY
+from awcp.radar.store import REGISTRY, PERSIST_PATH
 from awcp.radar.scanner import SCANNER
 from awcp.radar.temporal.config import TEMPORAL_SERVER_URL, TASK_QUEUE, TEMPORAL_UI_BASE
 from awcp.radar.temporal.workflows.onboarding import AgentOnboardingWorkflow
@@ -44,7 +49,8 @@ from awcp.radar.temporal.activities.execution import (
 
 # --- Telemetry: link the registry into the shared awcp.observability stack ---
 # (HTTP-route tracing is applied by the gateway via instrument_fastapi(app); this
-# module only exposes an APIRouter, so it does no FastAPI instrumentation itself.)
+# module only exposes an APIRouter, so it does no FastAPI instrumentation itself.
+# A standalone `app` is still built at the bottom for radar-only deployments.)
 from awcp.observability.setup import setup_otel
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
@@ -60,10 +66,46 @@ STATE: dict = {
     "client": None,
     # task_id → (workflow_id, workflow_handle) for execution workflows
     "exec_workflows": {},
+    # task_id → agent_id, so a real-time execution event (which only carries the
+    # task_id) can be attributed to an agent for telemetry observation.
+    "exec_agents": {},
 }
 
 # Env-driven task queue for execution workflows (separate from onboarding)
 EXEC_TASK_QUEUE = os.getenv("AGENT_EXEC_TASK_QUEUE", "agent-task-execution")
+
+# ----------------------------------------------------------------------
+# Closed-loop telemetry: the quarantine decision reflects telemetry the radar
+# has actually OBSERVED in execution, not a flag the agent declared.
+#   REQUIRE_OBSERVED_TELEMETRY  true  -> a declared telemetry_enabled is NOT
+#                                        trusted; the agent must emit real
+#                                        telemetry to earn the hook (fail-closed,
+#                                        the magazine's "observed in execution").
+#                               false -> legacy trust-on-declare behaviour.
+#   TELEMETRY_TTL               secs  -> an agent whose observed telemetry goes
+#                                        silent for longer than this is
+#                                        re-quarantined. 0 disables demotion.
+# ----------------------------------------------------------------------
+REQUIRE_OBSERVED_TELEMETRY = os.getenv(
+    "AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY", "true").lower() == "true"
+# Same closed-loop rule for the policy-callback hook: a declared callback list is
+# not trusted; the agent must actually exercise policy (consult the gate) before
+# the hook counts. Off => trust the declared policy_callbacks (legacy).
+REQUIRE_OBSERVED_POLICY = os.getenv(
+    "AGENT_RADAR_REQUIRE_OBSERVED_POLICY", "true").lower() == "true"
+# Same closed-loop rule for the feature-flag (flag-wiring) hook. Unlike telemetry
+# and policy — which ride behaviours the agent already exhibits (token events /
+# gate calls) — flag observation needs the agent to REPORT flag state in its
+# execution events, so this defaults OFF (declared flags are trusted) to avoid
+# re-quarantining agents that don't report flags yet. Set true to enforce.
+REQUIRE_OBSERVED_FLAGS = os.getenv(
+    "AGENT_RADAR_REQUIRE_OBSERVED_FLAGS", "false").lower() == "true"
+TELEMETRY_TTL = float(os.getenv("AGENT_RADAR_TELEMETRY_TTL", "300"))
+TELEMETRY_RECONCILE_INTERVAL = float(
+    os.getenv("AGENT_RADAR_TELEMETRY_RECONCILE_INTERVAL", "15"))
+# Coalesce registry writes: refresh last_telemetry_ts at most this often per
+# agent while it is already active (avoids a JSON persist on every event).
+_TELEMETRY_REFRESH_MIN = 5.0
 
 # Recent-decisions log: a registry-local, in-memory ring buffer of the last N
 # governance events (onboarding / gate / degradation / operator actions). This is
@@ -77,6 +119,539 @@ def _record_event(kind: str, agent_id: str = "", detail: str = "", **extra) -> N
         {"ts": time.time(), "kind": kind, "agent_id": agent_id,
          "detail": detail, **extra}
     )
+
+
+# ----------------------------------------------------------------------
+# Token control — TWO coexisting layers, both owned by the control plane:
+#
+#   (1) GRACEFUL DEGRADATION  (durable, recoverable) — a token breach steps the
+#       agent ONE rung down its OWN autonomy ladder, exactly like a failure-budget
+#       breach. This lives in _on_token_breach (laminar's injected callback) and
+#       is INTACT from before.
+#
+#   (2) HARD STOP  (live, self-healing) — WHILE the agent is over its token budget
+#       (laminar's sliding window), the radar refuses to let it execute any
+#       further: the cooperative gate denies ALL actions, a new governed execution
+#       will not start, and an in-flight one is terminated. This does NOT touch the
+#       autonomy ladder (layer 1 owns that); it is a separate overlay that lifts
+#       automatically once the window clears or an operator resets it.
+#
+# Both are authoritative and LIVE, keyed only on agent_id with budgets laminar
+# resolves positionally — so they cover every agent, existing or registered at
+# runtime, with nothing hardcoded.
+# ----------------------------------------------------------------------
+def _token_blocked(agent_id: str) -> dict | None:
+    """Return the live budget evaluation when the agent is over its limit
+    (=> hard stop), else None. No-op (None) when laminar is absent/disabled."""
+    if not (_LAMINAR and agent_id):
+        return None
+    try:
+        if _laminar.is_exhausted(agent_id):
+            return _laminar.budget_state(agent_id)
+    except Exception as exc:  # noqa: BLE001 — token control must never break a route
+        log.warning("radar.token.check.error agent_id=%s error=%r", agent_id, exc)
+    return None
+
+
+def _note_token_block(agent_id: str, evaluation: dict | None, where: str) -> None:
+    """Audit a LIVE hard-stop block — WITHOUT mutating the autonomy ladder, which
+    is owned by graceful degradation (_on_token_breach). Records only that the
+    control plane refused an over-budget agent at `where`."""
+    used = (evaluation or {}).get("used_tokens")
+    budget = (evaluation or {}).get("budget_tokens")
+    detail = f"blocked at {where} — token budget exhausted"
+    if budget:
+        detail = f"blocked at {where} — token budget exhausted ({used}/{budget})"
+    _record_event("token_hard_stop", agent_id, detail)
+    log.warning("radar.token.hardstop agent_id=%s %s", agent_id, detail)
+
+
+# ----------------------------------------------------------------------
+# Layer (3) — PROCESS HARD STOP for AUTONOMOUS agents.
+# The gate / governed-execution stops only bite agents that route through the
+# control plane. An autonomous agent (a scanned process running its own loop)
+# never asks the gate, so the radar must act on the PROCESS it already detected:
+# on token exhaustion it SIGSTOPs the process (freezes execution), and SIGCONTs
+# it once the budget recovers. Reversible, identity-checked, opt-out via env.
+# Nothing hardcoded — purely keyed on the detected pid + agent_id.
+# ----------------------------------------------------------------------
+TOKEN_PROCESS_STOP = os.getenv("AGENT_RADAR_TOKEN_PROCESS_STOP", "true").lower() == "true"
+TOKEN_PROCESS_INTERVAL = float(os.getenv("AGENT_RADAR_TOKEN_PROCESS_INTERVAL", "10"))
+TOKEN_CONTROL_TIMEOUT = float(os.getenv("AGENT_RADAR_TOKEN_CONTROL_TIMEOUT", "2"))
+_token_suspended: dict[str, int] = {}        # agent_id -> pid WE froze (local SIGSTOP)
+_token_remote_stopped: dict[str, str] = {}    # agent_id -> control_endpoint WE suspended (remote)
+_token_uncontrolled: set[str] = set()         # over-budget but no pid / endpoint to act on
+_token_proc_lock = threading.Lock()
+
+# ── crash-recovery journal ────────────────────────────────────────────────────
+# Every stop WE apply is also written to a small on-disk journal. A radar that is
+# SIGKILLed cannot SIGCONT/resume on the way down, so a frozen process would stay
+# frozen forever. On the NEXT startup the radar reads this journal and releases
+# every orphaned stop (see _recover_orphaned_freezes). Sits next to the registry
+# DB and honours AGENT_RADAR_DB. Uses its OWN lock so journal I/O never deadlocks
+# against _token_proc_lock.
+FREEZE_JOURNAL = os.getenv("AGENT_RADAR_FREEZE_JOURNAL", PERSIST_PATH + ".freeze.json")
+_freeze_journal: dict[str, dict] = {}        # agent_id -> {"kind": "process"|"remote", ...}
+_journal_lock = threading.Lock()
+
+
+def _journal_persist_locked() -> None:
+    """Write the journal atomically. Caller holds _journal_lock."""
+    try:
+        tmp = FREEZE_JOURNAL + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"frozen": _freeze_journal}, f)
+        os.replace(tmp, FREEZE_JOURNAL)
+    except Exception as exc:                  # noqa: BLE001 — must never break enforcement
+        log.warning("radar.token.journal.persist_failed error=%r", exc)
+
+
+def _journal_set(agent_id: str, entry: dict) -> None:
+    with _journal_lock:
+        _freeze_journal[agent_id] = entry
+        _journal_persist_locked()
+
+
+def _journal_clear(agent_id: str) -> None:
+    with _journal_lock:
+        if _freeze_journal.pop(agent_id, None) is None:
+            return
+        _journal_persist_locked()
+
+
+def _recover_orphaned_freezes() -> None:
+    """Startup repair: release every stop journaled by a previous radar instance.
+
+    A SIGKILLed radar leaves its journal on disk; those stops are orphans (the
+    process/remote agent will never be resumed by the dead radar). We resume them
+    all and clear the journal. This is also CORRECT, not just safe: the in-memory
+    token ledger is lost on restart, so budgets start fresh — a previously
+    over-budget agent should run again, and the reconciler will re-freeze it only
+    if it crosses the limit anew."""
+    try:
+        with open(FREEZE_JOURNAL, encoding="utf-8") as f:
+            journaled = json.load(f).get("frozen", {})
+    except FileNotFoundError:
+        return
+    except Exception as exc:                  # noqa: BLE001
+        log.warning("radar.token.journal.load_failed error=%r", exc)
+        return
+    recovered = 0
+    for agent_id, ent in (journaled or {}).items():
+        try:
+            if ent.get("kind") == "process":
+                pid, ct = ent.get("pid"), ent.get("create_time")
+                if not pid:
+                    continue
+                p = psutil.Process(pid)
+                if ct and abs(p.create_time() - ct) > 2:
+                    continue                  # pid reused — not the process we froze
+                p.resume()
+                recovered += 1
+                log.warning("radar.token.recover.resume agent_id=%s pid=%s (orphaned freeze)",
+                            agent_id, pid)
+            elif ent.get("kind") == "remote" and ent.get("url"):
+                _post_control(ent["url"], {"action": "resume", "agent_id": agent_id,
+                                           "reason": "control plane restarted"})
+                recovered += 1
+                log.warning("radar.token.recover.remote agent_id=%s url=%s (orphaned stop)",
+                            agent_id, ent["url"])
+        except Exception:                     # noqa: BLE001 — best-effort per entry
+            pass
+    with _journal_lock:
+        _freeze_journal.clear()
+        _journal_persist_locked()
+    if recovered:
+        _record_event("token_recover", "", f"resumed {recovered} orphaned stop(s) after restart")
+        log.info("radar.token.recover resumed=%d after restart", recovered)
+
+
+def _proc_for_entry(e) -> "psutil.Process | None":
+    """The live psutil.Process for a detected agent, or None if it is not a
+    controllable local process. Verifies start-time to defeat PID reuse, and
+    never returns the radar's own process."""
+    pid = getattr(e, "pid", None)
+    # Identity-guard timestamp: an entry's create_time. For a scanned entry that
+    # is `first_seen`.
+    ts_hint = getattr(e, "first_seen", None)
+    # Recover the pid when the `pid` field is empty (e.g. an agent that
+    # self-registered with a scan-style id but no pid). The id format is
+    # `proc-<pid>-<int(create_time)>`, so the id ALSO carries the identity guard —
+    # this is what lets the control plane stop an autonomous local agent that
+    # never told us its pid.
+    if not pid:
+        m = re.match(r"proc-(\d+)-(\d+)$", str(getattr(e, "id", "")))
+        if m:
+            pid = int(m.group(1))
+            ts_hint = float(m.group(2))     # the id's timestamp IS the create_time
+    if not pid or pid == os.getpid():
+        return None
+    try:
+        p = psutil.Process(pid)
+        # If a different process now owns this pid, the start-times won't match —
+        # refuse to signal it.
+        if ts_hint and abs(p.create_time() - ts_hint) > 2:
+            return None
+        return p
+    except Exception:
+        return None
+
+
+def _token_suspend_process(agent_id: str, evaluation: dict | None = None) -> None:
+    """Freeze (SIGSTOP) an over-budget agent's process — the control plane's hard
+    stop for an agent that will not stop itself. No-op if disabled, already
+    frozen, or not a controllable local process."""
+    if not TOKEN_PROCESS_STOP:
+        return
+    e = REGISTRY.get(agent_id)
+    if not e:
+        return
+    p = _proc_for_entry(e)
+    if p is None:
+        return
+    pid = p.pid                              # the RESOLVED pid (may come from the id)
+    with _token_proc_lock:
+        if agent_id in _token_suspended:
+            return
+        try:
+            p.suspend()
+            _token_suspended[agent_id] = pid
+        except Exception as exc:  # noqa: BLE001
+            log.warning("radar.token.suspend.failed agent_id=%s pid=%s error=%r",
+                        agent_id, pid, exc)
+            return
+    # Journal the freeze so a crash can be repaired on the next startup.
+    try:
+        ct = p.create_time()
+    except Exception:                           # noqa: BLE001
+        ct = None
+    _journal_set(agent_id, {"kind": "process", "pid": pid, "create_time": ct})
+    used = (evaluation or {}).get("used_tokens")
+    budget = (evaluation or {}).get("budget_tokens")
+    detail = "process frozen (SIGSTOP) — token budget exhausted"
+    if budget:
+        detail = f"process frozen (SIGSTOP) — token budget exhausted ({used}/{budget})"
+    _record_event("token_process_stop", agent_id, detail)
+    log.warning("radar.token.process_stop agent_id=%s pid=%s %s", agent_id, pid, detail)
+
+
+def _token_resume_process(agent_id: str) -> None:
+    """SIGCONT a process the radar previously froze (budget recovered / reset)."""
+    with _token_proc_lock:
+        pid = _token_suspended.get(agent_id)
+    if pid is None:
+        return
+    try:
+        psutil.Process(pid).resume()
+        log.info("radar.token.process_resume agent_id=%s pid=%s", agent_id, pid)
+        _record_event("token_process_resume", agent_id, "process resumed (SIGCONT) — budget recovered")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.token.resume.failed agent_id=%s pid=%s error=%r", agent_id, pid, exc)
+    with _token_proc_lock:
+        _token_suspended.pop(agent_id, None)
+    _journal_clear(agent_id)
+
+
+# ---- remote agents (no local pid): push a stop directive over a webhook -------
+
+def _post_control(url: str, payload: dict) -> bool:
+    """POST a control directive to an agent's control_endpoint. True on 2xx."""
+    try:
+        r = httpx.post(url, json=payload, timeout=TOKEN_CONTROL_TIMEOUT,
+                       headers={"ngrok-skip-browser-warning": "true"})
+        return 200 <= r.status_code < 300
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.token.control.post_failed url=%s error=%r", url, exc)
+        return False
+
+
+def _token_stop_remote(agent_id: str, evaluation: dict | None) -> bool:
+    """Hard stop for a REMOTE agent: push {"action":"suspend"} to its registered
+    control_endpoint (the network analog of SIGSTOP). True if delivered."""
+    e = REGISTRY.get(agent_id)
+    url = getattr(e, "control_endpoint", None) if e else None
+    if not url:
+        return False
+    with _token_proc_lock:
+        if agent_id in _token_remote_stopped:
+            return True
+    ok = _post_control(url, {"action": "suspend", "agent_id": agent_id,
+                             "reason": "token budget exhausted",
+                             "budget": evaluation or {}})
+    if ok:
+        with _token_proc_lock:
+            _token_remote_stopped[agent_id] = url
+        _journal_set(agent_id, {"kind": "remote", "url": url})
+        _record_event("token_remote_stop", agent_id, f"suspend pushed to {url}")
+        log.warning("radar.token.remote_stop agent_id=%s url=%s", agent_id, url)
+    else:
+        _record_event("token_remote_stop_failed", agent_id, f"could not reach {url}")
+    return ok
+
+
+def _token_resume_remote(agent_id: str) -> None:
+    """Release a remote agent the control plane suspended (budget recovered)."""
+    with _token_proc_lock:
+        url = _token_remote_stopped.get(agent_id)
+    if not url:
+        return
+    _post_control(url, {"action": "resume", "agent_id": agent_id,
+                        "reason": "token budget recovered"})
+    with _token_proc_lock:
+        _token_remote_stopped.pop(agent_id, None)
+    _journal_clear(agent_id)
+    _record_event("token_remote_resume", agent_id, "resume pushed")
+    log.info("radar.token.remote_resume agent_id=%s url=%s", agent_id, url)
+
+
+# ---- dispatcher: pick the right hard-stop mechanism for THIS agent ------------
+
+def _pid_of_entry(e) -> int | None:
+    """The OS pid an entry maps to — its `pid` field, or recovered from a
+    `proc-<pid>-<ts>` id. Lightweight (no psutil); used to detect SHARED processes."""
+    pid = getattr(e, "pid", None)
+    if pid:
+        return pid
+    m = re.match(r"proc-(\d+)-(\d+)$", str(getattr(e, "id", "")))
+    return int(m.group(1)) if m else None
+
+
+def _pid_shared(pid: int | None, agent_id: str) -> bool:
+    """True if any OTHER registered agent maps to the same OS process — i.e. a
+    SIGSTOP would freeze (and silence the monitoring of) more than just this agent."""
+    if not pid:
+        return False
+    return any(e.id != agent_id and _pid_of_entry(e) == pid for e in REGISTRY.all())
+
+
+def _token_enforce_stop(agent_id: str, evaluation: dict | None = None) -> None:
+    """Hard-stop an over-budget agent with whatever the control plane can reach,
+    no agent cooperation in the decision and nothing hardcoded:
+      1. a DEDICATED local process -> SIGSTOP (freeze);
+      2. else a remote control_endpoint -> push a suspend directive;
+      3. else -> flag uncontrollable (operator-visible; gate/deny still applies).
+
+    A process SHARED by several registered agents is never frozen — SIGSTOP is
+    process-granular, so freezing it would stop and silence the OTHER agents in
+    that process (e.g. a multi-agent runtime). Such an agent falls through to the
+    gate/deny path, leaving its co-tenants running and monitored."""
+    if not TOKEN_PROCESS_STOP:
+        return
+    e = REGISTRY.get(agent_id)
+    if not e:
+        return
+    p = _proc_for_entry(e)
+    if p is not None and not _pid_shared(p.pid, agent_id):
+        _token_uncontrolled.discard(agent_id)   # became controllable (e.g. pid recovered)
+        _token_suspend_process(agent_id, evaluation)
+        return
+    if getattr(e, "control_endpoint", None):
+        _token_uncontrolled.discard(agent_id)
+        _token_stop_remote(agent_id, evaluation)
+        return
+    if agent_id not in _token_uncontrolled:
+        _token_uncontrolled.add(agent_id)
+        why = ("shares its OS process with other agents — not frozen (that would "
+               "stop them too)" if p is not None else
+               "no local pid or control endpoint")
+        _record_event("token_uncontrolled", agent_id,
+                      f"over budget but {why} — enforcement limited to the gate/deny path")
+        log.warning("radar.token.uncontrolled agent_id=%s shared_process=%s",
+                    agent_id, p is not None)
+
+
+def _token_enforce_resume(agent_id: str) -> None:
+    """Release whatever stop the control plane applied (local and/or remote)."""
+    _token_resume_process(agent_id)   # no-op unless WE froze it locally
+    _token_resume_remote(agent_id)    # no-op unless WE suspended it remotely
+    _token_uncontrolled.discard(agent_id)
+
+
+def _token_reconcile_once() -> None:
+    """One sync reconcile pass (run off the event loop): stop the newly
+    over-budget, release whatever recovered or vanished."""
+    for e in REGISTRY.all():
+        if _laminar.is_exhausted(e.id):
+            _token_enforce_stop(e.id, _laminar.budget_state(e.id))
+    tracked = set(_token_suspended) | set(_token_remote_stopped) | set(_token_uncontrolled)
+    for aid in tracked:
+        ent = REGISTRY.get(aid)
+        if ent is None or not _laminar.is_exhausted(aid):
+            _token_enforce_resume(aid)
+
+
+async def _token_process_reconciler() -> None:
+    """Keep hard-stop state in sync with live budgets — freeze/suspend the newly
+    over-budget and release the recovered — for BOTH local processes and remote
+    (webhook) agents. Disabled via env or when laminar is absent."""
+    if not (TOKEN_PROCESS_STOP and _LAMINAR):
+        log.info("radar.token.hardstop.reconciler disabled (env or laminar absent)")
+        return
+    log.info("radar.token.hardstop.reconciler enabled interval=%.0fs", TOKEN_PROCESS_INTERVAL)
+    while True:
+        try:
+            await asyncio.to_thread(_token_reconcile_once)   # HTTP/psutil off the loop
+        except Exception as exc:  # noqa: BLE001 — reconciler must never die
+            log.warning("radar.token.hardstop.reconciler.error error=%r", exc, exc_info=True)
+        await asyncio.sleep(TOKEN_PROCESS_INTERVAL)
+
+
+def _resume_all_frozen() -> None:
+    """Shutdown safety: never leave any agent stopped because the radar stopped."""
+    for aid in set(_token_suspended) | set(_token_remote_stopped):
+        _token_enforce_resume(aid)
+
+
+def _observe_telemetry(agent_id: str, detail: str = "telemetry observed in execution") -> None:
+    """Close the telemetry loop: real telemetry was OBSERVED for this agent
+    (an execution event / signal reached the control plane). Mark the telemetry
+    hook present — proven, not declared — and, if the agent was quarantined only
+    for missing telemetry, re-run the SAME onboarding gate so it leaves
+    quarantine automatically. The magazine's "telemetry ... observed in
+    execution", now actually observed.
+    """
+    if not agent_id:
+        return
+    e = REGISTRY.get(agent_id)
+    if not e:
+        return
+    now = time.time()
+
+    # Coalesce: if the hook is already proven and the agent is active, only
+    # refresh the timestamp occasionally so a busy task doesn't persist on every
+    # event. The reconciler's TTL is far larger than this refresh window.
+    if (e.telemetry_enabled and e.status != "quarantined"
+            and e.last_telemetry_ts is not None
+            and now - e.last_telemetry_ts < _TELEMETRY_REFRESH_MIN):
+        return
+
+    fields: dict = {"telemetry_enabled": True, "last_telemetry_ts": now}
+    if e.status == "quarantined":
+        # Re-evaluate admission with the telemetry hook now proven present.
+        probe = e.model_copy(update={"telemetry_enabled": True, "last_telemetry_ts": now})
+        status, reason = onboarding.decide_status(probe)
+        fields["status"] = status
+        fields["quarantine_reason"] = reason
+
+    updated = REGISTRY.patch(agent_id, **fields)
+    if updated and e.status == "quarantined" and updated.status == "active":
+        _record_event("telemetry_observed", agent_id, detail + " -> active")
+        log.info("radar.telemetry.observed agent_id=%s -> active", agent_id)
+
+
+def _observe_policy(agent_id: str, detail: str = "policy hook exercised in execution") -> None:
+    """Close the POLICY-CALLBACK loop, mirroring _observe_telemetry: the agent
+    actually CONSULTED the control plane's policy — it called the gate — which is
+    its policy hook 'observed in execution' (the magazine's onboarding
+    requirement). Mark it proven and, if that was the last hook missing, re-run
+    the SAME onboarding gate so the agent leaves quarantine. Nothing is keyed on a
+    specific agent or callback URL."""
+    if not agent_id:
+        return
+    e = REGISTRY.get(agent_id)
+    if not e:
+        return
+    now = time.time()
+    if (e.policy_observed and e.status != "quarantined"
+            and e.last_policy_ts is not None
+            and now - e.last_policy_ts < _TELEMETRY_REFRESH_MIN):
+        return
+    fields: dict = {"policy_observed": True, "last_policy_ts": now}
+    if e.status == "quarantined":
+        probe = e.model_copy(update={"policy_observed": True, "last_policy_ts": now})
+        status, reason = onboarding.decide_status(probe)
+        fields["status"] = status
+        fields["quarantine_reason"] = reason
+    updated = REGISTRY.patch(agent_id, **fields)
+    if updated and e.status == "quarantined" and updated.status == "active":
+        _record_event("policy_observed", agent_id, detail + " -> active")
+        log.info("radar.policy.observed agent_id=%s -> active", agent_id)
+
+
+def _event_has_flags(event: dict) -> bool:
+    """Taxonomy-free: an execution event proves flag wiring when it carries
+    feature-flag state (a `feature_flags`/`flags` key, in `extra` or top level)."""
+    extra = event.get("extra") or {}
+    return bool(extra.get("feature_flags") or extra.get("flags")
+                or event.get("feature_flags") or event.get("flags"))
+
+
+def _observe_flags(agent_id: str, detail: str = "flag wiring observed in execution") -> None:
+    """Close the FEATURE-FLAG loop, mirroring _observe_telemetry/_observe_policy:
+    the agent reported feature-flag state during execution, proving its flag hook
+    is wired and "observed in execution". Mark it proven and, if that was the last
+    hook missing, re-run the SAME onboarding gate so the agent leaves quarantine.
+    Nothing is keyed on a specific agent or flag name."""
+    if not agent_id:
+        return
+    e = REGISTRY.get(agent_id)
+    if not e:
+        return
+    now = time.time()
+    if (e.flags_observed and e.status != "quarantined"
+            and e.last_flags_ts is not None
+            and now - e.last_flags_ts < _TELEMETRY_REFRESH_MIN):
+        return
+    fields: dict = {"flags_observed": True, "last_flags_ts": now}
+    if e.status == "quarantined":
+        probe = e.model_copy(update={"flags_observed": True, "last_flags_ts": now})
+        status, reason = onboarding.decide_status(probe)
+        fields["status"] = status
+        fields["quarantine_reason"] = reason
+    updated = REGISTRY.patch(agent_id, **fields)
+    if updated and e.status == "quarantined" and updated.status == "active":
+        _record_event("flags_observed", agent_id, detail + " -> active")
+        log.info("radar.flags.observed agent_id=%s -> active", agent_id)
+
+
+async def _telemetry_reconciler() -> None:
+    """The other half of the closed loop: an agent that STOPS exercising a proven
+    control hook — telemetry OR its policy callback — loses that hook and is
+    re-quarantined. Disabled when AGENT_RADAR_TELEMETRY_TTL=0. Quarantine only
+    blocks governed writes, so an idle agent simply cannot write until it proves
+    the hook again — it re-promotes automatically on its next observed event/gate.
+    """
+    if TELEMETRY_TTL <= 0:
+        log.info("radar.hook.reconciler disabled (AGENT_RADAR_TELEMETRY_TTL=0)")
+        return
+    log.info("radar.hook.reconciler enabled ttl=%.0fs interval=%.0fs",
+             TELEMETRY_TTL, TELEMETRY_RECONCILE_INTERVAL)
+    while True:
+        try:
+            now = time.time()
+            for e in REGISTRY.all():
+                # Drop any REQUIRED, proven hook that has gone silent past the TTL.
+                # Each is gated on its require-observed flag so a declared-trusted
+                # hook (which carries no observation timestamp anyway) is never
+                # reconciled out.
+                stale: dict = {}
+                if (REQUIRE_OBSERVED_TELEMETRY and e.telemetry_enabled
+                        and e.last_telemetry_ts is not None
+                        and now - e.last_telemetry_ts > TELEMETRY_TTL):
+                    stale["telemetry_enabled"] = False
+                if (REQUIRE_OBSERVED_POLICY and e.policy_observed
+                        and e.last_policy_ts is not None
+                        and now - e.last_policy_ts > TELEMETRY_TTL):
+                    stale["policy_observed"] = False
+                if (REQUIRE_OBSERVED_FLAGS and e.flags_observed
+                        and e.last_flags_ts is not None
+                        and now - e.last_flags_ts > TELEMETRY_TTL):
+                    stale["flags_observed"] = False
+                if not stale:
+                    continue
+                probe = e.model_copy(update=stale)
+                status, reason = onboarding.decide_status(probe)
+                REGISTRY.patch(e.id, status=status, quarantine_reason=reason, **stale)
+                if status == "quarantined" and e.status != "quarantined":
+                    dropped = ", ".join(k.replace("_enabled", "").replace("_observed", "")
+                                        for k in stale)
+                    _record_event("hook_stale", e.id,
+                                  f"{dropped} hook(s) went silent -> quarantined")
+                    log.warning("radar.hook.stale agent_id=%s dropped=%s -> quarantined",
+                                e.id, list(stale))
+        except Exception as exc:  # noqa: BLE001 — reconciler must never die
+            log.warning("radar.hook.reconciler.error error=%r", exc, exc_info=True)
+        await asyncio.sleep(TELEMETRY_RECONCILE_INTERVAL)
 
 
 # ----------------------------------------------------------------------
@@ -258,25 +833,40 @@ async def _connect_temporal() -> None:
 async def lifespan(app: FastAPI):
     log.info("radar.startup starting scanner and connecting to Temporal...")
     SCANNER.start()
+    # Crash recovery FIRST: release anything a previous (possibly SIGKILLed) radar
+    # left frozen/suspended, before the reconciler re-establishes live state.
+    _recover_orphaned_freezes()
     await _connect_temporal()
     mgr = asyncio.create_task(_onboarding_manager())
+    tel = asyncio.create_task(_telemetry_reconciler())
+    tps = asyncio.create_task(_token_process_reconciler())
     log.info("radar.startup complete temporal=%s", STATE["temporal"])
     try:
         yield
     finally:
         log.info("radar.shutdown stopping scanner and workers...")
         mgr.cancel()
+        tel.cancel()
+        tps.cancel()
+        _resume_all_frozen()   # never leave a process frozen on shutdown
         for wt in STATE.get("worker_tasks") or []:
             wt.cancel()
         SCANNER.stop()
         log.info("radar.shutdown complete")
 
 
-# The radar is no longer a standalone FastAPI app — it is an APIRouter included
-# into the gateway app (awcp.gateway.app). HTTP routes are auto-traced by the
+# The radar is no longer just a standalone FastAPI app — it is an APIRouter that
+# the gateway app (awcp.gateway.app) includes. HTTP routes are auto-traced by the
 # gateway's instrument_fastapi(app); an APIRouter has no middleware stack of its
-# own and cannot be instrumented directly.
+# own and cannot be instrumented directly. A standalone `app` is still built at
+# the bottom of this file for radar-only deployments (uvicorn awcp.radar.api:app).
 router = APIRouter()
+
+# Token-aware LLM gateway (enforcement way #5): a model-call proxy under /llm
+# that refuses an over-budget agent's calls at the source. Additive — mounting it
+# changes no existing route; agents opt in by pointing their model base URL at it.
+from awcp.radar.llm_gateway import gateway_router  # noqa: E402
+router.include_router(gateway_router)
 
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
@@ -290,8 +880,12 @@ try:
     from awcp import laminar as _laminar
 
     def _on_token_breach(agent_id: str, evaluation: dict) -> None:
-        """Token budget exhausted -> step the agent one rung down its OWN
-        ladder (same path a failure-budget breach takes in /signal)."""
+        """Token budget exhausted -> step the agent one rung down its OWN ladder
+        (GRACEFUL DEGRADATION — the same durable, recoverable path a failure-budget
+        breach takes in /signal). INTACT from before. The IMMEDIATE hard stop that
+        denies all execution while the agent is over budget is layer (2), enforced
+        live by _token_blocked() at the gate / execution entrypoints — so the two
+        coexist without one overriding the other."""
         e = REGISTRY.get(agent_id)
         if not e:
             return
@@ -307,14 +901,17 @@ try:
         _record_event("degraded", agent_id, f"-> {new_profile}", reason=why)
         log.warning("radar.token.degraded agent_id=%s -> %s (%s)",
                     agent_id, new_profile, why)
+        # NB: the forceful hard stop (SIGSTOP / remote suspend) is deliberately
+        # NOT done here. This callback runs synchronously inside an async request
+        # handler, so blocking psutil/HTTP work would stall the single event loop
+        # and make ONE over-budget agent freeze the radar for EVERY other agent.
+        # The off-loop reconciler (_token_process_reconciler, via asyncio.to_thread)
+        # applies the forceful stop for every over-budget agent within its interval,
+        # and the gate / gateway already deny this agent immediately and live.
 
     _laminar.init_laminar(get_agent=REGISTRY.get,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
-    # Mount onto the radar's OWN router (not a FastAPI `app` — this module has
-    # none; it is included into the gateway, and into the standalone `app` built
-    # at the bottom of this file). Under the gateway the routes become
-    # /awcp/registry/laminar/*; in a radar-only deployment they sit at /laminar/*.
     router.include_router(_laminar.router)
     _LAMINAR = True
     log.info("radar.laminar.mounted ui=/laminar/ui")
@@ -336,6 +933,9 @@ def _to_dict(e: AgentEntry) -> dict:
     # surface the EFFECTIVE degradation policy (after risk/override resolution)
     d["effective_budget"] = policy.budget_for(e)
     d["effective_ladder"] = policy.ladder_for(e)
+    # the agent's CURRENT degradation-stage directives (sampling / retry /
+    # concurrency / profile / writes) so the runtime + operators can honour them
+    d["effective_stage"] = policy.effective_stage(e)
     return d
 
 
@@ -365,10 +965,24 @@ def register(req: RegisterRequest) -> dict:
         owner=req.owner,
         endpoint=req.endpoint,
         transport=req.transport,
+        control_endpoint=req.control_endpoint,
         write_scopes=req.write_scopes,
         feature_flags=req.feature_flags,
+        # Declared flags are trusted unless observed-flags is required (default
+        # trusts them); the _observe_flags path flips this on when the agent
+        # reports flag state in execution.
+        flags_observed=(bool(req.feature_flags) and not REQUIRE_OBSERVED_FLAGS),
         policy_callbacks=req.policy_callbacks,
-        telemetry_enabled=req.telemetry_enabled,
+        # A DECLARED telemetry hook is not trusted when observed-telemetry is
+        # required — the agent must actually emit telemetry to earn it (the
+        # _observe_telemetry path flips it on). Legacy trust-on-declare returns
+        # by setting AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY=false.
+        telemetry_enabled=(req.telemetry_enabled and not REQUIRE_OBSERVED_TELEMETRY),
+        # Same rule for the policy-callback hook: a DECLARED callback list is not
+        # trusted when observed-policy is required — the agent must actually
+        # consult policy (call the gate) to earn it (the _observe_policy path
+        # flips it on). Off => trust the declared list.
+        policy_observed=(bool(req.policy_callbacks) and not REQUIRE_OBSERVED_POLICY),
         risk=req.risk,
         autonomy_ladder=req.autonomy_ladder,
         failure_budget=req.failure_budget,
@@ -390,6 +1004,7 @@ def register(req: RegisterRequest) -> dict:
 class GateRequest(BaseModel):
     action: str = ""
     write: bool = True            # the magazine gates WRITE-capable actions
+    scope: str = ""               # the action's write scope (checked vs declared write_scopes)
 
 
 class SignalRequest(BaseModel):
@@ -413,8 +1028,26 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     """Evaluate whether an agent may perform an action (the write-action gate).
     An external agent/interceptor calls this before a state-changing action."""
     e = _require(agent_id)
+
+    # The agent consulting the gate IS its policy callback being exercised in
+    # execution — observe it so the hook is proven (magazine onboarding).
+    _observe_policy(agent_id)
+
+    # Token HARD STOP (control plane): an over-budget agent is denied EVERY
+    # action — including reads — so it cannot execute any further. Checked before
+    # the normal write-gate, which would otherwise let reads through.
+    blocked = _token_blocked(agent_id)
+    if blocked is not None:
+        METRICS.record_gate(decision="deny", mode="token_hard_stop", duration=0.0, risk=e.risk)
+        _record_event("gate", agent_id, "deny (token_hard_stop)", action=req.action)
+        return {"agent_id": agent_id, "action": req.action, "mode": "token_hard_stop",
+                "decision": "deny",
+                "reason": "token budget exhausted — hard stop by control plane",
+                "budget": blocked, "status": e.status,
+                "autonomy_profile": e.autonomy_profile}
+
     t0 = time.monotonic()
-    decision = policy.evaluate_action(e, action=req.action, is_write=req.write)
+    decision = policy.evaluate_action(e, action=req.action, is_write=req.write, scope=req.scope)
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
         decision=decision["decision"],
@@ -438,6 +1071,8 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
     """Report an execution outcome. Failures step autonomy down the ladder once
     the failure budget is exhausted (graceful degradation)."""
     e = _require(agent_id)
+    # An execution-outcome report is observed telemetry for this agent.
+    _observe_telemetry(agent_id, "execution signal")
     result = policy.apply_signal(e, ok=req.ok, reason=req.reason)
     updated = REGISTRY.patch(agent_id, **result["patch"])
     budget = policy.budget_for(updated)
@@ -470,6 +1105,10 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
         "autonomy_profile": updated.autonomy_profile,
         "autonomy_reason": updated.autonomy_reason,
         "failure_count": updated.failure_count,
+        # Hand the runtime its CURRENT degradation directives at the exact moment
+        # autonomy changed, so it applies the magazine's tighten-retry / lower-
+        # concurrency / safer-profile / raise-sampling for the next step.
+        "effective_stage": policy.effective_stage(updated),
     }
 
 
@@ -488,13 +1127,46 @@ def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     return {"agent_id": agent_id, "autonomy_profile": updated.autonomy_profile}
 
 
+class RiskRequest(BaseModel):
+    # both optional → the operator can set just the tier, just the budget, or both
+    risk: str | None = None           # the risk tier (e.g. low | medium | high)
+    token_budget: int | None = None   # explicit per-agent budget; 0 clears it (→ use tier)
+
+
+@router.post("/agents/{agent_id}/risk")
+def set_risk(agent_id: str, req: RiskRequest) -> dict:
+    """Operator override — set an agent's RISK tier and/or its explicit per-agent
+    token budget (the magazine's declared budget). Risk drives the budget tier;
+    an explicit token_budget outranks the tier; sending token_budget=0 clears it
+    so the agent falls back to its tier. Free-form tier string (no hardcoded set)."""
+    _require(agent_id)
+    patch: dict = {}
+    if req.risk is not None and req.risk.strip():
+        patch["risk"] = req.risk.strip().lower()
+    if req.token_budget is not None:
+        patch["token_budget"] = req.token_budget if req.token_budget > 0 else None
+    if not patch:
+        raise HTTPException(status_code=400, detail="provide risk and/or token_budget")
+    updated = REGISTRY.patch(agent_id, **patch)
+    detail = " ".join(f"{k}={patch[k]}" for k in patch)
+    _record_event("risk", agent_id, f"operator set {detail}")
+    return {"agent_id": agent_id, "risk": updated.risk,
+            "token_budget": getattr(updated, "token_budget", None)}
+
+
 @router.delete("/agents/{agent_id}")
 def deregister(agent_id: str) -> dict:
     """Operator action — remove an entry from the inventory (registry hygiene).
     A still-running scanned process will be re-detected on the next scan."""
+    # Release ANY hard stop the control plane applied BEFORE removing the entry,
+    # so the operator regains full control of the process. A SIGSTOP'd process
+    # ignores SIGTERM until it is continued, so without this SIGCONT the operator
+    # cannot turn the agent off; once resumed (and untracked) the radar will not
+    # touch it again.
+    _token_enforce_resume(agent_id)
     if not REGISTRY.remove(agent_id):
         raise HTTPException(status_code=404, detail="agent not found")
-    _record_event("removed", agent_id, "operator removed entry")
+    _record_event("removed", agent_id, "operator removed entry (hard stop released)")
     return {"ok": True, "removed": agent_id}
 
 
@@ -536,6 +1208,22 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
     # accounting keeps working when Temporal is unavailable
     if _LAMINAR:
         _laminar.on_execution_start(req.model_dump())
+    # Attribute later events to this agent, and observe telemetry now (a started
+    # governed execution reported to the control plane is itself telemetry).
+    STATE["exec_agents"][req.task_id] = req.agent_id
+    _observe_telemetry(req.agent_id, "execution started")
+
+    # Token HARD STOP: the control plane refuses to launch a governed execution
+    # for an agent already over its token budget.
+    blocked = _token_blocked(req.agent_id)
+    if blocked is not None:
+        _note_token_block(req.agent_id, blocked, "execution start")
+        STATE["exec_agents"].pop(req.task_id, None)
+        log.warning("radar.exec.start.blocked agent_id=%s task_id=%s reason=token_budget",
+                    req.agent_id, req.task_id)
+        return {"ok": False, "reason": "token_budget_exhausted", "blocked": True,
+                "budget": blocked}
+
     if not (STATE["temporal"] and STATE["client"]):
         log.debug("radar.exec.start.skipped reason=temporal_unavailable task_id=%s", req.task_id)
         return {"ok": False, "reason": "temporal_unavailable"}
@@ -571,15 +1259,71 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     # authoritative gate, which starts denying once the breach degrades autonomy.
     token_budget = _laminar.on_execution_event(task_id, event) if _LAMINAR else None
 
+    # Observed telemetry: a real-time execution event reached the control plane.
+    # Resolve the agent from the task map (fallback: the laminar evaluation).
+    agent_id = STATE["exec_agents"].get(task_id)
+    if not agent_id and isinstance(token_budget, dict):
+        agent_id = token_budget.get("agent_id")
+    if agent_id:
+        _observe_telemetry(agent_id)
+        # If the event reports feature-flag state, that proves flag wiring is
+        # observed in execution (the magazine's third onboarding hook).
+        if _event_has_flags(event):
+            _observe_flags(agent_id)
+
+    # Degradation directives (magazine Step 04, the half the control plane owns):
+    #  • hand the runtime its CURRENT stage directives every step so it applies
+    #    tighten-retry / lower-concurrency / safer-profile for the next call;
+    #  • for a DEGRADED agent, capture the step as evidence — the control-plane
+    #    "increase trace sampling" effect (more capture when things go wrong).
+    stage_directive = None
+    if agent_id:
+        _ent = REGISTRY.get(agent_id)
+        if _ent is not None:
+            stage_directive = policy.effective_stage(_ent)
+            if stage_directive.get("stage") not in (None, "active"):
+                _record_event("degraded_step", agent_id,
+                              f"{req.type or 'step'} captured (stage={stage_directive['stage']})",
+                              stage=stage_directive.get("stage"))
+
+    # Token HARD STOP mid-flight: if this event tipped the agent over its budget
+    # (or it is already over), the control plane halts the loop — it stops
+    # forwarding the event and signals the workflow to finish, so no further
+    # step runs. The agent does not get to decide.
+    exhausted = isinstance(token_budget, dict) and token_budget.get("state") == "exhausted"
+    if not exhausted and agent_id:
+        live = _token_blocked(agent_id)
+        if live is not None:
+            exhausted, token_budget = True, live
+    if exhausted and agent_id:
+        _note_token_block(agent_id, token_budget if isinstance(token_budget, dict) else None,
+                          "execution event")
+        wf_id = STATE["exec_workflows"].pop(task_id, None)
+        STATE["exec_agents"].pop(task_id, None)
+        if wf_id and STATE["temporal"] and STATE["client"]:
+            try:
+                handle = STATE["client"].get_workflow_handle(wf_id)
+                await handle.signal(
+                    AgentExecutionWorkflow.finish,
+                    {"status": "blocked", "error": "token budget exhausted — hard stop"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("radar.token.hardstop.finish_failed task_id=%s error=%r", task_id, exc)
+        log.warning("radar.exec.event.blocked agent_id=%s task_id=%s reason=token_budget",
+                    agent_id, task_id)
+        return {"ok": False, "reason": "token_budget_exhausted_hard_stop",
+                "token_budget": token_budget}
+
     wf_id = STATE["exec_workflows"].get(task_id)
     if not wf_id or not (STATE["temporal"] and STATE["client"]):
-        return {"ok": False, "reason": "no_active_workflow", "token_budget": token_budget}
+        return {"ok": False, "reason": "no_active_workflow",
+                "token_budget": token_budget, "effective_stage": stage_directive}
 
     try:
         handle = STATE["client"].get_workflow_handle(wf_id)
         await handle.signal(AgentExecutionWorkflow.push_event, event)
         log.debug("radar.exec.event task_id=%s type=%s", task_id, req.type)
-        return {"ok": True, "token_budget": token_budget}
+        return {"ok": True, "token_budget": token_budget, "effective_stage": stage_directive}
     except Exception as exc:
         log.warning("radar.exec.event.failed task_id=%s error=%r", task_id, exc)
         return {"ok": False, "reason": str(exc)[:200], "token_budget": token_budget}
@@ -590,6 +1334,7 @@ async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> d
     """Signal the AgentExecutionWorkflow that the task is done."""
     if _LAMINAR:
         _laminar.on_execution_complete(task_id, req.model_dump())
+    STATE["exec_agents"].pop(task_id, None)
     wf_id = STATE["exec_workflows"].pop(task_id, None)
     if not wf_id or not (STATE["temporal"] and STATE["client"]):
         return {"ok": False, "reason": "no_active_workflow"}
@@ -644,19 +1389,19 @@ def index() -> FileResponse:
 # ----------------------------------------------------------------------
 # Standalone ASGI app — radar-only deployments.
 #
-# The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it under
-# /awcp/registry, so it does NOT use this object. But the radar-centric runners
-# (scripts/run_all.sh, run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app`
-# directly on :8090, with every route — including /laminar/* and the web UI —
-# living at the ROOT, which is what the bundled UI's absolute links expect.
+# The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it, so it
+# does NOT use this object. But the radar-centric runners (scripts/run_all.sh,
+# run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app` directly on :8090, with
+# every route — including /llm/*, /laminar/* and the web UI — living at the ROOT,
+# which is what the bundled UI's absolute links expect.
 #
 # Defining `app` at import time is required so `uvicorn awcp.radar.api:app` can
 # find it. When the gateway imports this module the object is simply created and
 # left unused (its lifespan only runs if uvicorn actually serves it).
 # ----------------------------------------------------------------------
-from awcp.observability.middleware import instrument_fastapi, instrument_requests
+from awcp.observability.middleware import instrument_fastapi, instrument_requests  # noqa: E402
 
 app = FastAPI(title="Agent Radar", lifespan=lifespan)
 instrument_fastapi(app)        # every radar HTTP route is auto-traced
 instrument_requests()          # outbound HTTP calls (link_mcp, etc.) are traced
-app.include_router(router)     # radar routes + the mounted /laminar/* routes
+app.include_router(router)     # radar routes + the mounted /laminar/* + /llm/* routes

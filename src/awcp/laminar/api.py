@@ -36,6 +36,13 @@ class BudgetRequest(BaseModel):
     tokens: int                 # tokens per window; 0 clears the override
 
 
+class PolicyRequest(BaseModel):
+    # all optional — partial edits are fine (operator console form)
+    default: int | None = None          # system default tokens/window
+    tiers: dict | None = None           # {"low":N,"medium":N,"high":N,...}
+    warn_ratio: float | None = None     # 0..1 fraction that triggers WARN
+
+
 @router.get("/status")
 def status() -> dict:
     return bridge.status_summary()
@@ -61,12 +68,28 @@ def usage_one(agent_id: str) -> dict:
 
 @router.get("/budgets")
 def budgets() -> dict:
+    pol = budget.get_policy()
     return {
         "overrides": budget.overrides(),
-        "risk_defaults": dict(bridge.config.RISK_TOKEN_BUDGET),
-        "system_default": bridge.config.DEFAULT_TOKEN_BUDGET,
+        "risk_defaults": pol["tiers"],          # the LIVE (operator-edited) tiers
+        "system_default": pol["default"],
+        "warn_ratio": pol["warn_ratio"],
         "window_s": bridge.config.BUDGET_WINDOW_S,
     }
+
+
+@router.get("/policy")
+def get_policy() -> dict:
+    """The live token policy (operator-editable default + per-tier budgets)."""
+    return budget.get_policy()
+
+
+@router.post("/policy")
+def set_policy(req: PolicyRequest) -> dict:
+    """Operator edits the token policy from the console (no restart). Returns the
+    new live policy so every agent's tier budget updates immediately."""
+    return budget.set_policy(default=req.default, tiers=req.tiers,
+                             warn_ratio=req.warn_ratio)
 
 
 @router.post("/budgets/{agent_id}")
