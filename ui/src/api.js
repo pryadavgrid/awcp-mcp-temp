@@ -36,6 +36,31 @@ export const getUsage = () => call('GET', '/laminar/usage')
 export const submitTask = (agent, input) =>
   call('POST', '/user/submit', { agent, input })
 
+// Upload a file for an agent that accepts one (e.g. the file-inspector). The
+// gateway relays it to the agent and returns { path, filename, size }; that path
+// is later passed back in the prompt as `FILE_PATH: <path>`.
+export const uploadFile = async (agent, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await fetch(`${API}/user/upload/${encodeURIComponent(agent)}`, {
+    method: 'POST',
+    body: fd,
+  })
+  const text = await res.text()
+  let data
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = text
+  }
+  if (!res.ok) {
+    const detail = data && data.detail !== undefined ? data.detail : data
+    const msg = typeof detail === 'string' ? detail : JSON.stringify(detail)
+    throw new Error(msg || `HTTP ${res.status}`)
+  }
+  return data
+}
+
 export const getStatus = (agent, taskId, workflowId) =>
   call(
     'GET',

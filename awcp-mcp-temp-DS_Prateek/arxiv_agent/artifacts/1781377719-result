@@ -1,0 +1,12 @@
+Based on the search results from arXiv, I found a paper that is relevant to vector databases.
+
+Title: Synthesis of Quantum Vector Databases Based on Grovers Algorithm
+Authors: Cesar Borisovich Pronin, Andrey Vladimirovich Ostroukh
+Published: 2023-06-27
+Link: http://arxiv.org/abs/2306.15295v2
+
+This paper describes a method for using Grovers algorithm to create a quantum vector database. The database stores embeddings based on Controlled-S gates, which represent a binary numerical value. This value represents the embeddings value. The process of creating meaningful embeddings is handled by a classical computer and the search process is handled by the quantum computer.
+
+The authors suggest that this approach might be beneficial for a large enough database, or it could be seen as a very qubit-efficient (super dense) way for storing data on a quantum computer, since the proposed circuit stores many embeddings inside one quantum register simultaneously.
+
+I will save this paper as an artifact.

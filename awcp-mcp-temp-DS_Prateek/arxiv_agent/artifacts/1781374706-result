@@ -1,0 +1,7 @@
+Based on the search results, I found two recent arXiv papers on retrieval-augmented generation:
+
+1. **AR-RAG: Autoregressive Retrieval Augmentation for Image Generation** (https://arxiv.org/abs/2506.06962v3)
+This paper introduces a novel paradigm called Autoregressive Retrieval Augmentation (AR-RAG) that enhances image generation by incorporating nearest neighbor retrievals at the patch level. The method performs context-aware retrievals at each generation step, using prior-generated patches as queries to retrieve and incorporate relevant visual references.
+
+2. **EVOR: Evolving Retrieval for Code Generation** (https://arxiv.org/abs/2402.12317v2)
+This paper proposes a pipeline called EVOR that employs the synchronous evolution of both queries and diverse knowledge bases for retrieval-augmented code generation (RACG). The method adapts to domains with insufficient knowledge by evolving the knowledge base and query simultaneously, allowing Large Language Models (LLMs) to better handle tasks requiring external knowledge.

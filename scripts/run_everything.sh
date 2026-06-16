@@ -45,7 +45,7 @@ TEMPORAL_PID=""; MCP_PID=""
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/moshaik/Desktop/Projects/AWCP_Demo/awcp-mcp-temp-DS_Prateek}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 
 # Temporal task queues the gateway's in-process workers listen on. Kept distinct

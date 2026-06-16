@@ -29,7 +29,7 @@ import subprocess
 
 # The bundle of standalone agents. Override with AWCP_AGENTS_DIR.
 AGENTS_DIR = os.getenv(
-    "AWCP_AGENTS_DIR", "/Users/pryadav/Downloads/awcp-mcp-temp-agents"
+    "AWCP_AGENTS_DIR", "/Users/moshaik/Desktop/Projects/AWCP_Demo/awcp-mcp-temp-DS_Prateek"
 )
 
 # Where launched agents should send governance + execution events. Points at
@@ -41,6 +41,27 @@ AGENT_RADAR_URL = os.getenv(
 )
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 AGENT_HOST = os.getenv("AWCP_AGENT_HOST", "localhost")
+
+
+def _runtime_path(d: str, run: str) -> str:
+    """The python entry script that run.sh launches.
+
+    Parsed from run.sh (the source of truth) rather than assuming a fixed
+    filename, so each agent can use its own identifiable runtime name
+    (e.g. <agent>_runtime.py) and process discovery still matches it. Falls back
+    to any *_runtime.py in the folder.
+    """
+    try:
+        with open(run, "r", errors="ignore") as f:
+            text = f.read()
+        for tok in re.findall(r"[A-Za-z0-9_.\-]+\.py", text):
+            base = os.path.basename(tok)
+            if os.path.isfile(os.path.join(d, base)):
+                return os.path.join(d, base)
+    except Exception:
+        pass
+    runtimes = sorted(f for f in os.listdir(d) if f.endswith("_runtime.py"))
+    return os.path.join(d, runtimes[0]) if runtimes else os.path.join(d, "run.sh")
 
 
 def discover() -> list[dict]:
@@ -57,7 +78,7 @@ def discover() -> list[dict]:
                     "id": name,
                     "dir": d,
                     "run": run,
-                    "runtime": os.path.join(d, "agent_runtime.py"),
+                    "runtime": _runtime_path(d, run),
                 }
             )
     return agents
@@ -68,7 +89,7 @@ def find(agent_id: str) -> dict | None:
 
 
 def _pids(agent: dict) -> list[int]:
-    """PIDs whose command line references this agent's own agent_runtime.py."""
+    """PIDs whose command line references this agent's own runtime script."""
     try:
         out = subprocess.run(
             ["pgrep", "-f", agent["runtime"]], capture_output=True, text=True

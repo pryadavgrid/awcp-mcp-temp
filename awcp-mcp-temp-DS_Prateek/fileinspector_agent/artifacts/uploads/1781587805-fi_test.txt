@@ -1,0 +1,5 @@
+Quarterly Report — Project Aurora
+Team: Robotics Division
+Q2 highlights: shipped the v3 gripper, cut latency 40%, onboarded 5 engineers.
+Risks: lithium supplier delays; mitigation is a second vendor in Taiwan.
+Next quarter: begin field trials in two warehouses.

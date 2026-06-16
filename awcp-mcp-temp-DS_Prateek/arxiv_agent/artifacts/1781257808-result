@@ -1,0 +1,12 @@
+Based on the search results, some key ideas in recent mixture-of-experts papers include:
+
+1. **Super experts**: The concept of super experts, where certain experts are more important than others, has been explored in recent research (Unveiling Super Experts in Mixture-of-Experts Large Language Models).
+2. **Mixture of Experts in Large Language Models**: Recent advances and challenges in deep learning have led to the development of mixture-of-experts models for large language models (Mixture of Experts in Large Language Models - arXiv).
+3. **Sparsely-Gated Mixture-of-Experts Layer**: The sparsely-gated mixture-of-experts layer has been proposed as a way to reduce the computational cost of mixture-of-experts models while maintaining their performance (The Sparsely-Gated Mixture-of-Experts Layer - Google Research).
+4. **Inference optimization techniques**: Various inference optimization techniques have been developed to improve the efficiency of mixture-of-experts models, including expert prediction and sparse gating (A Survey on Inference Optimization Techniques for Mixture of Experts).
+
+These are just a few examples of the key ideas in recent mixture-of-experts papers. The field is rapidly evolving, and new research is being published regularly.
+
+I will save this artifact with the following command:
+
+`save_artifact(key="mixture_of_experts_recent_papers", value={"key_ideas": ["super experts", "Mixture of Experts in Large Language Models", "Sparsely-Gated Mixture-of-Experts Layer", "Inference optimization techniques"]})`

@@ -28,7 +28,7 @@ import os
 import time
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
@@ -146,6 +146,9 @@ async def _describe(agent: dict) -> dict:
         "examples": info.get("examples", []),
         "registered": info.get("registered"),
         "agent_id": info.get("agent_id"),
+        # Whether this agent takes a file alongside the prompt (e.g. file-inspector).
+        # The UI shows an upload box only for agents that advertise this.
+        "accepts_files": bool(info.get("accepts_files", False)),
     }
 
 
@@ -323,6 +326,49 @@ async def submit(req: AskRequest) -> dict:
         "workflow_id": workflow_id,
         "temporal_url": _temporal_url(workflow_id),
     }
+
+
+@router.post("/upload/{agent}")
+async def upload(agent: str, file: UploadFile = File(...)) -> dict:
+    """Relay a browser file upload to the chosen agent's own /upload endpoint.
+
+    The dashboard (a different origin) can't POST straight to the agent, so this
+    proxies the multipart file through the gateway. The agent saves it on its own
+    filesystem and returns a local path; the UI then submits a goal that carries
+    `FILE_PATH: <path>`, which the agent reads back. Only agents that advertise
+    `accepts_files` in /info are offered an upload box by the UI, but any running
+    agent with an /upload route works here. Auto-starts the agent if needed.
+    """
+    _agent, state = await _ensure_up(agent, auto_start=True)
+    base = fs.base_url(state["port"])
+    content = await file.read()
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        try:
+            r = await c.post(
+                f"{base}/upload",
+                files={
+                    "file": (
+                        file.filename or "upload",
+                        content,
+                        file.content_type or "application/octet-stream",
+                    )
+                },
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail={"message": "could not reach the agent for upload", "error": str(e)},
+            )
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "agent rejected the upload",
+                "status_code": r.status_code,
+                "body": r.text[:500],
+            },
+        )
+    return r.json()
 
 
 @router.get("/status/{agent}/{task_id}")

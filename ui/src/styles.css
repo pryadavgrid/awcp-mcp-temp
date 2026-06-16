@@ -79,6 +79,28 @@ body {
 .ex:hover:not(:disabled) { color: var(--fg); border-color: var(--acc); }
 .ex:disabled { opacity: 0.5; cursor: default; }
 
+/* File intake — shown only for agents that advertise accepts_files. */
+.filezone {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--panel2); border: 1px dashed var(--line);
+  border-radius: 10px; padding: 10px 12px;
+}
+.filezone.drag { border-color: var(--acc); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18); }
+.filechip {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--fg);
+  background: var(--panel); border: 1px solid var(--line);
+  padding: 4px 6px 4px 10px; border-radius: 8px;
+}
+.filechip .fname { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filechip .fsize { color: var(--mut); }
+.file-x {
+  border: 0; background: transparent; color: var(--mut);
+  cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 6px;
+}
+.file-x:hover:not(:disabled) { color: var(--red); }
+.file-x:disabled { opacity: 0.5; cursor: default; }
+
 .prompt {
   width: 100%; resize: vertical; min-height: 64px;
   background: var(--panel2); color: var(--fg);

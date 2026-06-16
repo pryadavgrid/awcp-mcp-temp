@@ -1,5 +1,13 @@
-import { useEffect, useState } from 'react'
-import { API_BASE, listAgents, getUsage, submitTask, getStatus, approveTask } from './api.js'
+import { useEffect, useRef, useState } from 'react'
+import {
+  API_BASE,
+  listAgents,
+  getUsage,
+  submitTask,
+  getStatus,
+  approveTask,
+  uploadFile,
+} from './api.js'
 import AgentPicker from './components/AgentPicker.jsx'
 import Timeline from './components/Timeline.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
@@ -17,8 +25,13 @@ export default function App() {
   const [error, setError] = useState('')
   const [backendOk, setBackendOk] = useState(null)
   const [usage, setUsage] = useState([]) // /laminar/usage rows (per agent)
+  const [attached, setAttached] = useState(null) // { path, filename, size } for file agents
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInput = useRef(null)
 
   const selected = agents.find((a) => a.id === selectedId) || null
+  const acceptsFiles = !!(selected && selected.accepts_files)
   const running = status && !TERMINAL.has(status.status)
   // token usage for the selected agent, matched on the radar/Temporal agent_id
   const myUsage =
@@ -81,16 +94,43 @@ export default function App() {
     }
   }, [task])
 
+  // Switching agents drops any attached file — paths are per-agent.
+  useEffect(() => {
+    setAttached(null)
+    setUploading(false)
+    setDragOver(false)
+  }, [selectedId])
+
+  const onPickFile = async (f) => {
+    if (!f || !selectedId) return
+    setError('')
+    setUploading(true)
+    try {
+      const res = await uploadFile(selectedId, f)
+      setAttached(res) // { path, filename, size }
+    } catch (e) {
+      setError(`Upload failed: ${String(e.message || e)}`)
+      setAttached(null)
+    } finally {
+      setUploading(false)
+      if (fileInput.current) fileInput.current.value = ''
+    }
+  }
+
   const onRun = async () => {
     setError('')
     const text = prompt.trim()
     if (!selectedId) return setError('Select an agent first.')
-    if (!text) return setError('Enter a prompt.')
+    // A file agent can run on the attachment alone, with a sensible default goal.
+    if (!text && !(acceptsFiles && attached)) return setError('Enter a prompt.')
+    const goal = acceptsFiles && attached
+      ? `${text || 'Identify this file and tell me what it is and what it contains.'}\n\nFILE_PATH: ${attached.path}`
+      : text
     setBusy(true)
     setStatus(null)
     setTask(null)
     try {
-      const t = await submitTask(selectedId, text)
+      const t = await submitTask(selectedId, goal)
       setTask(t)
       setStatus({
         status: t.status || 'queued',
@@ -121,7 +161,11 @@ export default function App() {
     setStatus(null)
     setError('')
     setPrompt('')
+    setAttached(null)
   }
+
+  const fmtSize = (n) =>
+    n == null ? '' : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`
 
   return (
     <div className="app">
@@ -167,9 +211,61 @@ export default function App() {
             </div>
           )}
 
+          {acceptsFiles && (
+            <div
+              className={`filezone${dragOver ? ' drag' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                if (!busy && !running && !uploading) setDragOver(true)
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault()
+                setDragOver(false)
+                if (busy || running || uploading) return
+                const f = e.dataTransfer.files && e.dataTransfer.files[0]
+                if (f) onPickFile(f)
+              }}
+            >
+              <input
+                ref={fileInput}
+                type="file"
+                hidden
+                onChange={(e) => onPickFile(e.target.files[0])}
+              />
+              <button
+                className="btn ghost"
+                onClick={() => fileInput.current && fileInput.current.click()}
+                disabled={busy || running || uploading}
+              >
+                {uploading ? 'Uploading…' : '📎 Attach file'}
+              </button>
+              {attached ? (
+                <span className="filechip">
+                  <span className="fname">{attached.filename}</span>
+                  <span className="fsize">{fmtSize(attached.size)}</span>
+                  <button
+                    className="file-x"
+                    title="Remove file"
+                    onClick={() => setAttached(null)}
+                    disabled={busy || running}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ) : (
+                <span className="hint">or drag &amp; drop a file — then optionally add a prompt</span>
+              )}
+            </div>
+          )}
+
           <textarea
             className="prompt"
-            placeholder="Type a prompt / goal for the selected agent…"
+            placeholder={
+              acceptsFiles
+                ? 'Attach a file, then describe what you want to know about it (optional)…'
+                : 'Type a prompt / goal for the selected agent…'
+            }
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             disabled={busy || running}
@@ -186,7 +282,11 @@ export default function App() {
                 New run
               </button>
             )}
-            <button className="btn primary" onClick={onRun} disabled={busy || running || !selectedId}>
+            <button
+              className="btn primary"
+              onClick={onRun}
+              disabled={busy || running || uploading || !selectedId}
+            >
               {busy ? 'Submitting…' : running ? 'Running…' : 'Run ▸'}
             </button>
           </div>

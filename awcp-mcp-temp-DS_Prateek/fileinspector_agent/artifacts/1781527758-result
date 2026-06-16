@@ -1,0 +1,43 @@
+_(Summary model unavailable — showing the file's content directly.)_
+
+# AWCP — Phase 0: Local Development Foundation
+
+This is the substrate every later phase builds on. It brings up a durable
+workflow engine, a policy decision server, a telemetry pipeline, and the
+databases behind them, all on one Docker network so future services can
+reach them by name.
+
+There is **no AWCP business logic here yet.** Phase 0 is done when all five
+dependencies are healthy and you can watch a trace flow end-to-end.
+
+## What's in the box
+
+| Service          | Purpose                                              | URL / Port                  |
+|------------------|------------------------------------------------------|-----------------------------|
+| `postgres`       | Temporal persistence **and** the `awcp` app database | `localhost:5432`            |
+| `temporal`       | Durable workflow engine (gRPC frontend)              | `localhost:7233`            |
+| `temporal-ui`    | Inspect workflows in a browser                       | http://localhost:8080       |
+| `opa`            | Policy decision server                               | http://localhost:8181       |
+| `otel-collector` | Receives OTLP, fans out to Jaeger + debug log        | gRPC `:4317`, HTTP `:4318`  |
+| `jaeger`         | Trace backend + UI (dev only — not the ledger)       | http://localhost:16686      |
+
+## Prerequisites
+
+- Docker Engine + Docker Compose v2 (`docker compose version` should print v2.x)
+- ~6 GB RAM free for the stack
+- `curl` and `bash` on the host (for the health script)
+- Optional but recommended: the Temporal CLI on your host (`brew install temporal`)
+  so you can run `temporal workflow list --address localhost:7233` interactively
+
+## Directory layout
+
+```
+awcp/
+├── .env                      # image pins + dev credentials
+├── docker-compose.yml        # the stack
+├── Makefile                  # up / down / health / trace / clean
+├── scripts/
+│   └── healthcheck.sh        # probes every service
+└── infra/
+    ├── postgres/
+    │   └── init-awcp-db.sql           # creates …
