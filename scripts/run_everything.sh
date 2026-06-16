@@ -11,25 +11,34 @@
 #     /laminar/ui    token monitor — per-agent token bar (used / remaining)
 #     /docs          OpenAPI for all of the above
 #
-# It also starts everything the gateway needs for full Temporal + OTel
-# visibility, in order:
+# It also starts everything you need for full Temporal + OTel visibility AND the
+# React UI, in order:
 #   1. venv + dependencies                  (first run only)
 #   2. Docker telemetry stack               (OTel Collector / Tempo / Prometheus
 #                                            / Loki / Grafana — starts Docker itself
 #                                            if the daemon isn't running)
 #   3. Temporal dev server                  (engine :7233, UI :8233)
-#   4. MCP control server                   (:8002, SSE)
-#   5. a DEMO seeder (background, DEMO=1)    registers a demo agent + drives the
+#   4. Ollama model runtime                  (:11434 — the LLM the agents call)
+#   5. MCP control server                   (:8002, SSE)
+#   6. a DEMO seeder (background, DEMO=1)    registers a demo agent + drives the
 #                                            token-control loop so the UIs show
 #                                            data immediately
-#   6. the AWCP Gateway (foreground, :8000)  registry + token monitor + /user API
+#   7. the React UI (background, :5173)      Vite dev server (the dashboard you
+#                                            give prompts from)
+#   8. the AWCP Gateway (foreground, :8000)  registry + token monitor + /user API
 #
-# Usage:   bash scripts/run_everything.sh            Ctrl+C stops gateway/Temporal/MCP
+# Open http://localhost:5173 — pick an agent, type a goal, watch the live step
+# timeline. Ctrl+C stops the gateway + everything this script started.
+#
+# Usage:   bash scripts/run_everything.sh
 # Env:     SKIP_TELEMETRY=1   don't start the Docker stack
 #          SKIP_MCP=1         don't start the MCP server
+#          SKIP_OLLAMA=1      don't start Ollama
+#          SKIP_UI=1          don't start the React UI (Vite)
 #          SKIP_INSTALL=1     skip pip install on an existing venv
 #          DEMO=1             seed a synthetic agent + token-control walkthrough
 #          GATEWAY_PORT=8000  gateway port
+#          UI_PORT=5173       React UI (Vite) port
 #          AWCP_AGENTS_DIR=…  external agent bundle (default: Downloads bundle)
 #          LMNR_PROJECT_API_KEY=…   also dual-export spans to Laminar
 # ======================================================================
@@ -39,8 +48,9 @@ ROOT="$PWD"
 export PYTHONPATH="$ROOT/src"
 export OTEL_ENABLED="${OTEL_ENABLED:-true}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
+UI_PORT="${UI_PORT:-5173}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-everything-run"; mkdir -p "$LOGDIR"
-TEMPORAL_PID=""; MCP_PID=""
+TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""
 
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
@@ -70,9 +80,11 @@ PY
 cleanup(){
   echo
   say "Shutting down…"
+  [ -n "$UI_PID" ]       && kill "$UI_PID"       2>/dev/null || true
   [ -n "$MCP_PID" ]      && kill "$MCP_PID"      2>/dev/null || true
+  [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
   [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
-  say "Stopped the gateway (+ Temporal/MCP if this script started them)."
+  say "Stopped the gateway (+ Temporal/MCP/Ollama/UI if this script started them)."
   echo "  Telemetry stack left running — stop it with:"
   echo "    docker compose -f observability/docker-compose.yml down"
 }
@@ -128,7 +140,23 @@ else
   warn "Temporal CLI not found — gateway will onboard inline (install: brew install temporal)."
 fi
 
-# ── 4. MCP control server (:8002, SSE) — background ───────────────────
+# ── 4. Ollama model runtime (:11434) — the LLM the bundle agents call ──
+if [ "${SKIP_OLLAMA:-0}" = "1" ]; then
+  warn "SKIP_OLLAMA=1 — not starting Ollama."
+elif [ -n "$(port_open 11434)" ]; then
+  say "Ollama already running on :11434 — reusing it."
+elif command -v ollama >/dev/null 2>&1; then
+  say "Starting Ollama (model runtime) on :11434…"
+  nohup ollama serve > "$LOGDIR/ollama.log" 2>&1 &
+  OLLAMA_PID=$!
+  for i in $(seq 1 20); do [ -n "$(port_open 11434)" ] && break; sleep 1; done
+  [ -n "$(port_open 11434)" ] && say "Ollama is up." \
+    || warn "Ollama didn't come up — agents that need a local model will fail."
+else
+  warn "Ollama not found — install it and 'ollama pull llama3.1:8b gemma2:2b', else agents fail (https://ollama.com)."
+fi
+
+# ── 5. MCP control server (:8002, SSE) — background ───────────────────
 if [ "${SKIP_MCP:-0}" = "1" ]; then
   warn "SKIP_MCP=1 — not starting the MCP server."
 elif [ -n "$(port_open 8002)" ]; then
@@ -140,7 +168,7 @@ else
   MCP_PID=$!
 fi
 
-# ── 5. OPTIONAL canned demonstration (DEMO=1) ─────────────────────────
+# ── 6. OPTIONAL canned demonstration (DEMO=1) ─────────────────────────
 # Posts straight to the gateway ROOT paths (/agents, /laminar, /tasks) — the same
 # URLs the real bundle agents use — so the registry + token bar light up at once.
 if [ "${DEMO:-0}" = "1" ]; then
@@ -171,30 +199,52 @@ if [ "${DEMO:-0}" = "1" ]; then
   ) > "$LOGDIR/demo.log" 2>&1 &
 fi
 
-# ── 6. the AWCP Gateway (foreground) ──────────────────────────────────
+# ── 7. React UI (Vite dev server, :${UI_PORT}) — background ────────────
+if [ "${SKIP_UI:-0}" = "1" ]; then
+  warn "SKIP_UI=1 — not starting the React UI."
+elif [ -n "$(port_open "$UI_PORT")" ]; then
+  say "Something is already on :${UI_PORT} — assuming the React UI is up; reusing it."
+elif ! command -v npm >/dev/null 2>&1; then
+  warn "npm not found — skipping the React UI (install Node.js to use it)."
+else
+  if [ ! -d "ui/node_modules" ]; then
+    say "Installing React UI dependencies (first run only)…"
+    ( cd ui && npm install --silent ) || warn "npm install failed — the UI may not start."
+  fi
+  say "Starting the React UI (Vite) on :${UI_PORT}…"
+  # vite is launched directly (not via npm) so UI_PID is the real server and Ctrl+C
+  # stops it cleanly. VITE_API_BASE points the UI at THIS gateway.
+  ( cd ui && VITE_API_BASE="http://localhost:${GATEWAY_PORT}" \
+      exec node_modules/.bin/vite --host --port "${UI_PORT}" ) > "$LOGDIR/ui.log" 2>&1 &
+  UI_PID=$!
+fi
+
+# ── 8. the AWCP Gateway (foreground) ──────────────────────────────────
 echo
-echo "  ── AWCP is up on ONE port (:${GATEWAY_PORT}) ─────────────────────────────"
-echo "     Everything            : http://localhost:${GATEWAY_PORT}"
-echo "     Registry dashboard    : http://localhost:${GATEWAY_PORT}/            (Tokens column)"
-echo "     Token monitor         : http://localhost:${GATEWAY_PORT}/laminar/ui  (used / remaining bar)"
-echo "     User API              : http://localhost:${GATEWAY_PORT}/user/agents · POST /user/ask"
-echo "     API docs (all groups) : http://localhost:${GATEWAY_PORT}/docs"
-echo "     Temporal UI           : http://localhost:8233   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
-echo "     Grafana               : http://localhost:3000   (admin / awcp1234)"
-echo "     Prometheus            : http://localhost:9090"
-echo "     MCP server            : http://localhost:8002   (SSE)"
-echo "     agents bundle         : $AWCP_AGENTS_DIR"
+echo "  ── AWCP is up — open the React UI ───────────────────────────────"
+echo "  ▶  React UI (give prompts) : http://localhost:${UI_PORT}"
+echo
+echo "     Gateway (API/backend)  : http://localhost:${GATEWAY_PORT}"
+echo "     Registry dashboard     : http://localhost:${GATEWAY_PORT}/            (Tokens column)"
+echo "     Token monitor          : http://localhost:${GATEWAY_PORT}/laminar/ui  (used / remaining bar)"
+echo "     User API               : http://localhost:${GATEWAY_PORT}/user/agents · POST /user/submit"
+echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
+echo "     Temporal UI (workflows): http://localhost:8233   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
+echo "     Prometheus             : http://localhost:9090"
+echo "     MCP server             : http://localhost:8002   (SSE)"
+echo "     Ollama                 : http://localhost:11434"
+echo "     agents bundle          : $AWCP_AGENTS_DIR"
 [ "${DEMO:-0}" = "1" ] && \
-echo "     Demo (DEMO=1)         : synthetic 'demo-writer' walks the token-control loop (~20s after boot)."
+echo "     Demo (DEMO=1)          : synthetic 'demo-writer' walks the token-control loop (~20s after boot)."
 [ -n "${LMNR_PROJECT_API_KEY:-}" ] && \
-echo "     Laminar export        : ON → ${LMNR_OTLP_ENDPOINT:-https://api.lmnr.ai:8443}" || \
-echo "     Laminar export        : off (set LMNR_PROJECT_API_KEY to dual-export spans)"
+echo "     Laminar export         : ON → ${LMNR_OTLP_ENDPOINT:-https://api.lmnr.ai:8443}" || \
+echo "     Laminar export         : off (set LMNR_PROJECT_API_KEY to dual-export spans)"
 echo
-echo "  ▶ Run a REAL agent (real LLM/tool/web calls → Temporal activities + OTel):"
-echo "      curl -s localhost:${GATEWAY_PORT}/user/agents"
-echo "      curl -s -X POST localhost:${GATEWAY_PORT}/user/ask -H 'content-type: application/json' \\"
-echo "           -d '{\"agent\":\"langgraph_agent\",\"input\":\"summarize the latest arxiv paper on agents\"}'"
-echo "  ▶ Press Ctrl+C to stop."
+echo "  ▶ In the React UI: pick an agent → type a goal → submit → watch the live"
+echo "    step timeline (folded from the Temporal workflow). Traces/metrics/logs"
+echo "    land in Grafana; activities/workflows show in the Temporal UI."
+echo "  ▶ Press Ctrl+C to stop EVERYTHING this script started."
 echo "  ──────────────────────────────────────────────────────────────"
 echo
 ./.venv/bin/uvicorn awcp.gateway.app:app --host 0.0.0.0 --port "${GATEWAY_PORT}"

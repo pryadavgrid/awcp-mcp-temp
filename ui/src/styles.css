@@ -178,6 +178,18 @@ body {
 .spinner.sm { width: 10px; height: 10px; border-width: 1.5px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── "Thinking…" typing indicator (replaces the raw step list) ─ */
+.think { display: flex; align-items: center; gap: 9px; min-height: 64px; padding: 14px 4px; font-size: 16px; color: var(--fg); }
+.think-text { font-weight: 500; letter-spacing: 0.2px; }
+.think-dots { display: inline-flex; gap: 4px; padding-bottom: 2px; }
+.think-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--acc); display: inline-block; animation: think-bounce 1.2s infinite ease-in-out; }
+.think-dots i:nth-child(2) { animation-delay: 0.18s; }
+.think-dots i:nth-child(3) { animation-delay: 0.36s; }
+@keyframes think-bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.35; } 40% { transform: translateY(-5px); opacity: 1; } }
+.think.done { color: var(--ok); font-weight: 600; }
+.think.failed { color: var(--red); font-weight: 600; }
+.think.muted { color: var(--mut); font-weight: 400; }
+
 /* ── Token budget bar (per-agent token usage / remaining) ─ */
 .tokenbar { margin: 12px 0 2px; padding: 11px 13px; background: var(--panel2); border: 1px solid var(--line); border-radius: 11px; }
 .tb-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -196,3 +208,6 @@ body {
 .tb-rem b { color: var(--ok); }
 .tb-exhausted .tb-rem b { color: var(--red); }
 .tb-tot { margin-left: auto; }
+.tb-s-idle { color: var(--mut); background: rgba(148, 163, 184, 0.12); }
+.tb-pending { border-style: dashed; }
+.tb-note { font-size: 12px; color: var(--mut); line-height: 1.5; }

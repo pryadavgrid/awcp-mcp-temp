@@ -406,18 +406,42 @@ def _token_resume_remote(agent_id: str) -> None:
 
 # ---- dispatcher: pick the right hard-stop mechanism for THIS agent ------------
 
+def _pid_of_entry(e) -> int | None:
+    """The OS pid an entry maps to — its `pid` field, or recovered from a
+    `proc-<pid>-<ts>` id. Lightweight (no psutil); used to detect SHARED processes."""
+    pid = getattr(e, "pid", None)
+    if pid:
+        return pid
+    m = re.match(r"proc-(\d+)-(\d+)$", str(getattr(e, "id", "")))
+    return int(m.group(1)) if m else None
+
+
+def _pid_shared(pid: int | None, agent_id: str) -> bool:
+    """True if any OTHER registered agent maps to the same OS process — i.e. a
+    SIGSTOP would freeze (and silence the monitoring of) more than just this agent."""
+    if not pid:
+        return False
+    return any(e.id != agent_id and _pid_of_entry(e) == pid for e in REGISTRY.all())
+
+
 def _token_enforce_stop(agent_id: str, evaluation: dict | None = None) -> None:
     """Hard-stop an over-budget agent with whatever the control plane can reach,
     no agent cooperation in the decision and nothing hardcoded:
-      1. a local detected process  -> SIGSTOP (freeze);
+      1. a DEDICATED local process -> SIGSTOP (freeze);
       2. else a remote control_endpoint -> push a suspend directive;
-      3. else -> flag uncontrollable (operator-visible; gate/deny still applies)."""
+      3. else -> flag uncontrollable (operator-visible; gate/deny still applies).
+
+    A process SHARED by several registered agents is never frozen — SIGSTOP is
+    process-granular, so freezing it would stop and silence the OTHER agents in
+    that process (e.g. a multi-agent runtime). Such an agent falls through to the
+    gate/deny path, leaving its co-tenants running and monitored."""
     if not TOKEN_PROCESS_STOP:
         return
     e = REGISTRY.get(agent_id)
     if not e:
         return
-    if _proc_for_entry(e) is not None:
+    p = _proc_for_entry(e)
+    if p is not None and not _pid_shared(p.pid, agent_id):
         _token_uncontrolled.discard(agent_id)   # became controllable (e.g. pid recovered)
         _token_suspend_process(agent_id, evaluation)
         return
@@ -427,10 +451,13 @@ def _token_enforce_stop(agent_id: str, evaluation: dict | None = None) -> None:
         return
     if agent_id not in _token_uncontrolled:
         _token_uncontrolled.add(agent_id)
+        why = ("shares its OS process with other agents — not frozen (that would "
+               "stop them too)" if p is not None else
+               "no local pid or control endpoint")
         _record_event("token_uncontrolled", agent_id,
-                      "over budget but no local pid or control endpoint — "
-                      "enforcement limited to the gate/deny path")
-        log.warning("radar.token.uncontrolled agent_id=%s", agent_id)
+                      f"over budget but {why} — enforcement limited to the gate/deny path")
+        log.warning("radar.token.uncontrolled agent_id=%s shared_process=%s",
+                    agent_id, p is not None)
 
 
 def _token_enforce_resume(agent_id: str) -> None:
@@ -874,10 +901,13 @@ try:
         _record_event("degraded", agent_id, f"-> {new_profile}", reason=why)
         log.warning("radar.token.degraded agent_id=%s -> %s (%s)",
                     agent_id, new_profile, why)
-        # Layer 3: hard-stop an autonomous agent so it cannot keep running past
-        # its budget — SIGSTOP a local process, or push a suspend directive to a
-        # remote agent's control endpoint. Reversible on recovery.
-        _token_enforce_stop(agent_id, evaluation)
+        # NB: the forceful hard stop (SIGSTOP / remote suspend) is deliberately
+        # NOT done here. This callback runs synchronously inside an async request
+        # handler, so blocking psutil/HTTP work would stall the single event loop
+        # and make ONE over-budget agent freeze the radar for EVERY other agent.
+        # The off-loop reconciler (_token_process_reconciler, via asyncio.to_thread)
+        # applies the forceful stop for every over-budget agent within its interval,
+        # and the gate / gateway already deny this agent immediately and live.
 
     _laminar.init_laminar(get_agent=REGISTRY.get,
                           on_breach=_on_token_breach,
@@ -1128,9 +1158,15 @@ def set_risk(agent_id: str, req: RiskRequest) -> dict:
 def deregister(agent_id: str) -> dict:
     """Operator action — remove an entry from the inventory (registry hygiene).
     A still-running scanned process will be re-detected on the next scan."""
+    # Release ANY hard stop the control plane applied BEFORE removing the entry,
+    # so the operator regains full control of the process. A SIGSTOP'd process
+    # ignores SIGTERM until it is continued, so without this SIGCONT the operator
+    # cannot turn the agent off; once resumed (and untracked) the radar will not
+    # touch it again.
+    _token_enforce_resume(agent_id)
     if not REGISTRY.remove(agent_id):
         raise HTTPException(status_code=404, detail="agent not found")
-    _record_event("removed", agent_id, "operator removed entry")
+    _record_event("removed", agent_id, "operator removed entry (hard stop released)")
     return {"ok": True, "removed": agent_id}
 
 
