@@ -16,6 +16,10 @@ volumes:
   tempo_data: {}
   loki_data: {}
   grafana_data: {}
+  lmnr_postgres_data: {}
+  lmnr_clickhouse_data: {}
+  lmnr_clickhouse_logs: {}
+  lmnr_quickwit_data: {}
 
 services:
 
@@ -119,3 +123,169 @@ services:
       - prometheus
       - tempo
       - loki
+
+  # ══════════════════════════════════════════
+  # Laminar — self-hosted LLM observability UI
+  # Web UI  → http://localhost:5667
+  # OTLP gRPC (for awcp.laminar exporter) → localhost:8881
+  #
+  # First run: visit :5667, create an account + project, copy the API key.
+  # Then restart with LMNR_PROJECT_API_KEY=<key> to stream spans here.
+  #
+  # All env vars are configurable via LMNR_* overrides; defaults work
+  # for local dev out of the box (no .env file needed).
+  # ══════════════════════════════════════════
+
+  lmnr-postgres:
+    image: postgres:16
+    container_name: lmnr-postgres
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    volumes:
+      - lmnr_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${LMNR_PG_USER:-lmnr}
+      POSTGRES_PASSWORD: ${LMNR_PG_PASSWORD:-lmnrpassword}
+      POSTGRES_DB: ${LMNR_PG_DB:-lmnr}
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${LMNR_PG_USER:-lmnr}", "-d", "${LMNR_PG_DB:-lmnr}"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awcp-obs
+
+  lmnr-clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: lmnr-clickhouse
+    restart: unless-stopped
+    volumes:
+      - lmnr_clickhouse_data:/var/lib/clickhouse/
+      - lmnr_clickhouse_logs:/var/log/clickhouse-server/
+      - ./clickhouse-profiles-config.xml:/etc/clickhouse-server/users.d/lmnr.xml:ro
+    environment:
+      CLICKHOUSE_USER: ${LMNR_CH_USER:-default}
+      CLICKHOUSE_PASSWORD: ${LMNR_CH_PASSWORD:-lmnrchpassword}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - awcp-obs
+
+  lmnr-quickwit:
+    image: quickwit/quickwit:v0.8.2
+    container_name: lmnr-quickwit
+    restart: unless-stopped
+    ports:
+      - "7280:7280"
+      - "7281:7281"
+    environment:
+      QW_DATA_DIR: /quickwit/qwdata
+    command: ["run"]
+    volumes:
+      - lmnr_quickwit_data:/quickwit/qwdata
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7280/health/livez"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - awcp-obs
+
+  lmnr-query-engine:
+    image: ghcr.io/lmnr-ai/query-engine
+    container_name: lmnr-query-engine
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "8903:8903"
+    environment:
+      PORT: 8903
+    healthcheck:
+      test: ["CMD", "sleep", "5"]
+      interval: 10s
+      timeout: 6s
+      retries: 3
+    networks:
+      - awcp-obs
+
+  lmnr-app-server:
+    image: ghcr.io/lmnr-ai/app-server
+    container_name: lmnr-app-server
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "8880:8000"   # HTTP API
+      - "8881:8001"   # gRPC — point LMNR_OTLP_ENDPOINT=http://localhost:8881
+      - "8882:8002"   # real-time
+    depends_on:
+      lmnr-postgres:
+        condition: service_healthy
+      lmnr-clickhouse:
+        condition: service_started
+      lmnr-quickwit:
+        condition: service_healthy
+      lmnr-query-engine:
+        condition: service_healthy
+    environment:
+      PORT: 8000
+      GRPC_PORT: 8001
+      DATABASE_URL: postgres://${LMNR_PG_USER:-lmnr}:${LMNR_PG_PASSWORD:-lmnrpassword}@lmnr-postgres:5432/${LMNR_PG_DB:-lmnr}
+      SHARED_SECRET_TOKEN: ${LMNR_SHARED_SECRET:-awcp-laminar-shared-secret}
+      CLICKHOUSE_URL: http://lmnr-clickhouse:8123
+      CLICKHOUSE_USER: ${LMNR_CH_USER:-default}
+      CLICKHOUSE_PASSWORD: ${LMNR_CH_PASSWORD:-lmnrchpassword}
+      CLICKHOUSE_RO_USER: ${LMNR_CH_RO_USER:-default}
+      CLICKHOUSE_RO_PASSWORD: ${LMNR_CH_RO_PASSWORD:-lmnrchpassword}
+      ENVIRONMENT: LITE
+      AEAD_SECRET_KEY: ${LMNR_AEAD_SECRET_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      QUERY_ENGINE_URL: http://lmnr-query-engine:8903
+      QUICKWIT_SEARCH_URL: http://lmnr-quickwit:7280
+      QUICKWIT_INGEST_URL: http://lmnr-quickwit:7281
+      QUICKWIT_SPANS_INDEX_ID: spans_v2
+    networks:
+      - awcp-obs
+
+  lmnr-frontend:
+    image: ghcr.io/lmnr-ai/frontend
+    container_name: lmnr-frontend
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "5667:5667"   # Laminar Web UI → http://localhost:5667
+    depends_on:
+      lmnr-postgres:
+        condition: service_healthy
+      lmnr-quickwit:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${LMNR_PG_USER:-lmnr}:${LMNR_PG_PASSWORD:-lmnrpassword}@lmnr-postgres:5432/${LMNR_PG_DB:-lmnr}
+      PORT: 5667
+      BACKEND_URL: http://lmnr-app-server:8000
+      BACKEND_RT_URL: http://lmnr-app-server:8002
+      SHARED_SECRET_TOKEN: ${LMNR_SHARED_SECRET:-awcp-laminar-shared-secret}
+      NEXTAUTH_URL: http://localhost:5667
+      NEXTAUTH_SECRET: ${LMNR_NEXTAUTH_SECRET:-some_secret}
+      NEXT_PUBLIC_URL: http://localhost:5667
+      ENVIRONMENT: LITE
+      CLICKHOUSE_URL: http://lmnr-clickhouse:8123
+      CLICKHOUSE_USER: ${LMNR_CH_USER:-default}
+      CLICKHOUSE_PASSWORD: ${LMNR_CH_PASSWORD:-lmnrchpassword}
+      CLICKHOUSE_RO_USER: ${LMNR_CH_RO_USER:-default}
+      CLICKHOUSE_RO_PASSWORD: ${LMNR_CH_RO_PASSWORD:-lmnrchpassword}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AEAD_SECRET_KEY: ${LMNR_AEAD_SECRET_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      QUICKWIT_SEARCH_URL: http://lmnr-quickwit:7280
+      LLM_PROVIDER: ${LMNR_LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LMNR_LLM_BASE_URL:-}
+      LLM_API_KEY: ${LMNR_LLM_API_KEY:-}
+      LLM_MODEL_SMALL: ${LMNR_LLM_MODEL_SMALL:-}
+      LLM_MODEL_MEDIUM: ${LMNR_LLM_MODEL_MEDIUM:-}
+      LLM_MODEL_LARGE: ${LMNR_LLM_MODEL_LARGE:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    networks:
+      - awcp-obs

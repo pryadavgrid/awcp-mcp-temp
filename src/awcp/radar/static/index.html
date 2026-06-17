@@ -80,6 +80,18 @@
   .tok.ok{color:var(--active)} .tok.warn{color:var(--quar)} .tok.exhausted{color:var(--red)}
   .ev .a{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .hidden{display:none}
+  /* Laminar key panel */
+  .lmnr-kp{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-bottom:12px}
+  .lmnr-kp .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .lmnr-kp .lbl{color:var(--muted);font-size:12px;white-space:nowrap}
+  .lmnr-kp input[type=password]{background:var(--bg);border:1px solid var(--border2);color:var(--text);border-radius:7px;padding:5px 10px;font-family:var(--mono);font-size:12px;width:240px;outline:none}
+  .lmnr-kp input[type=password]:focus{border-color:var(--accent)}
+  .lkbtn{background:rgba(167,139,250,.14);border:1px solid rgba(167,139,250,.4);color:#a78bfa;border-radius:7px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;font-family:var(--sans)}
+  .lkbtn:hover{background:rgba(167,139,250,.26)}
+  .lkbtn.sec{background:transparent;border-color:var(--border2);color:var(--muted)}
+  .lkbtn.sec:hover{color:var(--text)}
+  .lk-ok{color:#34d399;font-size:12px}
+  .lk-hint{color:var(--muted);font-size:11px}
 </style>
 </head>
 <body>
@@ -94,8 +106,28 @@
       <div class="stat"><div class="n"><span class="tflag off" id="s-otel">telemetry</span></div><div class="l">observability</div></div>
       <!-- link to the token control UI (awcp.laminar); the JS keeps it shown when mounted -->
       <div class="stat" id="s-lam-box"><div class="n"><a href="/laminar/ui" id="s-lam" class="tflag on">Token Monitor ↗</a></div><div class="l">token control</div></div>
+      <!-- link to the self-hosted Laminar observability UI (:5667) -->
+      <div class="stat"><div class="n"><a href="http://localhost:5667" target="_blank" class="tflag on" style="background:rgba(167,139,250,.14);color:#a78bfa">Laminar UI ↗</a></div><div class="l">observability</div></div>
     </div>
   </header>
+
+  <!-- Laminar key panel: API key stored in sessionStorage only, never sent to any server -->
+  <div class="lmnr-kp" id="lmnr-kp">
+    <div class="row" id="lmnr-input-row">
+      <span class="lbl">Laminar project API key</span>
+      <input type="password" id="lmnr-key-input" placeholder="lmnr_proj_…" autocomplete="off" spellcheck="false"
+        onkeydown="if(event.key==='Enter')lmnrSave()">
+      <button class="lkbtn" onclick="lmnrSave()">Save &amp; Open Laminar →</button>
+      <span class="lk-hint">· session only · never sent to server</span>
+    </div>
+    <div class="row" id="lmnr-saved-row" style="display:none">
+      <span class="lk-ok">✓ Laminar key configured</span>
+      <button class="lkbtn" onclick="window.open('http://localhost:5667','_blank')">Open Laminar UI →</button>
+      <button class="lkbtn sec" onclick="lmnrCopyCmd()">Copy launch command</button>
+      <button class="lkbtn sec" onclick="lmnrChange()">change key</button>
+      <span class="lk-hint" id="lmnr-copy-msg"></span>
+    </div>
+  </div>
 
   <div class="tabs">
     <div class="tab sel" id="tab-inv" onclick="showTab('inv')">Inventory</div>
@@ -158,9 +190,12 @@ function showTab(t){ TAB=t;
   tick();
 }
 async function removeAgent(id){
-  if(!confirm('Remove "'+id+'" from the registry?')) return;
-  try{ await fetch('/agents/'+encodeURIComponent(id),{method:'DELETE'}); }catch(e){}
-  tick();
+  if(!confirm('Remove "'+id+'" from the registry?\n\nThis will terminate the process if a local pid is reachable.')) return;
+  try{
+    const r = await fetch('/agents/'+encodeURIComponent(id),{method:'DELETE'});
+    if(!r.ok){ const j=await r.json().catch(()=>({})); alert('Stop failed: '+(j.detail||r.status)); }
+  }catch(e){ alert('Stop failed: '+e.message); }
+  await tick();
 }
 
 function passesFilters(a){
@@ -251,6 +286,50 @@ async function tick(){
 ['f-status','f-kind','f-auton','f-live','f-text'].forEach(id=>
   document.getElementById(id).addEventListener('input',renderInventory));
 tick(); setInterval(tick,3000);
+
+// ── Laminar project API key ────────────────────────────────────────────────
+// Key lives in sessionStorage only — cleared when the tab closes.
+// Never sent to any server. Never displayed in plain text after entry.
+(function(){
+  var SK='lmnr_project_api_key';
+  function _show(state){
+    var inp=document.getElementById('lmnr-input-row');
+    var sav=document.getElementById('lmnr-saved-row');
+    inp.style.display=state==='saved'?'none':'flex';
+    sav.style.display=state==='saved'?'flex':'none';
+  }
+  // Restore configured state if key already saved this session
+  if(sessionStorage.getItem(SK)) _show('saved');
+
+  window.lmnrSave=function(){
+    var el=document.getElementById('lmnr-key-input');
+    var k=el.value.trim();
+    if(!k){el.focus();return;}
+    sessionStorage.setItem(SK,k);
+    el.value='';             // remove from DOM immediately — not shown again
+    _show('saved');
+    window.open('http://localhost:5667','_blank');
+  };
+
+  window.lmnrChange=function(){
+    sessionStorage.removeItem(SK);
+    _show('input');
+    document.getElementById('lmnr-key-input').focus();
+  };
+
+  window.lmnrCopyCmd=function(){
+    var k=sessionStorage.getItem(SK);
+    if(!k){window.lmnrChange();return;}
+    var cmd='LMNR_PROJECT_API_KEY='+k+' bash scripts/run_all.sh';
+    navigator.clipboard.writeText(cmd).then(function(){
+      var msg=document.getElementById('lmnr-copy-msg');
+      msg.textContent='· copied!';
+      setTimeout(function(){msg.textContent='';},2000);
+    }).catch(function(){
+      window.lmnrChange(); // clipboard blocked → re-enter key
+    });
+  };
+})();
 </script>
 </body>
 </html>

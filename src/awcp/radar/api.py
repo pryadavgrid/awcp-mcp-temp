@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 import httpx
 import psutil
 
-from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -48,10 +48,8 @@ from awcp.radar.temporal.activities.execution import (
 )
 
 # --- Telemetry: link the registry into the shared awcp.observability stack ---
-# (HTTP-route tracing is applied by the gateway via instrument_fastapi(app); this
-# module only exposes an APIRouter, so it does no FastAPI instrumentation itself.
-# A standalone `app` is still built at the bottom for radar-only deployments.)
 from awcp.observability.setup import setup_otel
+from awcp.observability.middleware import instrument_fastapi
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
 setup_otel("awcp-radar")
@@ -836,6 +834,55 @@ async def _connect_temporal() -> None:
         )
 
 
+def _gateway_upstream_port() -> int:
+    """Parse the upstream model port from AWCP_GATEWAY_UPSTREAM / OLLAMA_BASE env."""
+    try:
+        from urllib.parse import urlparse
+        upstream = os.getenv("AWCP_GATEWAY_UPSTREAM", os.getenv("OLLAMA_BASE", "http://localhost:11434"))
+        parsed = urlparse(upstream)
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    except Exception:
+        return 11434
+
+
+# Bypass detector: tracks last-reported time per agent to suppress duplicate events.
+_bypass_seen: dict[str, float] = {}
+
+
+async def _bypass_detector() -> None:
+    """Detect registered agents making direct connections to the upstream model port
+    (bypassing the LLM gateway).  Fires a radar event and logs a warning once per
+    agent per 5-minute window — repeated connections produce one event, not many."""
+    port = _gateway_upstream_port()
+    radar_pid = os.getpid()
+    log.info("radar.bypass_detector.started upstream_port=%s", port)
+    while True:
+        try:
+            conns = await asyncio.to_thread(psutil.net_connections, "inet")
+            now = time.time()
+            for conn in conns:
+                if not (conn.raddr and conn.raddr.port == port and conn.pid):
+                    continue
+                if conn.pid == radar_pid:
+                    continue               # the gateway itself
+                for e in REGISTRY.all():
+                    if getattr(e, "pid", None) == conn.pid:
+                        if now - _bypass_seen.get(e.id, 0) < 300:
+                            continue       # already reported within 5 min
+                        _bypass_seen[e.id] = now
+                        _record_event(
+                            "gateway_bypass", e.id,
+                            f"direct connection to upstream port {port} detected (bypassing /llm gateway)",
+                        )
+                        log.warning(
+                            "radar.bypass_detector agent_id=%s pid=%s upstream_port=%s",
+                            e.id, conn.pid, port,
+                        )
+        except Exception as exc:           # noqa: BLE001
+            log.debug("radar.bypass_detector.error error=%r", exc)
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("radar.startup starting scanner and connecting to Temporal...")
@@ -847,6 +894,7 @@ async def lifespan(app: FastAPI):
     mgr = asyncio.create_task(_onboarding_manager())
     tel = asyncio.create_task(_telemetry_reconciler())
     tps = asyncio.create_task(_token_process_reconciler())
+    byp = asyncio.create_task(_bypass_detector())
     log.info("radar.startup complete temporal=%s", STATE["temporal"])
     try:
         yield
@@ -855,6 +903,7 @@ async def lifespan(app: FastAPI):
         mgr.cancel()
         tel.cancel()
         tps.cancel()
+        byp.cancel()
         _resume_all_frozen()   # never leave a process frozen on shutdown
         for wt in STATE.get("worker_tasks") or []:
             wt.cancel()
@@ -862,18 +911,14 @@ async def lifespan(app: FastAPI):
         log.info("radar.shutdown complete")
 
 
-# The radar is no longer just a standalone FastAPI app — it is an APIRouter that
-# the gateway app (awcp.gateway.app) includes. HTTP routes are auto-traced by the
-# gateway's instrument_fastapi(app); an APIRouter has no middleware stack of its
-# own and cannot be instrumented directly. A standalone `app` is still built at
-# the bottom of this file for radar-only deployments (uvicorn awcp.radar.api:app).
-router = APIRouter()
+app = FastAPI(title="Agent Radar", lifespan=lifespan)
+instrument_fastapi(app)   # auto-trace every radar HTTP route
 
 # Token-aware LLM gateway (enforcement way #5): a model-call proxy under /llm
 # that refuses an over-budget agent's calls at the source. Additive — mounting it
 # changes no existing route; agents opt in by pointing their model base URL at it.
 from awcp.radar.llm_gateway import gateway_router  # noqa: E402
-router.include_router(gateway_router)
+app.include_router(gateway_router)
 
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
@@ -919,7 +964,7 @@ try:
     _laminar.init_laminar(get_agent=REGISTRY.get,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
-    router.include_router(_laminar.router)
+    app.include_router(_laminar.router)
     _LAMINAR = True
     log.info("radar.laminar.mounted ui=/laminar/ui")
 except Exception as _exc:                       # radar runs fine without the package
@@ -946,12 +991,12 @@ def _to_dict(e: AgentEntry) -> dict:
     return d
 
 
-@router.get("/agents")
+@app.get("/agents")
 def list_agents() -> list[dict]:
     return [_to_dict(e) for e in REGISTRY.all()]
 
 
-@router.get("/agents/{agent_id}")
+@app.get("/agents/{agent_id}")
 def get_agent(agent_id: str) -> dict:
     e = REGISTRY.get(agent_id)
     if not e:
@@ -959,7 +1004,7 @@ def get_agent(agent_id: str) -> dict:
     return _to_dict(e)
 
 
-@router.post("/agents/register")
+@app.post("/agents/register")
 def register(req: RegisterRequest) -> dict:
     entry = AgentEntry(
         id=req.id or f"reg-{_slug(req.name)}",
@@ -1030,7 +1075,7 @@ def _require(agent_id: str) -> AgentEntry:
     return e
 
 
-@router.post("/agents/{agent_id}/gate")
+@app.post("/agents/{agent_id}/gate")
 def gate(agent_id: str, req: GateRequest) -> dict:
     """Evaluate whether an agent may perform an action (the write-action gate).
     An external agent/interceptor calls this before a state-changing action."""
@@ -1073,7 +1118,7 @@ def gate(agent_id: str, req: GateRequest) -> dict:
             "status": e.status, "autonomy_profile": e.autonomy_profile}
 
 
-@router.post("/agents/{agent_id}/signal")
+@app.post("/agents/{agent_id}/signal")
 def signal(agent_id: str, req: SignalRequest) -> dict:
     """Report an execution outcome. Failures step autonomy down the ladder once
     the failure budget is exhausted (graceful degradation)."""
@@ -1119,7 +1164,7 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
     }
 
 
-@router.post("/agents/{agent_id}/autonomy")
+@app.post("/agents/{agent_id}/autonomy")
 def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     """Operator override — set the autonomy profile directly (e.g. restore to active)."""
     e = _require(agent_id)
@@ -1140,7 +1185,7 @@ class RiskRequest(BaseModel):
     token_budget: int | None = None   # explicit per-agent budget; 0 clears it (→ use tier)
 
 
-@router.post("/agents/{agent_id}/risk")
+@app.post("/agents/{agent_id}/risk")
 def set_risk(agent_id: str, req: RiskRequest) -> dict:
     """Operator override — set an agent's RISK tier and/or its explicit per-agent
     token budget (the magazine's declared budget). Risk drives the budget tier;
@@ -1161,20 +1206,46 @@ def set_risk(agent_id: str, req: RiskRequest) -> dict:
             "token_budget": getattr(updated, "token_budget", None)}
 
 
-@router.delete("/agents/{agent_id}")
+@app.delete("/agents/{agent_id}")
 def deregister(agent_id: str) -> dict:
-    """Operator action — remove an entry from the inventory (registry hygiene).
-    A still-running scanned process will be re-detected on the next scan."""
-    # Release ANY hard stop the control plane applied BEFORE removing the entry,
-    # so the operator regains full control of the process. A SIGSTOP'd process
-    # ignores SIGTERM until it is continued, so without this SIGCONT the operator
-    # cannot turn the agent off; once resumed (and untracked) the radar will not
-    # touch it again.
-    _token_enforce_resume(agent_id)
-    if not REGISTRY.remove(agent_id):
+    """Operator action — remove an entry from the inventory and stop the process.
+    Tries SIGTERM on the local process first; falls back to the agent's
+    control_endpoint if no local pid is reachable.  Either way the registry entry
+    is removed so the scanner does not immediately re-add the agent."""
+    e = REGISTRY.get(agent_id)
+    if not e:
         raise HTTPException(status_code=404, detail="agent not found")
-    _record_event("removed", agent_id, "operator removed entry (hard stop released)")
-    return {"ok": True, "removed": agent_id}
+    # Release any control-plane freeze BEFORE signalling the process — a
+    # SIGSTOP'd process ignores SIGTERM until it is continued.
+    _token_enforce_resume(agent_id)
+    terminated = False
+    # ── local process (pid known or recoverable from the proc-<pid>-<ts> id) ──
+    p = _proc_for_entry(e)
+    if p is not None:
+        try:
+            p.terminate()           # SIGTERM — lets the process clean up
+            terminated = True
+            log.info("radar.deregister.terminated agent_id=%s pid=%s", agent_id, p.pid)
+        except Exception as exc:    # noqa: BLE001
+            log.warning("radar.deregister.terminate_failed agent_id=%s pid=%s error=%r",
+                        agent_id, p.pid, exc)
+    # ── remote / cooperative agent with no local pid ──────────────────────────
+    if not terminated:
+        url = getattr(e, "control_endpoint", None)
+        if url:
+            try:
+                httpx.post(url, json={"action": "stop", "reason": "operator_removed"},
+                           timeout=TOKEN_CONTROL_TIMEOUT)
+                terminated = True
+                log.info("radar.deregister.remote_stop agent_id=%s url=%s", agent_id, url)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("radar.deregister.remote_stop_failed agent_id=%s url=%s error=%r",
+                            agent_id, url, exc)
+    REGISTRY.remove(agent_id)
+    detail = ("operator removed — process terminated" if terminated
+              else "operator removed — no reachable process (self-registered without pid/endpoint)")
+    _record_event("removed", agent_id, detail)
+    return {"ok": True, "removed": agent_id, "process_terminated": terminated}
 
 
 # ----------------------------------------------------------------------
@@ -1208,7 +1279,7 @@ class TaskExecCompleteRequest(BaseModel):
     error: str = ""
 
 
-@router.post("/tasks/execution/start")
+@app.post("/tasks/execution/start")
 async def execution_start(req: TaskExecStartRequest) -> dict:
     """Start an AgentExecutionWorkflow for a task prompt."""
     # token monitor learns task->agent BEFORE any Temporal gating, so token
@@ -1255,7 +1326,7 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@router.post("/tasks/execution/{task_id}/event")
+@app.post("/tasks/execution/{task_id}/event")
 async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     """Forward a real-time execution event to the running AgentExecutionWorkflow."""
     event = req.model_dump()
@@ -1336,7 +1407,7 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200], "token_budget": token_budget}
 
 
-@router.post("/tasks/execution/{task_id}/complete")
+@app.post("/tasks/execution/{task_id}/complete")
 async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> dict:
     """Signal the AgentExecutionWorkflow that the task is done."""
     if _LAMINAR:
@@ -1360,14 +1431,14 @@ async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> d
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@router.get("/events")
+@app.get("/events")
 def events(limit: int = 50) -> list[dict]:
     """The recent-decisions log (newest first). A live registry audit view — not
     the durable Evidence Ledger."""
     return list(_EVENTS)[: max(1, min(limit, _EVENTS.maxlen or 200))]
 
 
-@router.get("/healthz")
+@app.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
     by_kind: dict[str, int] = {}
@@ -1388,27 +1459,6 @@ def healthz() -> dict:
     }
 
 
-@router.get("/")
+@app.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
-
-
-# ----------------------------------------------------------------------
-# Standalone ASGI app — radar-only deployments.
-#
-# The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it, so it
-# does NOT use this object. But the radar-centric runners (scripts/run_all.sh,
-# run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app` directly on :8090, with
-# every route — including /llm/*, /laminar/* and the web UI — living at the ROOT,
-# which is what the bundled UI's absolute links expect.
-#
-# Defining `app` at import time is required so `uvicorn awcp.radar.api:app` can
-# find it. When the gateway imports this module the object is simply created and
-# left unused (its lifespan only runs if uvicorn actually serves it).
-# ----------------------------------------------------------------------
-from awcp.observability.middleware import instrument_fastapi, instrument_requests  # noqa: E402
-
-app = FastAPI(title="Agent Radar", lifespan=lifespan)
-instrument_fastapi(app)        # every radar HTTP route is auto-traced
-instrument_requests()          # outbound HTTP calls (link_mcp, etc.) are traced
-app.include_router(router)     # radar routes + the mounted /laminar/* + /llm/* routes

@@ -142,11 +142,13 @@
   <div class="eyebrow">AWCP Magazine ⟷ awcp-mcp-temp2 · Build Audit</div>
   <h1>What's <em>Built</em> vs What's <em>Left</em></h1>
   <p class="sub">A step-by-step audit of the codebase in <code>awcp-mcp-temp2</code> against the six-step Operating Model and Core stack from the AWCP Magazine. Green = done &amp; faithful · Amber = core built, magazine specifics missing · Red = not built · Teal = built <strong>beyond</strong> the magazine.</p>
+  <p class="sub" style="margin-top:10px">The "magazine" is a design document — the architect's blueprint for how a fully built AWCP should look and behave. <code>awcp-mcp-temp2</code> is the actual codebase being built from that blueprint. This page goes section by section and checks: finished, partly done, or still missing? Everything marked teal is work temp2 added that the blueprint never described — extras that came out of building the real thing with real agents and finding that some of them don't cooperate.</p>
   <div class="legend">
     <span class="lg"><i class="sw g"></i> Done (magazine-faithful)</span>
     <span class="lg"><i class="sw a"></i> Partial</span>
     <span class="lg"><i class="sw r"></i> Not built</span>
     <span class="lg"><i class="sw t"></i> Extension beyond magazine</span>
+    <span class="lg"><span class="badge t" style="font-size:10px;padding:1px 7px">★ new</span> Added this session</span>
   </div>
   <div style="background:var(--card);border:1px solid var(--hair);border-left:6px solid var(--green);border-radius:14px;padding:18px 22px;margin:22px 0 10px;box-shadow:var(--shadow);display:flex;align-items:center;gap:24px;flex-wrap:wrap">
     <div style="font-size:48px;font-weight:800;color:var(--green);line-height:1">≈59%</div>
@@ -160,7 +162,7 @@
     <div class="scard g"><div class="n">2</div><div class="l">Steps done</div></div>
     <div class="scard a"><div class="n">3</div><div class="l">Steps partial</div></div>
     <div class="scard r"><div class="n">1</div><div class="l">Step missing</div></div>
-    <div class="scard t"><div class="n">4</div><div class="l">Major extensions</div></div>
+    <div class="scard t"><div class="n">8</div><div class="l">Major extensions</div></div>
   </div>
 </div></header>
 
@@ -168,6 +170,7 @@
 
   <!-- ============ STEP-BY-STEP OVERVIEW ============ -->
   <h2 class="section"><span class="n">▸</span>Operating Model — step-by-step overview</h2>
+  <p class="lead">Six steps take an agent from "detected but untrusted" to "fully governed." The colour of each card below shows how far temp2 has built that step. Green means it matches what the magazine describes. Amber means the core is working but some of the magazine's specifics are missing. Red means it hasn't been started yet. Teal means something extra was added that the magazine doesn't describe at all. A progress bar on each card shows a rough percentage of that step's magazine requirements that are currently satisfied.</p>
   <div class="pipe">
     <div class="stage g"><div class="step">STEP 01</div><h4>Register &amp; Attach Hooks</h4><span class="badge g">Complete</span>
       <div class="pct">100%</div><div class="bar"><i class="g" style="width:100%"></i></div></div>
@@ -185,6 +188,7 @@
 
   <!-- ============ PLATFORM ARCHITECTURE ============ -->
   <h2 class="section"><span class="n">▦</span>Platform architecture — the whole AWCP control plane, built vs left</h2>
+  <p class="lead">This diagram shows every component of the AWCP platform, laid out from top (operators watching) to bottom (models running). Each coloured box is one piece of the system. The left-side accent colour shows its build status using the same green / amber / red / teal scheme as above. Layers are stacked in the order data flows: operators observe the radar; the radar governs the orchestration layer; orchestration drives the MCP server and LLM gateway; those drive agents and models; and everything emits telemetry to the cross-cutting observability layer at the bottom.</p>
   <p class="sub" style="margin:-6px 0 16px">Every component, top (operators) to bottom (models), coloured by status:
     <span style="color:var(--green);font-weight:700">green</span> built ·
     <span style="color:var(--amber);font-weight:700">amber</span> partial ·
@@ -194,9 +198,10 @@
 
     <div class="arch-layer">
       <div class="lbl"><b>① Operators &amp; UIs</b><span>browsers — humans watch &amp; intervene</span></div>
-      <div class="arow c4">
+      <div class="arow c5">
         <div class="anode g"><h5>Radar Dashboard<span class="st g">built</span></h5><p>registry · status · gate · degradation · events :8090</p></div>
-        <div class="anode g"><h5>Laminar UI<span class="st g">built</span></h5><p>per-agent token / cost / budget</p></div>
+        <div class="anode g"><h5>Token Monitor UI<span class="st g">built</span></h5><p>per-agent token / cost / budget — /laminar/ui</p></div>
+        <div class="anode t"><h5>Laminar Platform <span class="badge t" style="font-size:8px;margin-right:3px">★ new</span><span class="st t">ext</span></h5><p>self-hosted LLM observability · spans · evals :5667 · OTLP :8881</p></div>
         <div class="anode g"><h5>Temporal Web<span class="st g">built</span></h5><p>workflow &amp; replay history :8233</p></div>
         <div class="anode g"><h5>Grafana<span class="st g">built</span></h5><p>traces · metrics · logs :3000</p></div>
       </div>
@@ -239,7 +244,7 @@
       <div class="lbl"><b>④ MCP Control Server :8002 &nbsp;+&nbsp; LLM Gateway /llm</b><span>governed execution surface</span></div>
       <div class="arow c3">
         <div class="anode g"><h5>MCP Primitives<span class="st g">built</span></h5><p>agent_route · execute_tool · agent_generate</p></div>
-        <div class="anode t"><h5>Token-aware LLM Gateway<span class="st t">ext</span></h5><p>429s an over-budget agent at the model call</p></div>
+        <div class="anode t"><h5>Token-aware LLM Gateway<span class="st t">ext</span></h5><p>429s over-budget agent · <strong><span class="badge t" style="font-size:8px">★ new</span></strong> pre-execution tiktoken estimate blocks call before model</p></div>
         <div class="anode g"><h5>Runtime Adapters<span class="st g">built</span></h5><p>ollama_client · tool_runtime · event taps</p></div>
       </div>
     </div>
@@ -262,7 +267,7 @@
         <div class="anode g"><h5>OTel SDK<span class="st g">built</span></h5><p>traces · metrics · logs</p></div>
         <div class="anode g"><h5>OTel Collector<span class="st g">built</span></h5><p>OTLP fan-out :4317</p></div>
         <div class="anode g"><h5>Tempo · Prom · Loki<span class="st g">built</span></h5><p>traces · metrics · logs stores</p></div>
-        <div class="anode g"><h5>Laminar export<span class="st g">built</span></h5><p>gen_ai.* token / cost spans</p></div>
+        <div class="anode g"><h5>Laminar export<span class="st g">built</span></h5><p>gen_ai.* token / cost spans → self-hosted Laminar :8881 (OTLP gRPC) <span class="badge t" style="font-size:8px">★ wired</span></p></div>
         <div class="anode a"><h5>Langfuse<span class="st a">separate</span></h5><p>self-host stack scaffolded (awcp-llm-stack), not wired</p></div>
       </div>
     </div>
@@ -270,6 +275,7 @@
 
   <!-- ============ DETAIL: STEP 1 ============ -->
   <h2 class="section"><span class="n">1</span>Register Agents &amp; Attach Control Hooks</h2>
+  <p class="lead">Before an agent is allowed to take write actions, the control plane needs to confirm three things: that the agent's telemetry is actually running (not just claimed), that it actually calls the policy gate before acting (not just says it will), and that it actually reads feature flags at runtime (not just declares them). Step 1 is the onboarding process that checks all three by watching what the agent does in practice. An agent that hasn't proved all three stays in quarantine — it shows up in the dashboard and can read things, but cannot make any changes until it passes.</p>
   <div class="detail">
     <div class="head"><span class="num g">01</span><h3>Registry · Onboarding · Quarantine</h3><span class="pills">Agent Registry · OTel · Feature Flags</span></div>
     <div class="body">
@@ -301,6 +307,7 @@
 
   <!-- ============ DETAIL: STEP 2 ============ -->
   <h2 class="section"><span class="n">2</span>Orchestrate Existing Workflows</h2>
+  <p class="lead">Step 2 asks whether the control plane can adopt an agent that is already running — not one it started, but one that was already mid-run in some framework like LangGraph or CrewAI when the control plane came up. The magazine's vision is to pick up that agent without restarting it: read where it is in its workflow, understand its current state, and start governing from that point forward. temp2 can fully orchestrate agents it launches from scratch (each step is tracked as a Temporal activity), but it cannot yet adopt an agent that was already in motion before the control plane started.</p>
   <div class="detail">
     <div class="head"><span class="num a">02</span><h3>Temporal orchestration · Runtime adapters</h3><span class="pills">Temporal · Runtime Adapters · Workflow DAGs</span></div>
     <div class="body">
@@ -322,12 +329,14 @@
           <li class="part"><strong>Workflow DAGs</strong> — execution is a dynamic event loop, not a declared DAG with branch semantics.</li>
         </ul>
         <div class="files">radar/temporal/workflows/{onboarding,execution}.py · radar/temporal/activities/* · temporal/workflows/agent_execution.py · mcp/server.py · temporal/activities/mcp_gateway.py</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: if a LangGraph agent has been running for ten minutes before the radar started, the radar can see it in the registry (via scanning) but cannot take over its execution, read which step it is on, or resume it from a safe point. The work to close this gap is normalising the foreign framework's state into Temporal's model without restarting the agent.</p>
       </div>
     </div>
   </div>
 
   <!-- ============ DETAIL: STEP 3 ============ -->
   <h2 class="section"><span class="n">3</span>Gate Write Actions</h2>
+  <p class="lead">The gate already stops quarantined and degraded agents from making writes. What the magazine adds on top of that is a narrower, time-limited permission system for high-risk actions. Even a fully trusted, fully onboarded agent should not be able to make a high-risk write without also holding a specific short-lived token issued for that exact action, at that exact point in the workflow, that expires after a few minutes and can only be used once. This prevents an agent from accumulating permissions, replaying an old approval for a different action, or using a legitimate token for something broader than it was issued for. OPA (Open Policy Agent) is the magazine's proposed engine for writing those policy rules as code, so they can be changed without redeploying the radar.</p>
   <div class="detail">
     <div class="head"><span class="num a">03</span><h3>Write-action gate · Approval tokens</h3><span class="pills">OPA · Approval Tokens · Tool Policies</span></div>
     <div class="body">
@@ -349,12 +358,14 @@
           <li class="miss"><strong>Human-approval surface</strong> — no operator approval issuance for new write scopes / cross-system writes.</li>
         </ul>
         <div class="files">radar/policy.py (evaluate_action) · radar/api.py (/agents/&#123;id&#125;/gate) &nbsp;|&nbsp; gap: OPA + approval-token issuer/validator</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: today a gate response of "allowed" means the agent is free to proceed with any write it has declared in its scope. The approval-token layer adds a second check on top: even an agent in good standing must present a narrow, expiring pass for that specific write. An approval token is just a short-lived signed string — the gate issues it, the agent sends it with the write request, and the gate validates it hasn't expired or been used before. OPA would let operators edit those policy rules in a text file without touching the Python code.</p>
       </div>
     </div>
   </div>
 
   <!-- ============ DETAIL: STEP 4 ============ -->
   <h2 class="section"><span class="n">4</span>Degrade Autonomy Gracefully</h2>
+  <p class="lead">When an agent starts showing problems — too many tool failures, token budget overruns, unexpected outputs — the worst response is to flip between "fully trusted" and "completely stopped." The magazine describes a six-rung staircase that steps down gradually. First you just increase the logging detail so you have more evidence of what went wrong. Then you tighten how many things the agent can attempt in parallel. Then you switch it to a safer, more conservative model profile. Then you move it to suggestion-only mode where it can propose actions but not execute them. Only as a last resort do you suspend it entirely. Every rung is reversible if the agent recovers. temp2 has built and wired this complete six-rung ladder.</p>
   <div class="detail">
     <div class="head"><span class="num g">04</span><h3>Degradation ladder · Token &amp; failure budgets</h3><span class="pills">Trace Sampling · Feature Flags · Safe Profiles</span></div>
     <div class="body">
@@ -380,13 +391,15 @@
           <li class="part"><strong>Agent <em>honouring</em> the delivered directives</strong> is cooperative — the agent runtime must apply the retry/concurrency/sampling it's handed, exactly as it must honour the gate. That's inherent to a control plane that doesn't run the agent's loop (magazine: runtime is "replaceable"), not a missing control-plane feature.</li>
           <li class="part"><strong>Source-PID identity is local + privilege-bound</strong> (plumbing for the hard-stop extension, not a magazine ask).</li>
         </ul>
-        <div class="files">radar/policy.py (STAGE_SPECS, stage_effects, _write_block_index, evaluate_action, effective_stage, apply_signal) · radar/api.py (effective_stage on gate / signal / event / agents + degraded_step capture) · laminar/{bridge,budget,ledger}.py · radar/llm_gateway.py</div>
+        <div class="files">radar/policy.py (STAGE_SPECS, stage_effects, _write_block_index, evaluate_action, effective_stage, apply_signal) · radar/api.py (effective_stage on gate / signal / event / agents + degraded_step capture) · laminar/{bridge,budget,ledger}.py · radar/llm_gateway.py · <strong>laminar/estimator.py · laminar/budget.py (project()) · laminar/bridge.py (pre_check()) <span class="badge t">★ new</span></strong></div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: the control plane defines the six rungs, enforces write-blocks at the right point, and delivers the current rung's instructions (lower your retry count, switch to this model, stop initiating writes) on every response channel the agent polls. The agent's job is to apply those instructions at its next step. That cooperative part is intentionally the agent's responsibility — the magazine describes the runtime as replaceable, and the control plane's job is to issue the directives clearly, not to reach inside the agent's loop.</p>
       </div>
     </div>
   </div>
 
   <!-- ============ DETAIL: STEP 5 ============ -->
   <h2 class="section"><span class="n">5</span>Replay &amp; Recover</h2>
+  <p class="lead">If an agent run fails halfway through, two questions need clear answers: exactly what did this agent do, in what order, and was each step authorised? And is it safe to resume from step four without risking doing something twice? The magazine's answer is a durable Evidence Ledger — a single joined-up record that stores the agent's identity, each tool call it made, the policy decision that allowed it, the approval token used, and a hash of the context at each checkpoint. The hash proves nothing changed between then and now, making it safe to replay. temp2 has fragments of this (Temporal stores full workflow history, the radar keeps a ring of recent governance events) but not the unified ledger with hashes and rollback pointers.</p>
   <div class="detail">
     <div class="head"><span class="num a">05</span><h3>Evidence ledger · Checkpoints · Replay</h3><span class="pills">Evidence Ledger · Checkpoints · Replay</span></div>
     <div class="body">
@@ -410,12 +423,14 @@
           <li class="miss"><strong>Evidence packets / export</strong> — no operator-facing evidence bundle.</li>
         </ul>
         <div class="files">Temporal UI/history · radar/api.py (/events ring) · laminar/ledger.py (JSONL) &nbsp;|&nbsp; gap: durable unified Evidence Ledger + checkpoints</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: if an audit today asks "show me every action agent X took last Thursday, prove what the policy said at each step, and confirm it is safe to re-run from step three" — you would have to manually cross-reference Temporal's workflow history UI, the in-memory events ring on the radar, and optionally some JSONL log files. The Evidence Ledger puts all of that in one place with a cryptographic proof (the context hash) that the state at each checkpoint is exactly what it was when the agent ran it.</p>
       </div>
     </div>
   </div>
 
   <!-- ============ DETAIL: STEP 6 ============ -->
   <h2 class="section"><span class="n">6</span>Generate Instrumentation Patches</h2>
+  <p class="lead">Any agent that hasn't set up its telemetry, policy gate calls, and feature flags will stay in quarantine indefinitely — unless a developer manually goes into that agent's codebase and adds those missing hooks. Step 6 makes the control plane do that work automatically: it detects exactly what is missing, generates a code change with the required instrumentation already written, and proposes it as a pull request. Once the developer reviews and merges that change, the agent's quarantine is lifted. In temp2, the detection is correct — the registry already identifies precisely which hooks each quarantined agent is missing — but nothing yet writes or proposes the code fix.</p>
   <div class="detail">
     <div class="head"><span class="num r">06</span><h3>Auto-generate telemetry / policy patches</h3><span class="pills">Codex CLI · Claude Code · Patch Review</span></div>
     <div class="body">
@@ -435,12 +450,14 @@
           <li class="miss"><strong>Quarantine-exit-on-merge</strong> — no link from an accepted patch back to leaving quarantine.</li>
         </ul>
         <div class="files">gap: entirely unbuilt — concept only</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: the radar already tells you "this agent is missing <code>telemetry_observed</code> and <code>flags_observed</code>." What Step 6 would add is the radar responding to that automatically — opening a pull request in the agent's own codebase with the OTel setup, gate call, and flag read already written in. The developer reviews, merges, and the quarantine lifts automatically because the three hooks are now observed passing in execution.</p>
       </div>
     </div>
   </div>
 
   <!-- ============ CORE STACK ============ -->
   <h2 class="section"><span class="n">◆</span>Core stack discipline — component status</h2>
+  <p class="lead">Beneath the six operating-model steps, the magazine defines a set of fundamental building blocks that any AWCP implementation must have. These are not steps in a sequence — they are permanent infrastructure. Think of the six steps as the workflow the platform runs, and these as the structural components the workflow depends on. If one of these is missing or partial, every step that relies on it is limited.</p>
   <div class="grid">
     <div class="gcard g"><h4>Identity <span class="badge g">Done</span></h4><p>Registry, owner, agent_id, runtime, version.</p></div>
     <div class="gcard a"><h4>Policy <span class="badge a">Partial</span></h4><p>Imperative gate present; OPA / policy-as-code absent.</p></div>
@@ -452,23 +469,32 @@
 
   <!-- ============ EXTENSIONS ============ -->
   <h2 class="section"><span class="n">+</span>Built beyond the magazine (extensions)</h2>
+  <p class="lead">The magazine assumes agents cooperate: they check the gate, they respect denials, and they stay within their token budget. Building temp2 with real agents quickly exposed a gap — some agents don't cooperate. They call models directly, ignore 429 responses, or proceed with writes regardless of what the gate returns. The features below were added to handle those cases, using harder stops that work regardless of whether the agent respects the gate or not. The original four were built before this session; the four marked ★ new were added this session.</p>
   <div class="ext">
     <h3>Forceful token-limit enforcement</h3>
     <p>These exist in temp2 but are <strong>not described in the magazine</strong>. They were added because real autonomous agents ignored the cooperative gate. The magazine assumes onboarded agents that pass through the gate; these handle the ones that don't.</p>
     <ul class="chk">
       <li class="ext"><strong>Process SIGSTOP / SIGCONT</strong> — freeze an over-budget local agent's OS process (pid recovered from its registry id), reversible on recovery.</li>
       <li class="ext"><strong>Remote suspend/resume webhook</strong> — the network analog of SIGSTOP for agents with a control endpoint.</li>
-      <li class="ext"><strong>Token-aware LLM gateway</strong> — proxies model calls and 429s an over-budget agent at the source (the one wall that works for any topology).</li>
+      <li class="ext"><strong>Token-aware LLM gateway</strong> — proxies model calls and 429s an over-budget agent at the source (the one wall that works for any topology). Extended this session with a pre-execution estimate (see below).</li>
       <li class="ext"><strong>Crash-recovery journal</strong> — on-disk record so a killed radar never orphans a frozen process.</li>
+      <li class="ext"><strong>Pre-execution budget pre-check</strong> <span class="badge t">★ new</span> — provider-agnostic <code>TokenEstimator</code> hierarchy (<code>TiktokenEstimator</code> via tiktoken BPE → <code>FallbackEstimator</code> chars÷4) estimates input tokens from the raw request body before the upstream model call. <code>bridge.pre_check()</code> projects <code>window_usage + estimated</code> against the agent's per-risk-tier budget and returns HTTP 429 if the projection would exhaust it. Fail-open: any control-plane or estimation error lets the call through. Toggle: <code>AWCP_GATEWAY_PRECHECK=false</code>. Model→encoding routing: <code>gpt-4o/o1/o3/o4</code> → <code>o200k_base</code> · <code>gpt-4/claude-</code> → <code>cl100k_base</code> · all others → <code>gpt2</code>.</li>
+      <li class="ext"><strong>Self-hosted Laminar observability platform</strong> <span class="badge t">★ new</span> — full lmnr.ai stack (Postgres · ClickHouse · Quickwit · query-engine · app-server · Next.js frontend) added to <code>observability/docker-compose.yml</code> alongside the existing Grafana/Tempo/Loki services on the shared <code>awcp-obs</code> network; host ports remapped to avoid conflicts. OTLP gRPC ingestion at :8881; web UI at :5667. Span export from <code>awcp.laminar</code> is now fully end-to-end to the local platform.</li>
+      <li class="ext"><strong>One-command stack runner</strong> <span class="badge t">★ new</span> — <code>bash scripts/run_all.sh</code> starts all 9 services in dependency order (venv → Docker → Temporal → MCP → agent service → governance worker → control surface → demo seeder → radar) with PID tracking and graceful Ctrl+C shutdown of the full stack.</li>
+      <li class="ext"><strong>Radar Laminar key panel</strong> <span class="badge t">★ new</span> — secure in-browser API-key entry in the Agent Radar UI (:8090). Key stored in <code>sessionStorage</code> only, never sent to the server, never shown in plain text after entry. Hides the input after saving and shows an "Open Laminar UI →" button; "change key" restores the form.</li>
     </ul>
   </div>
 
+  <div class="note" style="margin-bottom:14px">
+    <strong>What is still missing — in plain terms.</strong> The three biggest gaps follow a natural build order. First, the approval-token gate (Step 3) — this is self-contained and can be built without waiting for anything else. An approval token is a short-lived signed string: the gate issues it, the agent sends it with the write, the gate validates it has not expired and has not already been used. OPA makes the rules behind that decision editable as text files. Second, the Evidence Ledger (Step 5) — most of the raw data already exists across Temporal history, the events ring, and optional JSONL files; the work is joining those sources into one queryable record and recording a context hash at each step so replay is safe. Third, instrumentation-patch generation (Step 6) — the hardest to automate, and the one that benefits most from the ledger already existing, since the ledger tells you exactly which hooks fired and which didn't. The teal extensions (gateway, pre-execution check, SIGSTOP, Laminar platform) are all working and do not block any of these three gaps from being closed.
+  </div>
   <div class="note">
     <strong>Reading the scorecard.</strong> The <em>governance spine</em> the magazine cares about — register/quarantine (1), durable orchestration (2), graceful degradation (4) — is largely <span style="color:var(--green);font-weight:700">done</span>. The biggest <span style="color:var(--red);font-weight:700">gaps</span> are the magazine's two most distinctive capabilities: <strong>expiring approval tokens + OPA (Step 3)</strong> and a <strong>durable Evidence Ledger + checkpoints (Step 5)</strong>, plus <strong>instrumentation-patch generation (Step 6)</strong>. Most recent effort went into a forceful token-enforcement layer that is genuinely useful but sits <span style="color:var(--teal);font-weight:700">beyond</span> the magazine's prescribed, cooperative, policy-based model.
   </div>
 
   <footer>
     AWCP Magazine ⟷ awcp-mcp-temp2 build audit · derived from docs/Agent-Workforce-Control-Plane-Magazine.html and the live src/awcp tree · percentages are directional estimates, not measured coverage
+    <br>Session additions flagged <span style="color:var(--teal);font-weight:700">★ new</span>: pre-execution budget pre-check · self-hosted Laminar platform (:5667) · one-command stack runner · radar API key panel · extensions count: 4 → 8
   </footer>
 </div>
 </body>
