@@ -121,3 +121,31 @@ def evaluate(agent_id: str, window_total_tokens: int, risk: str | None = None, a
         "warn_ratio": warn_ratio,
         "window_s": config.BUDGET_WINDOW_S,
     }
+
+
+def project(window_total_tokens: int, estimated_tokens: int,
+            budget_tokens: int, warn_ratio: float | None = None) -> dict:
+    """Pure pre-execution projection: what budget state would result from spending
+    estimated_tokens more on top of the current window total?
+
+    Mirrors evaluate() but takes concrete values rather than resolving them from
+    the registry, so callers (bridge.pre_check) control the lookup and this
+    function stays a pure computation. Never raises — used in the hot request path.
+    """
+    wr = warn_ratio if warn_ratio is not None else get_policy()["warn_ratio"]
+    projected = window_total_tokens + estimated_tokens
+    ratio = (projected / budget_tokens) if budget_tokens > 0 else 0.0
+    if ratio >= 1.0:
+        state = "exhausted"
+    elif ratio >= wr:
+        state = "warn"
+    else:
+        state = "ok"
+    return {
+        "current_tokens":    window_total_tokens,
+        "estimated_tokens":  estimated_tokens,
+        "projected_tokens":  projected,
+        "budget_tokens":     budget_tokens,
+        "projected_ratio":   round(ratio, 4),
+        "projected_state":   state,
+    }

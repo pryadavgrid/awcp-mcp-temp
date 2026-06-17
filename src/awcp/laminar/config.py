@@ -109,10 +109,21 @@ DEFAULT_TOKEN_BUDGET: int = _env_int("LMNR_TOKEN_BUDGET", "50000")
 RISK_TOKEN_BUDGET: dict[str, int] = _parse_risk_budget()
 BUDGET_WINDOW_S: float = _env_float("LMNR_BUDGET_WINDOW_S", "3600")
 WARN_RATIO: float = _env_float("LMNR_WARN_RATIO", "0.8")
+# When true, on_breach fires at the warn threshold (WARN_RATIO * budget) in
+# addition to exhausted.  This steps the autonomy ladder down one rung earlier
+# so enforcement fires before the hard limit, reducing overshoot for agents
+# that report tokens via execution events rather than the LLM gateway.
+ENFORCE_AT_WARN: bool = _env_bool("LMNR_ENFORCE_AT_WARN", "true")
 
 PRICE_TABLE: dict[str, dict[str, float]] = _parse_price_table()
-LEDGER_PATH: str = os.getenv("LMNR_LEDGER_PATH", "")
+LEDGER_PATH: str = os.getenv("LMNR_LEDGER_PATH", "/tmp/awcp-token-ledger.jsonl")
 RECORDS_MAX: int = _env_int("LMNR_RECORDS_MAX", "500")
+# Separate high-capacity accounting deque (window budget scans this, not RECORDS_MAX).
+# Much larger so fast agents (>500 calls/hour) are never under-counted.
+ACCT_MAX: int = _env_int("LMNR_ACCT_MAX", "10000")
+# Default output-token buffer added to every pre-check estimate when the request
+# does not declare max_tokens / num_predict.  0 = only use explicit caps.
+OUTPUT_BUFFER: int = _env_int("LMNR_OUTPUT_BUFFER", "0")
 TRACE_URL_TEMPLATE: str = os.getenv("LMNR_TRACE_URL_TEMPLATE", "")
 
 

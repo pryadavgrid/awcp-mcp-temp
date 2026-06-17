@@ -20,11 +20,14 @@ real Evidence Ledger is a later component; this JSONL is its seam.)
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import defaultdict, deque
 
 from awcp.laminar import config
+
+log = logging.getLogger("awcp.laminar")
 
 
 def price_for(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -47,9 +50,14 @@ class TokenLedger:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # agent_id -> ring of recent records (window pruning walks this)
+        # agent_id -> ring of recent records for display (capped at RECORDS_MAX)
         self._records: dict[str, deque] = defaultdict(
             lambda: deque(maxlen=config.RECORDS_MAX))
+        # agent_id -> high-capacity ring of (ts, in, out, cost) 4-tuples for window
+        # budget accounting — separate from _records so a high-call-rate agent
+        # can't evict still-in-window entries from the budget view.
+        self._acct: dict[str, deque] = defaultdict(
+            lambda: deque(maxlen=config.ACCT_MAX))
         # agent_id -> lifetime totals (never pruned)
         self._lifetime: dict[str, dict] = defaultdict(
             lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0, "calls": 0})
@@ -71,6 +79,8 @@ class TokenLedger:
         rec["cost"] = price_for(rec["model"], rec["input_tokens"], rec["output_tokens"])
         with self._lock:
             self._records[agent_id].append(rec)
+            self._acct[agent_id].append(
+                (rec["ts"], rec["input_tokens"], rec["output_tokens"], rec["cost"]))
             lt = self._lifetime[agent_id]
             lt["input_tokens"] += rec["input_tokens"]
             lt["output_tokens"] += rec["output_tokens"]
@@ -92,19 +102,26 @@ class TokenLedger:
     # ── read path ─────────────────────────────────────────────────────────────
 
     def window_usage(self, agent_id: str, window_s: float | None = None) -> dict:
-        """Token totals inside the sliding window (the number budgets gate on)."""
+        """Token totals inside the sliding window (the number budgets gate on).
+
+        Scans _acct (high-capacity ring) rather than _records (display ring) so
+        agents making >RECORDS_MAX calls per window are never under-counted."""
         horizon = time.time() - (window_s or config.BUDGET_WINDOW_S)
         used_in = used_out = calls = 0
         cost = 0.0
         last_model = ""
         with self._lock:
-            for rec in self._records.get(agent_id, ()):
-                if rec["ts"] >= horizon:
-                    used_in += rec["input_tokens"]
-                    used_out += rec["output_tokens"]
-                    cost += rec["cost"]
+            for ts, tin, tout, c in self._acct.get(agent_id, ()):
+                if ts >= horizon:
+                    used_in += tin
+                    used_out += tout
+                    cost += c
                     calls += 1
+            # last_model from display ring (best-effort; empty for long-idle agents)
+            for rec in reversed(list(self._records.get(agent_id, ()))):
+                if rec["ts"] >= horizon:
                     last_model = rec["model"]
+                    break
         return {"input_tokens": used_in, "output_tokens": used_out,
                 "total_tokens": used_in + used_out, "cost": round(cost, 6),
                 "calls": calls, "last_model": last_model}
@@ -131,10 +148,56 @@ class TokenLedger:
         returns to zero (used together with restoring autonomy after a token
         breach). Lifetime totals are preserved — evidence is never erased."""
         with self._lock:
-            n = len(self._records.get(agent_id, ()))
+            n = len(self._acct.get(agent_id, ()))
             self._records.pop(agent_id, None)
+            self._acct.pop(agent_id, None)
         return n
+
+    def _load_from_disk(self) -> None:
+        """Restore window-relevant records from the JSONL evidence file on startup.
+        Only records within the current budget window are added to _acct (for live
+        budget accounting); all records update lifetime totals regardless of age."""
+        if not config.LEDGER_PATH:
+            return
+        try:
+            horizon = time.time() - config.BUDGET_WINDOW_S
+            entries: list[tuple] = []
+            with open(config.LEDGER_PATH, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        agent_id = rec.get("agent_id", "")
+                        if not agent_id:
+                            continue
+                        ts = float(rec.get("ts") or 0)
+                        tin = int(rec.get("input_tokens") or 0)
+                        tout = int(rec.get("output_tokens") or 0)
+                        cost_val = float(rec.get("cost") or 0.0)
+                        entries.append((agent_id, ts, tin, tout, cost_val, rec))
+                    except Exception:  # noqa: BLE001
+                        continue
+            if not entries:
+                return
+            with self._lock:
+                for agent_id, ts, tin, tout, cost_val, rec in entries:
+                    lt = self._lifetime[agent_id]
+                    lt["input_tokens"] += tin
+                    lt["output_tokens"] += tout
+                    lt["cost"] += cost_val
+                    lt["calls"] += 1
+                    if ts >= horizon:
+                        self._acct[agent_id].append((ts, tin, tout, cost_val))
+                        self._records[agent_id].append(rec)
+            log.info("laminar.ledger.restored records=%d path=%s", len(entries), config.LEDGER_PATH)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("laminar.ledger.load_failed path=%s error=%r", config.LEDGER_PATH, exc)
 
 
 # Module-level singleton, same pattern as radar/telemetry.py's metrics.
 LEDGER = TokenLedger()
+LEDGER._load_from_disk()

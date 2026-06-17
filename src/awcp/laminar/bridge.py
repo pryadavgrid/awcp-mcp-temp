@@ -67,6 +67,12 @@ _tasks: dict[str, dict] = {}
 _last_state: dict[str, str] = {}
 _lock = threading.Lock()
 
+# Concurrent pre-check reservation: tracks tokens reserved by in-flight requests
+# (pre_check allowed but record_usage not yet called).  Included in window totals
+# for subsequent pre_checks so two simultaneous calls can't both pass the same budget.
+_inflight: dict[str, int] = {}
+_inflight_lock = threading.Lock()
+
 # OTel handles — created lazily AFTER setup_otel has run (init_laminar time).
 _tracer = None
 _m_tokens = None        # counter: awcp.laminar.tokens.total {agent, direction}
@@ -255,9 +261,12 @@ def _handle_transition(agent_id: str, evaluation: dict) -> None:
         pass
     _record_event(f"token_{state}", agent_id, detail,
                   used=evaluation["used_tokens"], budget=evaluation["budget_tokens"])
-    if state == "exhausted":
+    if state == "exhausted" or (state == "warn" and config.ENFORCE_AT_WARN):
         # The radar-side callback applies governance (degrade the autonomy
-        # ladder) — this module only reports the breach.
+        # ladder) — this module only reports the breach.  Firing at "warn"
+        # (when LMNR_ENFORCE_AT_WARN is set) steps the ladder down one rung
+        # at WARN_RATIO * budget so enforcement is applied before the hard
+        # limit, shrinking the overshoot window for execution-event reporters.
         try:
             _on_breach(agent_id, evaluation)
         except Exception as exc:        # noqa: BLE001
@@ -265,6 +274,65 @@ def _handle_transition(agent_id: str, evaluation: dict) -> None:
 
 
 # ── read API used by api.py / the dashboard / radar healthz ──────────────────
+
+def release_inflight(agent_id: str, amount: int) -> None:
+    """Release tokens reserved by pre_check after record_usage is called.
+
+    Should be called by the gateway once the model response has been metered.
+    Safe to call with amount=0 (no-op), or if pre_check was never called."""
+    if not agent_id or amount <= 0:
+        return
+    with _inflight_lock:
+        cur = _inflight.get(agent_id, 0)
+        updated = max(0, cur - amount)
+        if updated:
+            _inflight[agent_id] = updated
+        else:
+            _inflight.pop(agent_id, None)
+
+
+def pre_check(agent_id: str, estimated_tokens: int) -> dict:
+    """Pre-execution budget check: would spending estimated_tokens exhaust the budget?
+
+    Called BEFORE a model invocation so governance can deny execution without
+    tokens being spent.  Returns {"allowed": True/False, "reason": str, ...projection}.
+
+    Fail-open: returns allowed=True when laminar is disabled or not initialized.
+    A control-plane error must never block legitimate traffic — the existing
+    post-call is_exhausted / record_usage path is the authoritative backstop.
+
+    Concurrent safety: when allowed, reserves estimated_tokens in _inflight so
+    that simultaneous pre_checks see each other's pending spend and don't both
+    pass the same budget boundary.  Caller MUST call release_inflight() after
+    record_usage() to avoid permanently inflating the inflight counter.
+    """
+    if not (config.ENABLED and _initialized and agent_id and estimated_tokens > 0):
+        return {"allowed": True, "reason": "pre_check_skipped"}
+
+    try:
+        entry = _get_agent(agent_id)
+        risk = getattr(entry, "risk", None)
+        agent_budget_val = getattr(entry, "token_budget", None)
+        budget_tokens = budget.budget_for(agent_id, risk, agent_budget_val)
+        window = LEDGER.window_usage(agent_id)
+        # include tokens already reserved by concurrent in-flight requests
+        with _inflight_lock:
+            inflight = _inflight.get(agent_id, 0)
+        current = window["total_tokens"] + inflight
+        projection = budget.project(current, estimated_tokens, budget_tokens)
+        allowed = projection["projected_state"] != "exhausted"
+        if allowed:
+            with _inflight_lock:
+                _inflight[agent_id] = _inflight.get(agent_id, 0) + estimated_tokens
+        return {
+            "allowed": allowed,
+            "reason": "within_budget" if allowed else "projected_exhaustion",
+            **projection,
+        }
+    except Exception as exc:  # noqa: BLE001 — must never raise in the request path
+        log.warning("laminar.pre_check.error agent_id=%s error=%r", agent_id, exc)
+        return {"allowed": True, "reason": "pre_check_error"}
+
 
 def usage_summary(agent_id: str) -> dict:
     entry = _get_agent(agent_id)

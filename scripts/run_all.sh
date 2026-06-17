@@ -3,7 +3,8 @@
 # AWCP temp2 — ONE-SHOT runner (registry + token monitoring & control).
 #
 # Brings up, in order:
-#   1. venv + dependencies                  (first run only)
+#   1. venv + dependencies                  (first run only; includes tiktoken for
+#                                            the pre-execution budget pre-check)
 #   2. Docker telemetry stack               (OTel Collector / Tempo / Prometheus
 #                                            / Loki / Grafana — starts the Docker
 #                                            daemon itself if it isn't running)
@@ -11,12 +12,17 @@
 #                                            NAMESPACED task queues, so this
 #                                            radar never collides with another
 #                                            radar sharing the same Temporal
-#   4. MCP control server                   (:8002, SSE — the radar's onboarding
-#                                            link_mcp step can enumerate it)
-#   5. a DEMO seeder (background)           registers a demo agent and drives the
+#   4. MCP control server                   (:8002, SSE)
+#   5. Agent service                        (:8001, FastAPI direct REST path —
+#                                            auto-registers agents with the radar)
+#   6. Temporal governance worker           (awcp-governance-queue — drives
+#                                            AgentGovernanceWorkflow over MCP)
+#   7. Control surface                      (:8003, browser UI → Temporal)
+#   8. a DEMO seeder (background)           registers a demo agent and drives the
 #                                            full token-control loop so the UIs
-#                                            show results immediately (DEMO=0 to skip)
-#   6. the Agent Radar (foreground, :8090)  registry + governance + awcp.laminar
+#                                            show results immediately (DEMO=1 to enable)
+#   9. the Agent Radar (foreground, :8090)  registry + governance + awcp.laminar
+#                                            + pre-execution budget pre-check gate
 #
 # Usage:   bash scripts/run_all.sh                 Ctrl+C stops radar/Temporal/MCP
 # Env:     SKIP_TELEMETRY=1   don't start the Docker stack
@@ -34,13 +40,19 @@ export PYTHONPATH="$ROOT/src"
 export OTEL_ENABLED="${OTEL_ENABLED:-true}"
 RADAR_PORT="${RADAR_PORT:-8090}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-temp2-run"; mkdir -p "$LOGDIR"
-TEMPORAL_PID=""; MCP_PID=""
+TEMPORAL_PID=""; MCP_PID=""; AGENT_SVC_PID=""; WORKER_PID=""; CTRL_SVC_PID=""
 
 # Namespaced Temporal queues (overridable): two radars on one Temporal dev
 # server must NOT share queue names, or one worker steals (and fails) the
 # other's workflows. These defaults keep temp2 isolated.
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-temp2-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-temp2-task-execution}"
+
+# Point awcp.laminar's OTLP exporter at the self-hosted Laminar stack (started
+# by the Docker compose below). Override to keep using Laminar cloud instead:
+#   LMNR_OTLP_ENDPOINT=https://api.lmnr.ai:8443 bash scripts/run_all.sh
+export LMNR_OTLP_ENDPOINT="${LMNR_OTLP_ENDPOINT:-http://localhost:8881}"
+export LMNR_OTLP_PROTOCOL="${LMNR_OTLP_PROTOCOL:-grpc}"
 
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
@@ -58,9 +70,12 @@ PY
 cleanup(){
   echo
   say "Shutting down…"
-  [ -n "$MCP_PID" ]      && kill "$MCP_PID"      2>/dev/null || true
-  [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
-  say "Stopped the radar (+ Temporal/MCP if this script started them)."
+  [ -n "$CTRL_SVC_PID" ]  && kill "$CTRL_SVC_PID"  2>/dev/null || true
+  [ -n "$WORKER_PID" ]    && kill "$WORKER_PID"    2>/dev/null || true
+  [ -n "$AGENT_SVC_PID" ] && kill "$AGENT_SVC_PID" 2>/dev/null || true
+  [ -n "$MCP_PID" ]       && kill "$MCP_PID"       2>/dev/null || true
+  [ -n "$TEMPORAL_PID" ]  && kill "$TEMPORAL_PID"  2>/dev/null || true
+  say "Stopped all services started by this script."
   echo "  Telemetry stack left running — stop it with:"
   echo "    docker compose -f observability/docker-compose.yml down"
 }
@@ -128,14 +143,48 @@ else
   MCP_PID=$!
 fi
 
-# ── 5. OPTIONAL canned demonstration (OFF by default: DEMO=1 to enable) ──
-# The DEFAULT, non-hardcoded experience is REAL: start your agents via
-# agents/*/run.sh — each auto-reports its REAL per-LLM-call token usage to this
-# radar (AWCP_RADAR_URL) and is metered against the DEFAULT token budget
-# (LMNR_TOKEN_BUDGET / risk-tiered). Nothing is faked there.
-# This block only runs when DEMO=1: a scripted walk-through of the control loop
-# (allow -> warn -> exhausted -> degraded -> gate denies) using a synthetic
-# "demo-writer" with an intentionally small demo budget so the loop completes fast.
+# ── 5. Agent service (:8001, FastAPI direct REST path) — background ──────
+if [ -n "$(port_open 8001)" ]; then
+  say "Agent service already on :8001 — reusing it."
+else
+  say "Starting agent service on :8001…"
+  nohup ./.venv/bin/uvicorn awcp.service:app --host 0.0.0.0 --port 8001 \
+    > "$LOGDIR/agent_svc.log" 2>&1 &
+  AGENT_SVC_PID=$!
+fi
+
+# ── 6. Temporal governance worker (awcp-governance-queue) — background ───
+# Drives AgentGovernanceWorkflow / DynamicAskWorkflow over the MCP server.
+# Only started when Temporal is confirmed up — the worker exits immediately
+# if it can't connect, so skipping avoids a spurious background process.
+if [ -n "$(port_open 7233)" ]; then
+  say "Starting Temporal governance worker (awcp-governance-queue)…"
+  nohup ./.venv/bin/python -m awcp.temporal.worker.run_worker \
+    > "$LOGDIR/worker.log" 2>&1 &
+  WORKER_PID=$!
+else
+  warn "Temporal not up — skipping governance worker (start Temporal, then re-run)."
+fi
+
+# ── 7. Control surface (:8003, browser UI → Temporal) — background ───────
+# Provides the live step-by-step view and prompt submission UI.
+# Requires Temporal to trigger workflows; skipped if Temporal isn't up.
+if [ -n "$(port_open 8003)" ]; then
+  say "Control surface already on :8003 — reusing it."
+elif [ -n "$(port_open 7233)" ]; then
+  say "Starting control surface on :8003…"
+  nohup ./.venv/bin/uvicorn awcp.control.api:app --host 0.0.0.0 --port 8003 \
+    > "$LOGDIR/control.log" 2>&1 &
+  CTRL_SVC_PID=$!
+else
+  warn "Temporal not up — skipping control surface (:8003 needs Temporal to trigger workflows)."
+fi
+
+# ── 8. OPTIONAL canned demonstration (off by default — DEMO=1 to enable) ─
+# The DEFAULT experience is REAL: agents auto-report per-LLM-call token usage
+# to the radar and are metered against the budget (LMNR_TOKEN_BUDGET / risk-tier).
+# DEMO=1 runs a scripted walk-through (allow → warn → exhausted → gate denies)
+# using a synthetic agent with a small demo budget so the loop completes fast.
 if [ "${DEMO:-0}" = "1" ]; then
   (
     B="http://localhost:${RADAR_PORT}"
@@ -165,25 +214,37 @@ if [ "${DEMO:-0}" = "1" ]; then
   ) > "$LOGDIR/demo.log" 2>&1 &
 fi
 
-# ── 6. the Agent Radar (foreground) ───────────────────────────────────
+# ── 9. the Agent Radar (foreground) ───────────────────────────────────
 echo
-echo "  ── AWCP temp2 is up (registry + token monitoring & control) ──"
-echo "     Registry (radar)  : http://localhost:${RADAR_PORT}        ('tokens ↗' chip + Tokens column)"
+echo "  ── AWCP temp2 — full stack ────────────────────────────────────"
+echo "     Registry / radar  : http://localhost:${RADAR_PORT}"
 echo "     Token monitor     : http://localhost:${RADAR_PORT}/laminar/ui"
-echo "     Temporal UI       : http://localhost:8233   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
-echo "     Grafana           : http://localhost:3000   (admin / awcp1234)"
+echo "     LLM gateway       : http://localhost:${RADAR_PORT}/llm   (pre-execution budget gate)"
+echo "     Agent service     : http://localhost:8001  (direct REST + /docs)"
+echo "     MCP server        : http://localhost:8002  (SSE)"
+echo "     Control surface   : http://localhost:8003  (browser UI → Temporal)"
+echo "     Temporal UI       : http://localhost:8233  (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Grafana           : http://localhost:3000  (admin / awcp1234)"
 echo "     Prometheus        : http://localhost:9090"
-echo "     MCP server        : http://localhost:8002   (SSE)"
+echo "     Laminar UI        : http://localhost:5667  (self-hosted LLM observability)"
+echo "       OTLP endpoint   : ${LMNR_OTLP_ENDPOINT}  (gRPC → lmnr-app-server)"
+[ -n "${LMNR_PROJECT_API_KEY:-}" ] && \
+echo "       Laminar export  : ON  (spans streaming to local Laminar)" || \
+echo "       Laminar export  : OFF — visit http://localhost:5667, create a project,"
+[ -n "${LMNR_PROJECT_API_KEY:-}" ] || \
+echo "                         copy the API key, then re-run with LMNR_PROJECT_API_KEY=<key>"
 [ "${DEMO:-0}" = "1" ] && \
 echo "     Demo (DEMO=1)     : synthetic 'demo-writer' walks the control loop (~20s after boot)."
-[ -n "${LMNR_PROJECT_API_KEY:-}" ] && \
-echo "     Laminar export    : ON → ${LMNR_OTLP_ENDPOINT:-https://api.lmnr.ai:8443}" || \
-echo "     Laminar export    : off (set LMNR_PROJECT_API_KEY to dual-export spans)"
 echo
-echo "  ▶ Start your agents (agents/*/run.sh): each auto-reports REAL token usage here"
-echo "    and is metered against the DEFAULT budget (LMNR_TOKEN_BUDGET / risk-tiered)."
-echo "    To keep an agent fully decoupled instead: AWCP_RADAR_URL= bash <agent>/run.sh"
-echo "  ▶ Press Ctrl+C to stop."
+echo "  Logs (for background services):"
+echo "    tail -f ${LOGDIR}/agent_svc.log   # agent service (:8001)"
+echo "    tail -f ${LOGDIR}/worker.log       # temporal governance worker"
+echo "    tail -f ${LOGDIR}/control.log      # control surface (:8003)"
+echo "    tail -f ${LOGDIR}/mcp.log          # MCP server (:8002)"
+echo
+echo "  ▶ Point agents at the LLM gateway (AWCP_GATEWAY_UPSTREAM / OLLAMA_BASE)"
+echo "    to activate the pre-execution budget pre-check across all runtimes."
+echo "  ▶ Press Ctrl+C to stop all services started by this script."
 echo "  ──────────────────────────────────────────────────────────────"
 echo
 ./.venv/bin/uvicorn awcp.radar.api:app --host 0.0.0.0 --port "${RADAR_PORT}"

@@ -32,7 +32,7 @@ import time
 
 import httpx
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from awcp.radar.store import REGISTRY
 
@@ -52,6 +52,10 @@ AGENT_HEADER = "x-awcp-agent-id"
 # proxy); only IDENTIFIED, over-budget agents are ever blocked.
 REQUIRE_AGENT = os.getenv("AWCP_GATEWAY_REQUIRE_AGENT", "false").lower() == "true"
 GATEWAY_TIMEOUT = float(os.getenv("AWCP_GATEWAY_TIMEOUT", "300"))
+# When true, estimate input tokens from the request body and deny calls that
+# would project the agent over its budget BEFORE any tokens are spent.
+# Fail-open on estimation errors so a tokenizer problem never blocks traffic.
+PRECHECK_ENABLED = os.getenv("AWCP_GATEWAY_PRECHECK", "true").lower() == "true"
 
 # Upstream paths that CONSUME tokens — gated + metered. Everything else (model
 # list, health, pulls) passes straight through ungated.
@@ -109,7 +113,14 @@ def _agent_from_socket(request: Request) -> str:
 def _resolve_agent(request: Request) -> str:
     aid = request.headers.get(AGENT_HEADER) or request.query_params.get("awcp_agent")
     if aid:
-        return aid.strip()
+        aid = aid.strip()
+        # Only trust header/query IDs that exist in the registry — prevents a
+        # rogue process from spoofing a victim agent's budget by forging its ID.
+        if aid and REGISTRY.get(aid) is None:
+            log.debug("radar.llm_gateway.unknown_agent_id claimed=%s — falling back to socket", aid)
+            aid = ""
+        if aid:
+            return aid
     return _agent_from_socket(request)
 
 
@@ -138,6 +149,106 @@ def _extract_usage(resp: httpx.Response) -> tuple[int, int, str]:
     except Exception:                                            # noqa: BLE001
         pass
     return 0, 0, ""
+
+
+def _extract_usage_bytes(data: bytes) -> tuple[int, int, str]:
+    """Extract (input, output, model) from raw response bytes — used for streaming
+    paths where the httpx.Response object is not available.  Tries the last
+    non-empty line first (Ollama final stats line / OpenAI last chunk)."""
+    def _from_obj(d: dict) -> tuple[int, int, str]:
+        if not isinstance(d, dict):
+            return 0, 0, ""
+        if "prompt_eval_count" in d or "eval_count" in d:
+            return (int(d.get("prompt_eval_count") or 0),
+                    int(d.get("eval_count") or 0),
+                    str(d.get("model") or ""))
+        u = d.get("usage") or {}
+        if u:
+            return (int(u.get("prompt_tokens") or 0),
+                    int(u.get("completion_tokens") or 0),
+                    str(d.get("model") or ""))
+        return 0, 0, str(d.get("model") or "")
+
+    try:
+        text = data.decode("utf-8", errors="ignore")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        for line in reversed(lines):
+            if line.startswith("data: "):    # OpenAI SSE prefix
+                line = line[6:].strip()
+            if line in ("[DONE]", ""):
+                continue
+            try:
+                return _from_obj(json.loads(line))
+            except Exception:               # noqa: BLE001
+                continue
+    except Exception:                       # noqa: BLE001
+        pass
+    return 0, 0, ""
+
+
+def _wants_stream(body: bytes) -> bool:
+    """True if the request body asks for a streaming response."""
+    try:
+        return bool(json.loads(body).get("stream"))
+    except Exception:                       # noqa: BLE001
+        return False
+
+
+async def _stream_proxy(
+    request: Request,
+    upstream: str,
+    body: bytes,
+    fwd_headers: dict,
+    agent_id: str,
+    est: int,
+) -> Response:
+    """Streaming path: open the upstream connection, relay chunks to the client in
+    real time, then meter usage from the tail of the stream after it completes."""
+    client = httpx.AsyncClient(timeout=GATEWAY_TIMEOUT)
+    try:
+        req = client.build_request(
+            request.method,
+            f"{UPSTREAM_BASE}/{upstream}",
+            content=body,
+            headers=fwd_headers,
+            params=dict(request.query_params),
+        )
+        up_resp = await client.send(req, stream=True)
+    except Exception as exc:               # noqa: BLE001
+        await client.aclose()
+        return JSONResponse(status_code=502, content={"error": f"upstream model error: {exc}"})
+
+    tail_buf = bytearray()
+
+    async def _generate():
+        try:
+            async for chunk in up_resp.aiter_bytes():
+                tail_buf.extend(chunk)
+                # keep last 8 KB — enough for any final stats line
+                if len(tail_buf) > 8192:
+                    del tail_buf[:-4096]
+                yield chunk
+        finally:
+            await up_resp.aclose()
+            await client.aclose()
+            if agent_id and _LAMINAR:
+                try:
+                    tin, tout, model = _extract_usage_bytes(bytes(tail_buf))
+                    if tin or tout:
+                        _laminar.record_usage(agent_id, model, tin, tout)
+                except Exception as exc:   # noqa: BLE001
+                    log.warning("radar.llm_gateway.stream_meter error=%r", exc)
+                try:
+                    _laminar.release_inflight(agent_id, est)
+                except Exception:          # noqa: BLE001
+                    pass
+
+    media_type = up_resp.headers.get("content-type", "application/x-ndjson")
+    return StreamingResponse(
+        _generate(),
+        status_code=up_resp.status_code,
+        media_type=media_type,
+    )
 
 
 @gateway_router.api_route("/{upstream:path}", methods=["GET", "POST", "DELETE", "PUT"])
@@ -169,8 +280,53 @@ async def proxy(upstream: str, request: Request) -> Response:
                 "agent_id": agent_id, "budget": ev or {}})
 
     body = await request.body()
+
+    # ── PRE-EXECUTION BUDGET CHECK ────────────────────────────────────────────
+    # Estimate input tokens from the request body and deny the call if projected
+    # usage (current window + estimate) would exhaust the agent's budget — before
+    # a single token is spent upstream.  Fail-open on any estimation error so a
+    # tokenizer problem can never brick all model traffic.
+    # est is tracked outside the try so the streaming/non-streaming paths can
+    # call release_inflight() with the same value that was reserved in pre_check.
+    est = 0
+    if gated and agent_id and _LAMINAR and PRECHECK_ENABLED:
+        try:
+            est = _laminar.estimate_request(body)
+            if est > 0:
+                check = _laminar.pre_check(agent_id, est)
+                if not check.get("allowed"):
+                    est = 0   # pre_check denied → no reservation was made
+                    log.warning(
+                        "radar.llm_gateway.precheck.blocked agent_id=%s "
+                        "current=%s estimated=%s projected=%s budget=%s",
+                        agent_id,
+                        check.get("current_tokens"),
+                        check.get("estimated_tokens"),
+                        check.get("projected_tokens"),
+                        check.get("budget_tokens"),
+                    )
+                    return JSONResponse(status_code=429, content={
+                        "error": (
+                            "token budget would be exhausted — "
+                            "pre-execution check blocked this request by the AWCP control plane"
+                        ),
+                        "agent_id": agent_id,
+                        "pre_check": check,
+                    })
+        except Exception as exc:                                 # noqa: BLE001
+            est = 0
+            log.warning("radar.llm_gateway.precheck.error agent_id=%s error=%r", agent_id, exc)
+
     drop = {"host", "content-length", AGENT_HEADER}
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in drop}
+
+    # ── STREAMING PATH ────────────────────────────────────────────────────────
+    # When the request asks for a streaming response, relay chunks in real time
+    # via StreamingResponse.  Metering happens after the last chunk is yielded.
+    if gated and _wants_stream(body):
+        return await _stream_proxy(request, upstream, body, fwd_headers, agent_id, est)
+
+    # ── BUFFERED PATH (non-streaming) ─────────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=GATEWAY_TIMEOUT) as client:
             up = await client.request(
@@ -190,6 +346,10 @@ async def proxy(upstream: str, request: Request) -> Response:
                 _laminar.record_usage(agent_id, model, tin, tout)
         except Exception as exc:        # noqa: BLE001 — accounting must never break the response
             log.warning("radar.llm_gateway.meter_error agent_id=%s error=%r", agent_id, exc)
+        try:
+            _laminar.release_inflight(agent_id, est)
+        except Exception:               # noqa: BLE001
+            pass
 
     return Response(content=up.content, status_code=up.status_code,
                     media_type=up.headers.get("content-type"))

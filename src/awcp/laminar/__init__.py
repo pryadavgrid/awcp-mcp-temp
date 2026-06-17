@@ -42,5 +42,8 @@ from awcp.laminar.bridge import (          # noqa: F401  (public surface)
     budget_state,
     is_exhausted,
     record_usage,
+    pre_check,
+    release_inflight,
 )
+from awcp.laminar.estimator import estimate_request  # noqa: F401
 from awcp.laminar.api import router        # noqa: F401
