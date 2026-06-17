@@ -20,7 +20,7 @@ const MAX_FILE_CHARS = 20000 // cap per-file text we inline into a prompt
 // The big greeting. Defaults to "Namaste 🙏"; if a user name is ever provided
 // (e.g. from auth later) it's woven in automatically — not hardcoded per-user.
 function greetingFor(userName) {
-  return userName ? `Namaste, ${userName} 🙏` : 'Namaste 🙏'
+  return userName ? `Hii, ${userName}` : 'Agent Interface'
 }
 
 // ── token budget resolution (same precedence laminar uses) ───────────────────
