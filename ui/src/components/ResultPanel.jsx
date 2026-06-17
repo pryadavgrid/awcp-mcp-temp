@@ -1,18 +1,11 @@
 import { md } from '../md.js'
+import ExportMenu from './ExportMenu.jsx'
 
-// Final answer + governed writes + tools used + a deep link into Temporal. All
-// fields are whatever the agent returned; tools/steps are not hardcoded.
-export default function ResultPanel({ status, onApprove }) {
+// Final answer + a deep link into Temporal. All fields are whatever the agent
+// returned. (Tools used / governed-writes details are intentionally not shown.)
+export default function ResultPanel({ status, onApprove, title }) {
   if (!status) return null
-  const {
-    result,
-    tools_used = [],
-    steps = [],
-    temporal_url,
-    error,
-    awaiting,
-    status: s,
-  } = status
+  const { result, temporal_url, error, awaiting, status: s } = status
 
   return (
     <div className="result-panel">
@@ -39,41 +32,15 @@ export default function ResultPanel({ status, onApprove }) {
         <div className="muted">No result yet — it appears here when the agent finishes.</div>
       )}
 
-      {tools_used.length > 0 && (
-        <div className="block">
-          <div className="lbl">Tools used</div>
-          <div className="chips">
-            {tools_used.map((t, i) => (
-              <span className="chip" key={`${t}-${i}`}>
-                {t}
-              </span>
-            ))}
-          </div>
+      {(result || temporal_url) && (
+        <div className="result-actions">
+          <ExportMenu result={result} title={title} />
+          {temporal_url && (
+            <a className="tlink" href={temporal_url} target="_blank" rel="noreferrer">
+              Open this run in Temporal ↗
+            </a>
+          )}
         </div>
-      )}
-
-      {steps.length > 0 && (
-        <div className="block">
-          <div className="lbl">Governed writes</div>
-          <div className="gsteps">
-            {steps.map((st, i) => (
-              <div className="gstep" key={i}>
-                <span className="mono">{st.action}</span>
-                {st.risk && <span className={`rk rk-${st.risk}`}>{st.risk}</span>}
-                <span className={`sstat ${st.status}`}>
-                  {(st.status || '').replace('_', ' ')}
-                </span>
-                {st.info && <span className="ginfo">{st.info}</span>}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {temporal_url && (
-        <a className="tlink" href={temporal_url} target="_blank" rel="noreferrer">
-          Open this run in Temporal ↗
-        </a>
       )}
     </div>
   )

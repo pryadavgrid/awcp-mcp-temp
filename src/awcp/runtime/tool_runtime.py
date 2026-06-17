@@ -1,4 +1,5 @@
 import importlib
+import os
 import pkgutil
 
 from typing import Any, Callable
@@ -8,21 +9,90 @@ from awcp.runtime.event_runtime import emit_execution_event, CURRENT_PROFILE
 
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {}
 
+# Per-tool governance metadata, declared at registration time. Nothing is keyed
+# on a specific tool name here: a tool simply declares its own risk/scope via the
+# @tool decorator, and the MCP governance plane reads it back through
+# get_tool_risk()/get_tool_scope() when it gates a call. Reads default to "low".
+TOOL_META: dict[str, dict[str, Any]] = {}
 
-def register_tool(name: str, handler: Callable[..., Any]) -> None:
+# Default risk tiers that the write-action gate treats as WRITES (everything else
+# is a read and is never gated). Env-overridable so the taxonomy is not hardcoded.
+_WRITE_RISK_TIERS = frozenset(
+    t.strip().lower()
+    for t in os.getenv("AWCP_WRITE_RISK_TIERS", "medium,high,critical").split(",")
+    if t.strip()
+)
+
+
+def _parse_risk_overrides() -> dict[str, str]:
+    """Operator override map from AWCP_TOOL_RISK, e.g.
+    "external_post:high,save_artifact:medium". Lets ops retune a tool's risk at
+    deploy time without touching code. Empty by default."""
+    out: dict[str, str] = {}
+    for pair in os.getenv("AWCP_TOOL_RISK", "").split(","):
+        if ":" in pair:
+            name, _, val = pair.partition(":")
+            if name.strip() and val.strip():
+                out[name.strip()] = val.strip().lower()
+    return out
+
+
+_RISK_OVERRIDES = _parse_risk_overrides()
+
+# Default risk for a tool that declares none (reads are the common case).
+_DEFAULT_RISK = os.getenv("AWCP_DEFAULT_TOOL_RISK", "low").lower()
+
+
+def register_tool(
+    name: str,
+    handler: Callable[..., Any],
+    *,
+    risk: str | None = None,
+    scope: str | None = None,
+) -> None:
 
     TOOL_REGISTRY[name] = handler
+    TOOL_META[name] = {
+        # An explicit per-tool risk; otherwise resolved later against the env
+        # override map / default. Storing None keeps "undeclared" distinct from
+        # an explicit "low" so get_tool_risk() can apply overrides correctly.
+        "risk": (risk.lower() if isinstance(risk, str) and risk.strip() else None),
+        # The action's write scope (matched against an agent's declared
+        # write_scopes by the radar gate). Defaults to the tool name.
+        "scope": (scope if scope else name),
+    }
 
 
-def tool(name: str):
+def tool(name: str, *, risk: str | None = None, scope: str | None = None):
 
     def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
 
-        register_tool(name, handler)
+        register_tool(name, handler, risk=risk, scope=scope)
 
         return handler
 
     return decorator
+
+
+def get_tool_risk(name: str) -> str:
+    """Resolve a tool's effective risk tier. Precedence (nothing hardcoded):
+    1. the AWCP_TOOL_RISK env override map,
+    2. the tool's own declared risk,
+    3. the system default (AWCP_DEFAULT_TOOL_RISK, normally "low")."""
+    if name in _RISK_OVERRIDES:
+        return _RISK_OVERRIDES[name]
+    declared = (TOOL_META.get(name) or {}).get("risk")
+    return declared or _DEFAULT_RISK
+
+
+def get_tool_scope(name: str) -> str:
+    """The write scope the gate should check for this tool (defaults to its name)."""
+    return (TOOL_META.get(name) or {}).get("scope") or name
+
+
+def is_write_risk(risk: str) -> bool:
+    """True when a risk tier denotes a state-changing (gated) action."""
+    return (risk or "").lower() in _WRITE_RISK_TIERS
 
 
 def summarize_tool_output(output: Any) -> dict[str, Any]:
