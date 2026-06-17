@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   API_BASE,
   listAgents,
@@ -8,6 +8,7 @@ import {
   submitTask,
   getStatus,
   approveTask,
+  uploadFile,
 } from './api.js'
 import AgentPicker from './components/AgentPicker.jsx'
 import Timeline from './components/Timeline.jsx'
@@ -64,6 +65,10 @@ export default function App() {
   const [usage, setUsage] = useState([]) // /laminar/usage rows (agents that spent)
   const [budgets, setBudgets] = useState({}) // /laminar/budgets policy
   const [regAgents, setRegAgents] = useState([]) // /agents registry entries
+  const [attached, setAttached] = useState(null) // { path, filename, size } for file agents
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInput = useRef(null)
 
   const selected = agents.find((a) => a.id === selectedId) || null
   const acceptsFiles = !!(selected && selected.accepts_files)
@@ -227,6 +232,9 @@ export default function App() {
         <div className="conn">
           <span className={`dot ${backendOk ? 'on' : backendOk === false ? 'off' : ''}`} />
           <span className="mono">{API_BASE}</span>
+          <a className="tokenlink" href={`${API_BASE}/laminar/ui`} target="_blank" rel="noreferrer">
+            Token Monitor ↗
+          </a>
         </div>
       </header>
 

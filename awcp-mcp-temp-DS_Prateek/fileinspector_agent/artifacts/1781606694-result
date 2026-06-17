@@ -1,0 +1,22 @@
+The image appears to be a slide or section from a presentation that outlines various technologies and platforms used for governing existing agent runtimes, likely within an enterprise context. It categorizes these into three main sections:
+
+1. **Core Technologies**:
+   - Temporal: A durable workflow execution engine.
+   - Context Graphs: Shared memory substrate for workflow state management.
+   - Agent Registry & Hooks: Versioned catalog of agent identity and observability status.
+   - Policy Engine: Evaluates workflow steps and tool calls for approval tokens, scope checks, and autonomy reduction triggers.
+   - CodeAct: An agent-to-code execution framework that bridges reasoning and action for governed tool calls.
+
+2. **Platform Partners**:
+   - Modal: Serverless compute for agent code execution with isolated containers.
+   - OpenFeature / Flipt: A feature-flag control plane.
+   - Letta: Long-term memory management for context.
+   - Anthropic / Claude: Primary reasoning provider for recovery planning and approval context generation.
+
+3. **OSS Accelerators**:
+   - Multica: Multi-agent conversation framework with structured communication protocols.
+   - agent-session-bridge: Session continuity middleware for runtime adapters.
+   - graph-of-skills: Capability graph engine that models relationships between agents, scopes, and gaps in required control hooks.
+   - Pentatonic ai-agent-sdk: Enterprise agent governance SDK.
+
+The slide seems to be part of a larger discussion on how these technologies are integrated to manage and govern the execution of agents within an enterprise environment.
