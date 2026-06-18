@@ -1,54 +1,66 @@
-// Left sidebar: brand, a "New chat" button, and the conversation history.
-// History is whatever is in app state (persisted to localStorage) — it grows as
-// the user starts conversations; nothing is hardcoded. On narrow screens it
-// slides in as a drawer over a scrim (see styles.css).
-export default function Sidebar({
-  chats,
-  activeChatId,
-  onNewChat,
-  onSelectChat,
-  onDeleteChat,
-  open,
-  onClose,
-}) {
+const ITEMS = [
+  { id: 'dashboard', label: 'Dashboard', icon: '▦' },
+  { id: 'radar', label: 'Radar', icon: '◎' },
+  { id: 'workflow', label: 'Workflow', icon: '⤳' },
+  { id: 'tokens', label: 'Token Monitor', icon: '◔' },
+]
+
+export function Sidebar({ active, onSelect, health }) {
+  const temporal = health?.temporal_connected
+  const otel = health?.otel_enabled
+  const laminar = health?.laminar?.enabled
+
   return (
-    <>
-      <div className={`scrim ${open ? 'show' : ''}`} onClick={onClose} />
-      <aside className={`sidebar ${open ? 'open' : ''}`}>
-        <div className="sb-head">
-          <span className="sb-title">AWCP</span>
+    <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
+      <div className="flex items-center gap-2.5 px-5 py-5">
+        <span className="grid h-9 w-9 place-items-center rounded-lg bg-brand-500 text-lg text-white shadow-sm">
+          ◆
+        </span>
+        <div>
+          <div className="text-sm font-bold leading-tight text-white">AWCP</div>
+          <div className="text-[11px] leading-tight text-brand-200">Control Plane</div>
         </div>
+      </div>
 
-        <button type="button" className="new-chat" onClick={onNewChat}>
-          <span className="nc-plus">+</span> New chat
-        </button>
-
-        <div className="sb-section">Recents</div>
-        <div className="history">
-          {chats.length === 0 && <div className="hist-empty">No conversations yet</div>}
-          {chats.map((c) => (
-            <div
-              key={c.id}
-              className={`hist-item ${c.id === activeChatId ? 'active' : ''}`}
-              onClick={() => onSelectChat(c.id)}
-              title={c.title || 'New chat'}
+      <nav className="flex-1 space-y-1 px-3">
+        {ITEMS.map((it) => {
+          const isActive = active === it.id
+          return (
+            <button
+              key={it.id}
+              onClick={() => onSelect(it.id)}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
+                isActive
+                  ? 'bg-white/10 font-semibold text-white ring-1 ring-inset ring-white/15'
+                  : 'text-brand-200 hover:bg-white/5 hover:text-white'
+              }`}
             >
-              <span className="hist-title">{c.title || 'New chat'}</span>
-              <button
-                type="button"
-                className="hist-del"
-                aria-label="Delete conversation"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onDeleteChat(c.id)
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      </aside>
-    </>
+              <span className="w-4 text-center text-base leading-none">{it.icon}</span>
+              {it.label}
+            </button>
+          )
+        })}
+      </nav>
+
+      <div className="space-y-2 border-t border-white/10 px-5 py-4 text-[11px] text-brand-200">
+        <ConnRow label="Temporal" ok={temporal} />
+        <ConnRow label="OTel" ok={otel} />
+        <ConnRow label="Laminar" ok={laminar} />
+      </div>
+    </aside>
+  )
+}
+
+function ConnRow({ label, ok }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span>{label}</span>
+      <span className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-brand-300' : 'bg-white/25'}`} />
+        <span className={ok ? 'text-brand-100' : 'text-brand-200/70'}>
+          {ok ? 'connected' : 'offline'}
+        </span>
+      </span>
+    </div>
   )
 }

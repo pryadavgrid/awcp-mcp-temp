@@ -38,7 +38,7 @@ Content-Type: application/json
 {"query": "What Is The Price Of Silver Today"}
 ```
 
-**In [`control/api.py` → `ask()` function (line 98–140)](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/control/api.py#L98-L140):**
+**In [`control/api.py` → `ask()` function (line 98–140)](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/control/api.py#L98-L140):**
 
 1. `req.query.strip()` → `"What Is The Price Of Silver Today"` ✅ not empty
 2. `workflow_id` is generated → e.g. `awcp-ask-a3f9c12b`
@@ -51,7 +51,7 @@ Content-Type: application/json
 
 ## ⚙️ STEP 1 — Temporal Dispatches to the Worker
 
-**In [`temporal/worker/run_worker.py`](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/temporal/worker/run_worker.py):**
+**In [`temporal/worker/run_worker.py`](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/temporal/worker/run_worker.py):**
 
 - The worker is listening on task queue: `"awcp-governance-queue"`
 - Temporal picks up the `DynamicAskWorkflow` task and routes it to the worker
@@ -61,7 +61,7 @@ Content-Type: application/json
 
 ## 🧠 STEP 2 — `DynamicAskWorkflow` Starts (5 Internal Steps)
 
-**In [`temporal/workflows/dynamic_ask.py`](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/temporal/workflows/dynamic_ask.py)**
+**In [`temporal/workflows/dynamic_ask.py`](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/temporal/workflows/dynamic_ask.py)**
 
 ---
 
@@ -74,7 +74,7 @@ The worker **spawns the MCP Server as a subprocess** via `stdio`:
 python -m awcp.mcp.server stdio
 ```
 
-The MCP tool [`call_llm` in `mcp/server.py` (line 307)](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/mcp/server.py#L307-L369) sends this prompt to **Ollama (local LLM)**:
+The MCP tool [`call_llm` in `mcp/server.py` (line 307)](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/mcp/server.py#L307-L369) sends this prompt to **Ollama (local LLM)**:
 
 > *"What Is The Price Of Silver Today — should I use tools or answer directly?"*
 
@@ -98,7 +98,7 @@ response["execution_path"] = "tools"
 
 The MCP server introspects `TOOL_REGISTRY` (populated by `discover_tools()` which auto-imports all modules in `awcp/tools/`):
 
-Discovered tools from [`tools/` directory](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/tools):
+Discovered tools from [`tools/` directory](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/tools):
 | Tool Name | File |
 |---|---|
 | `web_search` | `tools/web_search.py` |
@@ -119,7 +119,7 @@ response["tool_execution"]["tools_discovered"] = ["web_search", "advanced_web_se
 
 The MCP server sends a prompt to Ollama with the query + discovered tools list.
 
-**The LLM's selection logic from [`mcp/server.py` line 398-410](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/mcp/server.py#L398-L410):**
+**The LLM's selection logic from [`mcp/server.py` line 398-410](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/mcp/server.py#L398-L410):**
 
 > - "current events, news, general facts, recent information" → `web_search` or `advanced_web_search`
 > - "research papers, academic content" → `search_arxiv`
@@ -145,7 +145,7 @@ Since "Price Of Silver Today" = **live market/financial data** → LLM selects:
 
 **Activity executed:** `mcp_run_tool` with `tool_name="web_search"` → calls MCP tool `execute_tool`
 
-The MCP `execute_tool` calls `run_tool("web_search", {"query": "What Is The Price Of Silver Today"})` which invokes [`tools/web_search.py`](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/tools/web_search.py):
+The MCP `execute_tool` calls `run_tool("web_search", {"query": "What Is The Price Of Silver Today"})` which invokes [`tools/web_search.py`](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/tools/web_search.py):
 
 ```python
 # web_search.py runs TWO DuckDuckGo searches:
@@ -192,7 +192,7 @@ response["tool_execution"]["tools_called"] = [{
 
 **Activity executed:** `mcp_synthesize_answer` → calls MCP tool `synthesize_tool_results`
 
-The MCP [`synthesize_tool_results` function (line 467)](file:///Users/pryadav/Desktop/awcp-mcp-temporal/src/awcp/mcp/server.py#L467-L549) builds a prompt:
+The MCP [`synthesize_tool_results` function (line 467)](file:///Users/pryadav/Desktop/AWCP-Capstone/awcp-mcp-temporal/src/awcp/mcp/server.py#L467-L549) builds a prompt:
 
 ```
 You are a factual QA assistant.

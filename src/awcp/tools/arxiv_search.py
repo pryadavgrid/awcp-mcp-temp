@@ -54,3 +54,23 @@ def search_arxiv(
         raise RuntimeError(
             f"Arxiv search failed: {str(e)}"
         )
+
+
+@tool("get_paper")
+def get_paper(arxiv_id: str) -> str:
+    """Fetch a specific arXiv paper by id (e.g. 2401.12345).
+
+    Returns the title, authors, publication date, link, and abstract as text.
+    """
+    client = arxiv.Client()
+    result = next(client.results(arxiv.Search(id_list=[arxiv_id])), None)
+    if not result:
+        return f"Paper {arxiv_id} not found."
+    authors = ", ".join(str(a) for a in result.authors)
+    return (
+        f"Title: {result.title}\n"
+        f"Authors: {authors}\n"
+        f"Published: {result.published.date()}\n"
+        f"Link: {result.entry_id}\n"
+        f"Abstract: {result.summary.strip()}"
+    )
