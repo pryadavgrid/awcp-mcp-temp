@@ -54,7 +54,7 @@
       "onboarding_state": "done",
       "onboarding_workflow_id": "onboard-proc-10087-1781770204-1781776719",
       "first_seen": 1781770204.778228,
-      "last_seen": 1781776930.542235,
+      "last_seen": 1781777171.583552,
       "alive": true
     },
     {
@@ -96,7 +96,7 @@
       "onboarding_state": "done",
       "onboarding_workflow_id": "onboard-proc-11855-1781770389-1781776719",
       "first_seen": 1781770389.461657,
-      "last_seen": 1781776930.543316,
+      "last_seen": 1781777171.584247,
       "alive": true
     },
     {
@@ -138,7 +138,7 @@
       "onboarding_state": "done",
       "onboarding_workflow_id": "onboard-proc-70681-1781776716-1781776719",
       "first_seen": 1781776716.790016,
-      "last_seen": 1781776930.55163,
+      "last_seen": 1781777171.5921211,
       "alive": true
     },
     {
@@ -180,7 +180,7 @@
       "onboarding_state": "done",
       "onboarding_workflow_id": "onboard-proc-70698-1781776717-1781776719",
       "first_seen": 1781776717.936292,
-      "last_seen": 1781776930.551735,
+      "last_seen": 1781777171.592235,
       "alive": true
     }
   ]
