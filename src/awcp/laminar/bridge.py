@@ -201,18 +201,32 @@ def _emit_usage_span(agent_id: str, task_id: str, step: str, model: str,
             if getattr(ctx, "trace_id", 0):
                 rec["trace_id"] = format(ctx.trace_id, "032x")
                 rec["span_id"] = format(ctx.span_id, "016x")
+            cost = rec.get("cost", 0.0)
             for k, v in {
                 # lmnr.span.type = "LLM" tells Laminar's native dashboard to
                 # render this span in its LLM views (token counts, cost, model).
                 "lmnr.span.type": "LLM",
+                # ── Laminar's documented MINIMUM SET for a proper LLM span ──
+                # (lmnr/opentelemetry_lib/tracing/attributes.py:Attributes). The
+                # native UI only renders token usage when ALL of these are present
+                # — in particular llm.usage.total_tokens, without which the span
+                # shows as a bare trace with no token counts. gen_ai.response.model
+                # is required alongside gen_ai.request.model.
                 "gen_ai.system": _gen_ai_system(model),
+                "gen_ai.request.model": model,
+                "gen_ai.response.model": model,
+                "gen_ai.usage.input_tokens": tin,
+                "gen_ai.usage.output_tokens": tout,
+                "llm.usage.total_tokens": tin + tout,
+                # Cost under Laminar's own key (gen_ai.usage.cost). 0.0 is honest
+                # for local Ollama models (empty price table); the dollar figure
+                # appears when LMNR_PRICE_TABLE prices the model.
+                "gen_ai.usage.cost": cost,
+                # ── AWCP governance context (rendered as plain attributes) ──
                 "awcp.agent.id": agent_id,
                 "awcp.task.id": task_id,
                 "awcp.step": step,
-                "gen_ai.request.model": model,
-                "gen_ai.usage.input_tokens": tin,
-                "gen_ai.usage.output_tokens": tout,
-                "awcp.tokens.cost_usd": rec.get("cost", 0.0),
+                "awcp.tokens.cost_usd": cost,
                 "awcp.budget.window_used": window["total_tokens"],
                 "awcp.budget.limit": evaluation["budget_tokens"],
                 "awcp.budget.state": evaluation["state"],
