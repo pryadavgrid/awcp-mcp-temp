@@ -45,6 +45,25 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+
+# Load .env (if present) so secrets like LMNR_PROJECT_API_KEY are picked up
+# without exporting them by hand. Lines are KEY=VALUE; blank lines, comments and
+# an optional leading `export ` are tolerated, surrounding quotes stripped. A
+# value already in the environment wins, so `LMNR_PROJECT_API_KEY=… bash …`
+# still overrides the file.
+if [ -f "$ROOT/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#export }"
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$line" in *=*) ;; *) continue ;; esac     # skip lines without '='
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+    [ -z "${!key:-}" ] && export "$key=$val"
+  done < "$ROOT/.env"
+fi
+
 export PYTHONPATH="$ROOT/src"
 export OTEL_ENABLED="${OTEL_ENABLED:-true}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"

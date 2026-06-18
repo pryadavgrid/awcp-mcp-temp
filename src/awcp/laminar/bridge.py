@@ -178,6 +178,50 @@ def _extract_tokens(event: dict) -> tuple[int, int]:
     return max(tin, 0), max(tout, 0)        # -1 (absent) normalizes to 0
 
 
+def _emit_usage_span(agent_id: str, task_id: str, step: str, model: str,
+                     tin: int, tout: int, rec: dict, window: dict,
+                     evaluation: dict) -> None:
+    """Emit ONE 'laminar.token.usage' OTel span for a metered model call.
+
+    Created on the GLOBAL tracer so it fans out to Laminar (via exporter.py's
+    added processor) AND the local Collector/Tempo. Carries BOTH the gen_ai.*
+    convention (so Laminar/Grafana render tokens, cost and model natively) and
+    awcp.* governance context, and stamps the span's trace/span id back onto the
+    ledger record so the API + dashboard can deep-link each call to its trace.
+
+    Shared by BOTH metering paths — execution events (on_execution_event) and the
+    LLM-gateway proxy (record_usage) — so a token call appears identically in
+    Laminar no matter how it was measured. Best-effort: any failure is swallowed
+    so token accounting never breaks on a telemetry hiccup."""
+    if _tracer is None:
+        return
+    try:
+        with _tracer.start_as_current_span("laminar.token.usage") as span:
+            ctx = span.get_span_context()
+            if getattr(ctx, "trace_id", 0):
+                rec["trace_id"] = format(ctx.trace_id, "032x")
+                rec["span_id"] = format(ctx.span_id, "016x")
+            for k, v in {
+                # lmnr.span.type = "LLM" tells Laminar's native dashboard to
+                # render this span in its LLM views (token counts, cost, model).
+                "lmnr.span.type": "LLM",
+                "gen_ai.system": _gen_ai_system(model),
+                "awcp.agent.id": agent_id,
+                "awcp.task.id": task_id,
+                "awcp.step": step,
+                "gen_ai.request.model": model,
+                "gen_ai.usage.input_tokens": tin,
+                "gen_ai.usage.output_tokens": tout,
+                "awcp.tokens.cost_usd": rec.get("cost", 0.0),
+                "awcp.budget.window_used": window["total_tokens"],
+                "awcp.budget.limit": evaluation["budget_tokens"],
+                "awcp.budget.state": evaluation["state"],
+            }.items():
+                span.set_attribute(k, v)
+    except Exception:                       # noqa: BLE001
+        pass
+
+
 def on_execution_event(task_id: str, event: dict) -> dict | None:
     """Record token usage from one execution event; returns the budget
     evaluation when usage was recorded (the radar may surface it), else None."""
@@ -215,36 +259,7 @@ def on_execution_event(task_id: str, event: dict) -> dict | None:
 
     # one span per usage record, carrying BOTH the gen_ai.* convention (so
     # Laminar/Grafana render tokens natively) and awcp.* governance context.
-    try:
-        if _tracer is not None:
-            with _tracer.start_as_current_span("laminar.token.usage") as span:
-                # surface the OTel trace/span id on the (same) ledger record, so
-                # the API + dashboard can deep-link each LLM call to its Tempo
-                # trace. rec is the dict stored in the ledger, so this updates it.
-                ctx = span.get_span_context()
-                if getattr(ctx, "trace_id", 0):
-                    rec["trace_id"] = format(ctx.trace_id, "032x")
-                    rec["span_id"] = format(ctx.span_id, "016x")
-                for k, v in {
-                    # lmnr.span.type = "LLM" tells Laminar's native dashboard
-                    # to render this span in its LLM-specific views with token
-                    # counts, cost breakdown, and model attribution.
-                    "lmnr.span.type": "LLM",
-                    "gen_ai.system": _gen_ai_system(model),
-                    "awcp.agent.id": agent_id,
-                    "awcp.task.id": task_id,
-                    "awcp.step": step,
-                    "gen_ai.request.model": model,
-                    "gen_ai.usage.input_tokens": tin,
-                    "gen_ai.usage.output_tokens": tout,
-                    "awcp.tokens.cost_usd": rec["cost"],
-                    "awcp.budget.window_used": window["total_tokens"],
-                    "awcp.budget.limit": evaluation["budget_tokens"],
-                    "awcp.budget.state": evaluation["state"],
-                }.items():
-                    span.set_attribute(k, v)
-    except Exception:                   # noqa: BLE001
-        pass
+    _emit_usage_span(agent_id, task_id, step, model, tin, tout, rec, window, evaluation)
 
     _handle_transition(agent_id, evaluation)
     return evaluation
@@ -420,16 +435,17 @@ def record_usage(agent_id: str, model: str, input_tokens: int, output_tokens: in
     keyed on a specific agent or model name."""
     if not (config.ENABLED and _initialized and agent_id):
         return None
-    LEDGER.record(agent_id=agent_id, task_id=task_id, step=step,
-                  model=model or "unknown",
-                  input_tokens=max(0, int(input_tokens)),
-                  output_tokens=max(0, int(output_tokens)))
+    model = model or "unknown"
+    tin = max(0, int(input_tokens))
+    tout = max(0, int(output_tokens))
+    rec = LEDGER.record(agent_id=agent_id, task_id=task_id, step=step,
+                        model=model, input_tokens=tin, output_tokens=tout)
     try:
         if _m_tokens is not None:
-            _m_tokens.add(max(0, int(input_tokens)), {"agent": agent_id, "direction": "input"})
-            _m_tokens.add(max(0, int(output_tokens)), {"agent": agent_id, "direction": "output"})
+            _m_tokens.add(tin, {"agent": agent_id, "direction": "input"})
+            _m_tokens.add(tout, {"agent": agent_id, "direction": "output"})
         if _m_calls is not None:
-            _m_calls.add(1, {"agent": agent_id, "model": model or "unknown"})
+            _m_calls.add(1, {"agent": agent_id, "model": model})
     except Exception:                       # noqa: BLE001
         pass
     entry = _get_agent(agent_id)
@@ -437,6 +453,11 @@ def record_usage(agent_id: str, model: str, input_tokens: int, output_tokens: in
     evaluation = budget.evaluate(agent_id, window["total_tokens"],
                                  getattr(entry, "risk", None),
                                  getattr(entry, "token_budget", None))
+    # Emit the SAME 'laminar.token.usage' span the execution-event path does, so
+    # calls metered at the LLM gateway (the path autonomous agents take) also
+    # reach Laminar and deep-link to a trace — previously they only hit the
+    # local ledger/metrics, so Laminar showed no token calls for these agents.
+    _emit_usage_span(agent_id, task_id, step, model, tin, tout, rec, window, evaluation)
     _handle_transition(agent_id, evaluation)
     return evaluation
 
