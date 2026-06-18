@@ -1,0 +1,9 @@
+# Backup files
+*.bak
+
+# A2A registry runtime state
+A2A/registry_state.json
+
+# Python caches
+__pycache__/
+*.pyc
