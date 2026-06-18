@@ -91,6 +91,19 @@ _llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE, temperature=0)
 AGENT = create_react_agent(_llm, tools=TOOLS)
 
 
+def _usage_from_messages(msgs) -> dict:
+    """Sum LangChain usage_metadata across AI messages (best-effort, never raises)."""
+    tin = tout = 0
+    for m in msgs:
+        um = getattr(m, "usage_metadata", None) or {}
+        try:
+            tin += int(um.get("input_tokens", 0) or 0)
+            tout += int(um.get("output_tokens", 0) or 0)
+        except Exception:
+            pass
+    return {"input_tokens": tin, "output_tokens": tout}
+
+
 def run_goal(goal: str) -> dict:
     result = AGENT.invoke({"messages": [
         {"role": "system", "content": SYSTEM},
@@ -98,7 +111,8 @@ def run_goal(goal: str) -> dict:
     ]})
     msgs = result["messages"]
     tools_used = [tc["name"] for m in msgs for tc in (getattr(m, "tool_calls", None) or [])]
-    return {"result": msgs[-1].content, "tools_used": tools_used}
+    return {"result": msgs[-1].content, "tools_used": tools_used,
+            "usage": _usage_from_messages(msgs)}
 
 
 app = FastAPI(title="arXiv Research Worker Runtime")

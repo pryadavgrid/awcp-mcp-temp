@@ -101,7 +101,15 @@ def run_goal(goal: str) -> dict:
     out = getattr(res, "output", None)
     if out is None:
         out = getattr(res, "data", None)
-    return {"result": str(out), "tools_used": _tools_from_messages(res.all_messages())}
+    usage = {}
+    try:
+        u = res.usage()
+        usage = {"input_tokens": int(getattr(u, "request_tokens", 0) or getattr(u, "input_tokens", 0) or 0),
+                 "output_tokens": int(getattr(u, "response_tokens", 0) or getattr(u, "output_tokens", 0) or 0)}
+    except Exception:
+        usage = {}
+    return {"result": str(out), "tools_used": _tools_from_messages(res.all_messages()),
+            "usage": usage}
 
 
 app = FastAPI(title="PydanticAI Worker Runtime")

@@ -71,7 +71,16 @@ def run_goal(goal: str) -> dict:
                                 "headings, tight paragraphs, and a brief summary.",
                 agent=WORKER)
     crew = Crew(agents=[WORKER], tasks=[task], verbose=False)
-    return {"result": str(crew.kickoff()), "tools_used": TOOL_NAMES}
+    result = crew.kickoff()
+    usage = {}
+    try:
+        um = getattr(result, "token_usage", None) or getattr(crew, "usage_metrics", None)
+        if um is not None:
+            usage = {"input_tokens": int(getattr(um, "prompt_tokens", 0) or 0),
+                     "output_tokens": int(getattr(um, "completion_tokens", 0) or 0)}
+    except Exception:
+        usage = {}
+    return {"result": str(result), "tools_used": TOOL_NAMES, "usage": usage}
 
 
 app = FastAPI(title="CrewAI Worker Runtime")

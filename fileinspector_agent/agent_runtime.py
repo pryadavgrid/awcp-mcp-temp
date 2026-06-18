@@ -326,11 +326,15 @@ def run_goal(goal: str) -> dict:
     instruction = request or "Give a brief summary of what this file contains."
     prompt = f"EXTRACTED CONTENT:\n{content[:MODEL_CONTEXT_CHARS]}\n\nTASK: {instruction}"
     try:
-        answer = _llm.invoke([SystemMessage(content=SYSTEM),
-                              HumanMessage(content=prompt)]).content
+        _resp = _llm.invoke([SystemMessage(content=SYSTEM),
+                             HumanMessage(content=prompt)])
+        answer = _resp.content
         if _looks_like_junk(answer):
             answer = _brief_fallback(content)
-        return {"result": answer, "tools_used": tools}
+        _um = getattr(_resp, "usage_metadata", None) or {}
+        _usage = {"input_tokens": int(_um.get("input_tokens", 0) or 0),
+                  "output_tokens": int(_um.get("output_tokens", 0) or 0)}
+        return {"result": answer, "tools_used": tools, "usage": _usage}
     except Exception as e:  # noqa: BLE001  (e.g. Ollama not running) -> still answer
         return {"result": _brief_fallback(content), "tools_used": tools, "error": str(e)}
 
