@@ -23,11 +23,16 @@ import threading
 import time
 import urllib.request
 
-# The agent sends NOTHING to AWCP. It runs standalone; the radar detects it by
-# scanning the process. AGENT_NAME is set by mount() and only labels external
-# writes (so a receiver can tell which agent posted) — it is not sent to AWCP.
+# AGENT_NAME labels external writes. When AGENT_RADAR_URL is set (the gateway
+# injects it) the agent ALSO self-registers and streams its task execution to the
+# radar (see the radar helpers below); otherwise it runs fully standalone.
 AGENT_NAME = "agent"
 AGENT_FRAMEWORK = ""
+AGENT_MODEL = ""
+
+# AWCP radar wiring (optional). Filled in by _radar_register() during mount().
+AGENT_RADAR_URL = os.getenv("AGENT_RADAR_URL", "").rstrip("/")
+AGENT_ID = ""          # "" => not registered (standalone)
 
 # ==========================================================================
 # Embedded OpenTelemetry (traces + metrics + logs) — OPTIONAL & SELF-CONTAINED
@@ -527,11 +532,13 @@ def _worker_loop(run_goal) -> None:
         _task_sp = _span_start("agent.task", task_id=tid, framework=AGENT_FRAMEWORK, goal=task["goal"])
         _task_tok = _span_activate(_task_sp)
         _log("task.start id=%s goal=%s", tid, str(task["goal"])[:200])
+        _exec_on = _radar_exec_start(tid, task["goal"])
         try:
             out = run_goal(task["goal"]) or {}
             result = str(out.get("result", ""))
             task["result"] = result
             task["tools_used"] = out.get("tools_used", [])
+            _radar_exec_steps(tid, out)
             # deterministic finalize — route the runtime's output through the gate
             # even if the model didn't call the write tools on its own.
             if FINALIZE_ARTIFACT and not any(s["action"] == "save_artifact" for s in task["steps"]):
@@ -557,6 +564,8 @@ def _worker_loop(run_goal) -> None:
                  ",".join(task.get("tools_used") or []) or "-", _dur)
             _span_detach(_task_tok)
             _span_end(_task_sp, status=_st, tools=",".join(task.get("tools_used") or []))
+            if _exec_on:
+                _radar_exec_complete(tid, task)
             _CURRENT["task"] = None
 
 
@@ -575,20 +584,109 @@ class ApproveReq(_BaseModel):
     decision: str = "approve"          # approve | deny
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# AWCP radar streaming (optional, best-effort, stdlib-only).
+# When AGENT_RADAR_URL is set (the gateway injects it), the agent self-registers
+# and turns each task into a live radar/Temporal execution workflow:
+#   start  ->  one event per step (each becomes a Temporal activity + token
+#   accounting in laminar)  ->  complete.
+# Every call no-ops if AGENT_RADAR_URL is unset or the radar is unreachable, so
+# the agent still runs fully standalone.
+# ──────────────────────────────────────────────────────────────────────────
+def _radar_post(path: str, body: dict, timeout: float = 5.0) -> dict:
+    if not AGENT_RADAR_URL:
+        return {}
+    try:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            AGENT_RADAR_URL + path, data=data,
+            headers={"content-type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310
+            return json.loads(r.read().decode() or "{}")
+    except Exception:
+        return {}
+
+
+def _radar_register(meta: dict) -> None:
+    """Self-register to obtain the agent_id used to build the Temporal execution
+    workflow id (task-<agent_id>-<task_id>). No-op when AGENT_RADAR_URL is unset."""
+    global AGENT_ID
+    if not AGENT_RADAR_URL:
+        return
+    resp = _radar_post("/agents/register", {
+        "name": meta.get("agent", "agent"),
+        "framework": meta.get("framework", ""),
+        "runtime": "agent_runtime.py",
+        "telemetry_enabled": True,
+        "risk": os.getenv("AGENT_RISK", "medium"),
+    })
+    AGENT_ID = resp.get("id") or ""
+
+
+def _radar_event(task_id: str, type_: str, **fields) -> None:
+    if not (AGENT_RADAR_URL and AGENT_ID):
+        return
+    body = {"type": type_}
+    body.update({k: v for k, v in fields.items() if v is not None})
+    _radar_post(f"/tasks/execution/{task_id}/event", body)
+
+
+def _radar_exec_start(task_id: str, goal: str) -> bool:
+    """Open the radar/Temporal execution workflow for this task."""
+    if not (AGENT_RADAR_URL and AGENT_ID):
+        return False
+    resp = _radar_post("/tasks/execution/start", {
+        "agent_id": AGENT_ID, "task_id": task_id,
+        "goal": str(goal)[:2000], "framework": AGENT_FRAMEWORK})
+    if not resp.get("ok"):
+        return False
+    _radar_event(task_id, "setup", query=str(goal)[:200])
+    return True
+
+
+def _radar_exec_steps(task_id: str, out: dict) -> None:
+    """Emit one timeline step per tool the runtime used, plus a single LLM step
+    carrying the task's token usage (what fills the token bar). `out` is run_goal's
+    return; out["usage"] = {input_tokens, output_tokens} when the runtime supplies it."""
+    if not (AGENT_RADAR_URL and AGENT_ID):
+        return
+    for i, tn in enumerate(out.get("tools_used") or []):
+        kind = "web_search" if "search" in str(tn).lower() else "tool_called"
+        _radar_event(task_id, kind, tool_name=str(tn), call_n=i + 1)
+    usage = out.get("usage") or {}
+    _radar_event(task_id, "llm_called", model=AGENT_MODEL, extra={
+        "input_tokens": int(usage.get("input_tokens", 0) or 0),
+        "output_tokens": int(usage.get("output_tokens", 0) or 0)})
+
+
+def _radar_exec_complete(task_id: str, task: dict) -> None:
+    if not (AGENT_RADAR_URL and AGENT_ID):
+        return
+    _radar_event(task_id, "synthesize")
+    _radar_post(f"/tasks/execution/{task_id}/complete", {
+        "status": task.get("status", "done"),
+        "result": str(task.get("result", ""))[:4000],
+        "tools_used": task.get("tools_used", []),
+        "error": str(task.get("error", "")),
+    })
+
+
 def mount(app, *, meta: dict, run_goal) -> None:
     """Turn a FastAPI app into a self-contained task-worker runtime: wire the
     routes, serve the task console, and start the background worker. Sends NOTHING
     to AWCP. `run_goal(goal) -> {"result", "tools_used"}` is the framework hook."""
-    global ARTIFACT_DIR, AGENT_NAME, AGENT_FRAMEWORK
+    global ARTIFACT_DIR, AGENT_NAME, AGENT_FRAMEWORK, AGENT_MODEL
     from fastapi import HTTPException
     from fastapi.responses import HTMLResponse
 
     ARTIFACT_DIR = os.path.join(meta.get("dir", os.getcwd()), "artifacts")
     AGENT_NAME = meta.get("agent", "agent")
     AGENT_FRAMEWORK = meta.get("framework", "")
-    _init_telemetry(AGENT_NAME, AGENT_FRAMEWORK, meta.get("model", ""))
-    _log("agent.mounted name=%s framework=%s model=%s",
-         AGENT_NAME, AGENT_FRAMEWORK, meta.get("model", ""))
+    AGENT_MODEL = meta.get("model", "")
+    _init_telemetry(AGENT_NAME, AGENT_FRAMEWORK, AGENT_MODEL)
+    _radar_register(meta)
+    _log("agent.mounted name=%s framework=%s model=%s registered=%s",
+         AGENT_NAME, AGENT_FRAMEWORK, AGENT_MODEL, bool(AGENT_ID))
 
     @app.get("/", response_class=HTMLResponse)
     def _home():
@@ -598,7 +696,9 @@ def mount(app, *, meta: dict, run_goal) -> None:
     def _info():
         return {**{k: meta[k] for k in meta if k != "dir"},
                 "external_url": EXTERNAL_WRITE_URL,
-                "approval_required": APPROVAL_REQUIRED}
+                "approval_required": APPROVAL_REQUIRED,
+                "agent_id": AGENT_ID,
+                "registered": bool(AGENT_ID)}
 
     @app.get("/health")
     def _health():
@@ -623,7 +723,8 @@ def mount(app, *, meta: dict, run_goal) -> None:
     def _approve(tid: str, req: ApproveReq):
         return {"ok": approve_task(tid, req.decision), "decision": req.decision}
 
-    # No AWCP registration — the radar detects this process autonomously.
+    # Registered with the radar above (best-effort); the worker streams each
+    # task's execution to the radar so the control-plane UI shows it live.
     threading.Thread(target=_worker_loop, args=(run_goal,),
                      name="awcp-worker", daemon=True).start()
 
