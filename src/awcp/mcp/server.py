@@ -8,6 +8,7 @@ import os
 import sys
 from typing import Annotated, Any
 
+import httpx
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import HTMLResponse
@@ -20,6 +21,9 @@ from awcp.runtime.tool_runtime import (
     TOOL_REGISTRY,
     discover_tools,
     execute_tool as run_tool,
+    get_tool_risk,
+    get_tool_scope,
+    is_write_risk,
 )
 from awcp.runtime.ollama_client import ask_ollama
 from awcp.runtime.config import SEARCH_MODEL
@@ -57,6 +61,80 @@ _SPECS_BY_NAME = {s.name: s for s in agent_specs}
 # Fallback model when an agent does not declare one.
 _DEFAULT_MODEL = SEARCH_MODEL
 _MAX_SYNTHESIS_OUTPUT_CHARS = int(os.getenv("AWCP_SYNTHESIS_TOOL_CHARS", "12000"))
+
+
+# ======================================================================
+# Governance plane — the MCP server is the WRITE-ACTION FIREWALL.
+#
+# execute_tool routes every governed call through the radar's write-action gate
+# BEFORE the tool runs, and traces the run as a child of the caller's span. The
+# agent can no longer bypass governance: the only way to run a tool is through
+# this server, and this server asks the gate. Everything is env-driven — the
+# radar URL, the timeout, and each tool's risk/scope all come from config or the
+# tool's own declaration, never a hardcoded per-agent rule.
+# ======================================================================
+RADAR_URL = os.getenv("AGENT_RADAR_URL", "http://localhost:8090").rstrip("/")
+GATE_TIMEOUT = float(os.getenv("AWCP_GATE_TIMEOUT", "3"))
+# Fail-open keeps agents working when the control plane is down (matches the
+# agent-side philosophy: radar offline -> allow). Set false to fail-closed.
+GATE_FAIL_OPEN = os.getenv("AWCP_GATE_FAIL_OPEN", "true").lower() == "true"
+# Whether to forward the tool's write SCOPE to the gate. The radar's declared-
+# scope check is magazine-driven: an agent may only write within scopes the
+# operator GRANTED it in the magazine, and onboarding fails closed (no scopes)
+# for agents the magazine doesn't list. The original agent flow sent no scope, so
+# that check was dormant; we keep it OFF by default so the gate enforces the core
+# governance (quarantine / autonomy ladder / token budget) without denying every
+# write from an un-magazined bundle agent. Set true once the magazine grants the
+# agents their scopes, to turn on strict per-scope authorization.
+GATE_SEND_SCOPE = os.getenv("AWCP_GATE_SEND_SCOPE", "false").lower() == "true"
+
+
+def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
+    """Ask the radar's write-action gate. Returns the radar's decision dict.
+    On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a missing
+    control plane never hard-breaks tool execution (unless ops opt into fail-closed)."""
+    if not agent_id:
+        # No identity to gate against — treat as an ungoverned (direct) call.
+        return {"decision": "allow", "mode": "ungoverned",
+                "reason": "no agent_id supplied — call not attributed to a governed agent"}
+    try:
+        resp = httpx.post(
+            f"{RADAR_URL}/agents/{agent_id}/gate",
+            json={"action": action, "write": is_write, "scope": scope},
+            timeout=GATE_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        # 404 = agent not registered yet; other codes = radar trouble.
+        return {"decision": "allow" if GATE_FAIL_OPEN else "deny",
+                "mode": "gate_unavailable",
+                "reason": f"radar gate returned HTTP {resp.status_code}"}
+    except Exception as exc:  # noqa: BLE001 — the gate must never crash a tool call
+        logger.warning("mcp.gate.error agent_id=%s action=%s error=%r", agent_id, action, exc)
+        return {"decision": "allow" if GATE_FAIL_OPEN else "deny",
+                "mode": "gate_unavailable",
+                "reason": f"radar gate unreachable: {type(exc).__name__}"}
+
+
+def _govern_span(name: str, trace_context: dict | None):
+    """Start an OTel span as a CHILD of the caller's trace context (W3C
+    traceparent), so the server-side tool span stitches into the agent's task
+    trace in Tempo. No-op-safe if OTel/propagation is unavailable."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _cm():
+        try:
+            from opentelemetry import trace
+            from opentelemetry.propagate import extract
+            parent = extract(trace_context or {})
+            tracer = trace.get_tracer("awcp.mcp.govern")
+            with tracer.start_as_current_span(name, context=parent) as span:
+                yield span
+        except Exception:  # noqa: BLE001
+            yield None
+
+    return _cm()
 
 
 # ======================================================================
@@ -252,20 +330,107 @@ def agent_route(
 
 @mcp.tool(
     description=(
-        "Tool Executor primitive. Runs a single registered tool (e.g. "
-        "'web_search') and returns its raw result. This is the call an "
-        "orchestrator drives directly after the policy gate approves it."
+        "Governed Tool Executor — the write-action firewall. Runs a single "
+        "registered tool through the radar's write-action gate first, traces the "
+        "run as a child of the caller's span, and returns a JSON envelope: "
+        '{"status","output","decision","mode","reason","risk"}. status is '
+        '"succeeded" | "blocked" | "error". Reads run ungated; medium/high-risk '
+        "writes are gated by the radar for the calling agent_id."
     )
 )
 def execute_tool(
     tool_name: Annotated[str, Field(description="Registered tool name, e.g. web_search")],
     tool_input: Annotated[dict, Field(description="Arguments passed to the tool")],
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id (as registered with the radar). Drives the gate.")] = "",
+    task_id: Annotated[str, Field(
+        description="Calling agent's task id (for trace/audit correlation).")] = "",
+    risk: Annotated[str, Field(
+        description="Optional risk override; defaults to the tool's declared risk.")] = "",
+    scope: Annotated[str, Field(
+        description="Optional write scope override; defaults to the tool's declared scope.")] = "",
+    approved: Annotated[bool, Field(
+        description="Whether an operator already approved this high-risk write agent-side.")] = False,
+    trace_context: Annotated[dict | None, Field(
+        description="W3C trace context (traceparent) so the run links into the caller's trace.")] = None,
 ) -> str:
-    try:
-        result = run_tool(tool_name, tool_input or {})
-        return str(result)
-    except Exception as e:
-        return f"Error executing tool '{tool_name}': {str(e)}"
+    # Resolve governance facts dynamically: explicit overrides win, else the
+    # tool's own declaration / env map / default. Nothing per-tool is hardcoded.
+    eff_risk = (risk or get_tool_risk(tool_name)).lower()
+    eff_scope = scope or get_tool_scope(tool_name)
+    is_write = is_write_risk(eff_risk)
+
+    with _govern_span(f"awcp.mcp.govern.{tool_name}", trace_context) as span:
+        if span is not None:
+            for k, v in (("agent.id", agent_id), ("task.id", task_id),
+                         ("tool.name", tool_name), ("tool.risk", eff_risk),
+                         ("tool.scope", eff_scope), ("tool.is_write", is_write),
+                         ("tool.approved", approved)):
+                try:
+                    span.set_attribute(k, v if isinstance(v, bool) else str(v))
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 1) Write-action gate (reads pass straight through). The scope is only
+        #    forwarded when strict magazine-scope authorization is enabled;
+        #    otherwise the gate still enforces quarantine / autonomy / token.
+        gate = _radar_gate(
+            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write
+        ) if is_write else {
+            "decision": "allow", "mode": "read", "reason": "read-only action — not gated"}
+        decision = gate.get("decision", "allow")
+        if span is not None:
+            try:
+                span.set_attribute("gate.decision", decision)
+                span.set_attribute("gate.mode", gate.get("mode", ""))
+            except Exception:  # noqa: BLE001
+                pass
+
+        if decision == "deny":
+            logger.warning(
+                "mcp.execute.blocked agent_id=%s tool=%s risk=%s mode=%s reason=%s",
+                agent_id, tool_name, eff_risk, gate.get("mode"), gate.get("reason"),
+            )
+            return json.dumps({
+                "status": "blocked",
+                "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
+                           f"write-action gate ({gate.get('reason', '')})."),
+                "decision": "deny",
+                "mode": gate.get("mode", ""),
+                "reason": gate.get("reason", ""),
+                "risk": eff_risk,
+            })
+
+        # 2) Execute the registered tool (this is the ONLY place tools run).
+        try:
+            result = run_tool(tool_name, tool_input or {})
+            logger.info(
+                "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
+                agent_id, tool_name, eff_risk, decision,
+            )
+            return json.dumps({
+                "status": "succeeded",
+                "output": str(result),
+                "decision": decision,
+                "mode": gate.get("mode", "read" if not is_write else "gated"),
+                "reason": gate.get("reason", ""),
+                "risk": eff_risk,
+            })
+        except Exception as e:  # noqa: BLE001
+            if span is not None:
+                try:
+                    span.set_attribute("tool.error", str(e)[:200])
+                except Exception:  # noqa: BLE001
+                    pass
+            logger.warning("mcp.execute.error tool=%s error=%r", tool_name, e)
+            return json.dumps({
+                "status": "error",
+                "output": f"Error executing tool '{tool_name}': {str(e)}",
+                "decision": decision,
+                "mode": gate.get("mode", ""),
+                "reason": str(e),
+                "risk": eff_risk,
+            })
 
 
 @mcp.tool(

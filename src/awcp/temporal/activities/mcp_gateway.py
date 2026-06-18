@@ -136,6 +136,20 @@ async def _call_mcp(tool_name: str, arguments: dict) -> str:
             raise
 
 
+def _unwrap_execute_tool(raw: str) -> str:
+    """execute_tool now returns a JSON governance envelope
+    {status, output, decision, ...} (the MCP server is the write-action firewall).
+    Callers here expect the raw tool-output string, so unwrap to `output` when the
+    envelope is present; fall back to the raw text for any non-envelope response."""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    if isinstance(data, dict) and "output" in data and "status" in data:
+        return str(data["output"])
+    return raw
+
+
 # ── Activities ───────────────────────────────────────────────────────────────
 
 @activity.defn
@@ -193,10 +207,10 @@ async def mcp_execute_tool(payload: dict) -> str:
 
     with _act_span("mcp_execute_tool", ctx, tool_name=payload.get("tool_name")):
         try:
-            result = await _call_mcp(
+            result = _unwrap_execute_tool(await _call_mcp(
                 "execute_tool",
                 {"tool_name": payload["tool_name"], "tool_input": payload["tool_input"]},
-            )
+            ))
             _get_metrics().record_activity("mcp_execute_tool", time.time() - start, "success")
             return result
         except Exception:
@@ -319,10 +333,10 @@ async def mcp_run_tool(payload: dict) -> dict:
 
     with _act_span("run_tool", ctx, tool_name=tool_name):
         try:
-            output = await _call_mcp(
+            output = _unwrap_execute_tool(await _call_mcp(
                 "execute_tool",
                 {"tool_name": tool_name, "tool_input": payload.get("tool_input") or {}},
-            )
+            ))
             if output.startswith(f"Error executing tool '{tool_name}'"):
                 raise RuntimeError(output)
             logger.info("Completed run_tool activity tool_name=%s output_chars=%s", tool_name, len(output))

@@ -57,6 +57,13 @@ TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
 export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
+# The MCP control server (started in step 5) is the write-action firewall: it
+# calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
+# radar now lives in THIS gateway, so point it at the gateway port — otherwise
+# the MCP server would gate against the old standalone :8090 (nothing there) and
+# fail open. Same value as AWCP_AGENT_RADAR_URL; exported under the name the
+# server + agent kits actually read. Overridable from the environment.
+export AGENT_RADAR_URL="${AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 
 # Temporal task queues the gateway's in-process workers listen on. Kept distinct
 # from run_all.sh's temp2-* queues so the gateway and a standalone radar can share

@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 import httpx
 import psutil
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -48,8 +48,10 @@ from awcp.radar.temporal.activities.execution import (
 )
 
 # --- Telemetry: link the registry into the shared awcp.observability stack ---
+# (HTTP-route tracing is applied by the gateway via instrument_fastapi(app); this
+# module only exposes an APIRouter, so it does no FastAPI instrumentation itself.
+# A standalone `app` is still built at the bottom for radar-only deployments.)
 from awcp.observability.setup import setup_otel
-from awcp.observability.middleware import instrument_fastapi
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
 setup_otel("awcp-radar")
@@ -523,7 +525,13 @@ def _observe_telemetry(agent_id: str, detail: str = "telemetry observed in execu
             and now - e.last_telemetry_ts < _TELEMETRY_REFRESH_MIN):
         return
 
-    fields: dict = {"telemetry_enabled": True, "last_telemetry_ts": now}
+    # An observed telemetry event PROVES the agent is alive right now, so refresh
+    # its liveness too — otherwise a self-registered agent (whose process the
+    # scanner only sees under a different proc-<pid> id, and which doesn't appear
+    # in seen_ids) is pruned by store.reconcile_scan after SELF_PRUNE_AFTER_SEC
+    # even while it is actively working, which would 404 its write-action gate.
+    fields: dict = {"telemetry_enabled": True, "last_telemetry_ts": now,
+                    "last_seen": now, "alive": True}
     if e.status == "quarantined":
         # Re-evaluate admission with the telemetry hook now proven present.
         probe = e.model_copy(update={"telemetry_enabled": True, "last_telemetry_ts": now})
@@ -554,7 +562,8 @@ def _observe_policy(agent_id: str, detail: str = "policy hook exercised in execu
             and e.last_policy_ts is not None
             and now - e.last_policy_ts < _TELEMETRY_REFRESH_MIN):
         return
-    fields: dict = {"policy_observed": True, "last_policy_ts": now}
+    fields: dict = {"policy_observed": True, "last_policy_ts": now,
+                    "last_seen": now, "alive": True}
     if e.status == "quarantined":
         probe = e.model_copy(update={"policy_observed": True, "last_policy_ts": now})
         status, reason = onboarding.decide_status(probe)
@@ -904,14 +913,18 @@ async def lifespan(app: FastAPI):
         log.info("radar.shutdown complete")
 
 
-app = FastAPI(title="Agent Radar", lifespan=lifespan)
-instrument_fastapi(app)   # auto-trace every radar HTTP route
+# The radar is no longer just a standalone FastAPI app — it is an APIRouter that
+# the gateway app (awcp.gateway.app) includes. HTTP routes are auto-traced by the
+# gateway's instrument_fastapi(app); an APIRouter has no middleware stack of its
+# own and cannot be instrumented directly. A standalone `app` is still built at
+# the bottom of this file for radar-only deployments (uvicorn awcp.radar.api:app).
+router = APIRouter()
 
 # Token-aware LLM gateway (enforcement way #5): a model-call proxy under /llm
 # that refuses an over-budget agent's calls at the source. Additive — mounting it
 # changes no existing route; agents opt in by pointing their model base URL at it.
 from awcp.radar.llm_gateway import gateway_router  # noqa: E402
-app.include_router(gateway_router)
+router.include_router(gateway_router)
 
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
@@ -957,7 +970,7 @@ try:
     _laminar.init_laminar(get_agent=REGISTRY.get,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
-    app.include_router(_laminar.router)
+    router.include_router(_laminar.router)
     _LAMINAR = True
     log.info("radar.laminar.mounted ui=/laminar/ui")
 except Exception as _exc:                       # radar runs fine without the package
@@ -984,12 +997,12 @@ def _to_dict(e: AgentEntry) -> dict:
     return d
 
 
-@app.get("/agents")
+@router.get("/agents")
 def list_agents() -> list[dict]:
     return [_to_dict(e) for e in REGISTRY.all()]
 
 
-@app.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}")
 def get_agent(agent_id: str) -> dict:
     e = REGISTRY.get(agent_id)
     if not e:
@@ -997,7 +1010,7 @@ def get_agent(agent_id: str) -> dict:
     return _to_dict(e)
 
 
-@app.post("/agents/register")
+@router.post("/agents/register")
 def register(req: RegisterRequest) -> dict:
     entry = AgentEntry(
         id=req.id or f"reg-{_slug(req.name)}",
@@ -1159,7 +1172,7 @@ def _require(agent_id: str) -> AgentEntry:
     return e
 
 
-@app.post("/agents/{agent_id}/gate")
+@router.post("/agents/{agent_id}/gate")
 def gate(agent_id: str, req: GateRequest) -> dict:
     """Evaluate whether an agent may perform an action (the write-action gate).
     An external agent/interceptor calls this before a state-changing action."""
@@ -1202,7 +1215,7 @@ def gate(agent_id: str, req: GateRequest) -> dict:
             "status": e.status, "autonomy_profile": e.autonomy_profile}
 
 
-@app.post("/agents/{agent_id}/signal")
+@router.post("/agents/{agent_id}/signal")
 def signal(agent_id: str, req: SignalRequest) -> dict:
     """Report an execution outcome. Failures step autonomy down the ladder once
     the failure budget is exhausted (graceful degradation)."""
@@ -1248,7 +1261,7 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
     }
 
 
-@app.post("/agents/{agent_id}/autonomy")
+@router.post("/agents/{agent_id}/autonomy")
 def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     """Operator override — set the autonomy profile directly (e.g. restore to active)."""
     e = _require(agent_id)
@@ -1269,7 +1282,7 @@ class RiskRequest(BaseModel):
     token_budget: int | None = None   # explicit per-agent budget; 0 clears it (→ use tier)
 
 
-@app.post("/agents/{agent_id}/risk")
+@router.post("/agents/{agent_id}/risk")
 def set_risk(agent_id: str, req: RiskRequest) -> dict:
     """Operator override — set an agent's RISK tier and/or its explicit per-agent
     token budget (the magazine's declared budget). Risk drives the budget tier;
@@ -1290,46 +1303,20 @@ def set_risk(agent_id: str, req: RiskRequest) -> dict:
             "token_budget": getattr(updated, "token_budget", None)}
 
 
-@app.delete("/agents/{agent_id}")
+@router.delete("/agents/{agent_id}")
 def deregister(agent_id: str) -> dict:
-    """Operator action — remove an entry from the inventory and stop the process.
-    Tries SIGTERM on the local process first; falls back to the agent's
-    control_endpoint if no local pid is reachable.  Either way the registry entry
-    is removed so the scanner does not immediately re-add the agent."""
-    e = REGISTRY.get(agent_id)
-    if not e:
-        raise HTTPException(status_code=404, detail="agent not found")
-    # Release any control-plane freeze BEFORE signalling the process — a
-    # SIGSTOP'd process ignores SIGTERM until it is continued.
+    """Operator action — remove an entry from the inventory (registry hygiene).
+    A still-running scanned process will be re-detected on the next scan."""
+    # Release ANY hard stop the control plane applied BEFORE removing the entry,
+    # so the operator regains full control of the process. A SIGSTOP'd process
+    # ignores SIGTERM until it is continued, so without this SIGCONT the operator
+    # cannot turn the agent off; once resumed (and untracked) the radar will not
+    # touch it again.
     _token_enforce_resume(agent_id)
-    terminated = False
-    # ── local process (pid known or recoverable from the proc-<pid>-<ts> id) ──
-    p = _proc_for_entry(e)
-    if p is not None:
-        try:
-            p.terminate()           # SIGTERM — lets the process clean up
-            terminated = True
-            log.info("radar.deregister.terminated agent_id=%s pid=%s", agent_id, p.pid)
-        except Exception as exc:    # noqa: BLE001
-            log.warning("radar.deregister.terminate_failed agent_id=%s pid=%s error=%r",
-                        agent_id, p.pid, exc)
-    # ── remote / cooperative agent with no local pid ──────────────────────────
-    if not terminated:
-        url = getattr(e, "control_endpoint", None)
-        if url:
-            try:
-                httpx.post(url, json={"action": "stop", "reason": "operator_removed"},
-                           timeout=TOKEN_CONTROL_TIMEOUT)
-                terminated = True
-                log.info("radar.deregister.remote_stop agent_id=%s url=%s", agent_id, url)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("radar.deregister.remote_stop_failed agent_id=%s url=%s error=%r",
-                            agent_id, url, exc)
-    REGISTRY.remove(agent_id)
-    detail = ("operator removed — process terminated" if terminated
-              else "operator removed — no reachable process (self-registered without pid/endpoint)")
-    _record_event("removed", agent_id, detail)
-    return {"ok": True, "removed": agent_id, "process_terminated": terminated}
+    if not REGISTRY.remove(agent_id):
+        raise HTTPException(status_code=404, detail="agent not found")
+    _record_event("removed", agent_id, "operator removed entry (hard stop released)")
+    return {"ok": True, "removed": agent_id}
 
 
 # ----------------------------------------------------------------------
@@ -1363,7 +1350,7 @@ class TaskExecCompleteRequest(BaseModel):
     error: str = ""
 
 
-@app.post("/tasks/execution/start")
+@router.post("/tasks/execution/start")
 async def execution_start(req: TaskExecStartRequest) -> dict:
     """Start an AgentExecutionWorkflow for a task prompt."""
     # token monitor learns task->agent BEFORE any Temporal gating, so token
@@ -1410,7 +1397,7 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@app.post("/tasks/execution/{task_id}/event")
+@router.post("/tasks/execution/{task_id}/event")
 async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     """Forward a real-time execution event to the running AgentExecutionWorkflow."""
     event = req.model_dump()
@@ -1491,7 +1478,7 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         return {"ok": False, "reason": str(exc)[:200], "token_budget": token_budget}
 
 
-@app.post("/tasks/execution/{task_id}/complete")
+@router.post("/tasks/execution/{task_id}/complete")
 async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> dict:
     """Signal the AgentExecutionWorkflow that the task is done."""
     if _LAMINAR:
@@ -1515,14 +1502,14 @@ async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> d
         return {"ok": False, "reason": str(exc)[:200]}
 
 
-@app.get("/events")
+@router.get("/events")
 def events(limit: int = 50) -> list[dict]:
     """The recent-decisions log (newest first). A live registry audit view — not
     the durable Evidence Ledger."""
     return list(_EVENTS)[: max(1, min(limit, _EVENTS.maxlen or 200))]
 
 
-@app.get("/healthz")
+@router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
     by_kind: dict[str, int] = {}
@@ -1543,6 +1530,27 @@ def healthz() -> dict:
     }
 
 
-@app.get("/")
+@router.get("/")
 def index() -> FileResponse:
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+
+
+# ----------------------------------------------------------------------
+# Standalone ASGI app — radar-only deployments.
+#
+# The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it, so it
+# does NOT use this object. But the radar-centric runners (scripts/run_all.sh,
+# run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app` directly on :8090, with
+# every route — including /llm/*, /laminar/* and the web UI — living at the ROOT,
+# which is what the bundled UI's absolute links expect.
+#
+# Defining `app` at import time is required so `uvicorn awcp.radar.api:app` can
+# find it. When the gateway imports this module the object is simply created and
+# left unused (its lifespan only runs if uvicorn actually serves it).
+# ----------------------------------------------------------------------
+from awcp.observability.middleware import instrument_fastapi, instrument_requests  # noqa: E402
+
+app = FastAPI(title="Agent Radar", lifespan=lifespan)
+instrument_fastapi(app)        # every radar HTTP route is auto-traced
+instrument_requests()          # outbound HTTP calls (link_mcp, etc.) are traced
+app.include_router(router)     # radar routes + the mounted /laminar/* + /llm/* routes
