@@ -1,0 +1,31 @@
+{
+  "card": {
+    "protocolVersion": "0.3.0",
+    "name": "CrewAI Writer",
+    "description": "Researches a topic, then drafts a structured write-up.",
+    "url": "http://localhost:8101",
+    "version": "1.0.0",
+    "provider": { "organization": "AWCP", "url": "" },
+    "capabilities": { "streaming": false, "pushNotifications": false },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/markdown"],
+    "skills": [
+      {
+        "id": "crewai-writer",
+        "name": "CrewAI Writer",
+        "description": "Researches a topic, then drafts a structured write-up.",
+        "tags": ["web_search", "save_artifact", "external_post"],
+        "examples": ["Write a short brief on the benefits of solar energy."]
+      }
+    ]
+  },
+  "awcp": {
+    "owner": "prateek",
+    "requested_write_scopes": ["save_artifact", "external_post"],
+    "risk": "high",
+    "intake": "self-register",
+    "framework": "crewai",
+    "model": "ollama/llama3.1:8b",
+    "token": ""
+  }
+}
