@@ -15,6 +15,6 @@ fi
 LOG="${TMPDIR:-/tmp}/pydanticai-agent.log"
 echo "🔷 Starting PydanticAI runtime agent (background) on http://localhost:${PAI_PORT:-8102}"
 echo "   (free / local Ollama model: ${PAI_MODEL:-llama3.1:8b})"
-nohup ./.venv/bin/python "$PWD/agent_runtime.py" > "$LOG" 2>&1 &
+nohup ./.venv/bin/python "$PWD/pydanticai_agent.py" > "$LOG" 2>&1 &
 echo "✅ running — PID $!   logs: $LOG"
-echo "   stop: pkill -f '$PWD/agent_runtime.py'"
+echo "   stop: pkill -f '$PWD/pydanticai_agent.py'"

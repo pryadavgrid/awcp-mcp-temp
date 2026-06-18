@@ -16,6 +16,7 @@ All endpoints, topics, and timeouts are env-driven — nothing is hardcoded.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -33,6 +34,20 @@ APPROVAL_REQUIRED    = os.getenv("AGENT_APPROVAL_REQUIRED",       "true").lower(
 APPROVAL_TIMEOUT     = float(os.getenv("AGENT_APPROVAL_TIMEOUT",  "180"))
 FINALIZE_ARTIFACT    = os.getenv("AGENT_FINALIZE_ARTIFACT",       "true").lower() == "true"
 FINALIZE_EXTERNAL    = os.getenv("AGENT_FINALIZE_EXTERNAL",       "false").lower() == "true"
+# ── MCP governance plane (the write-action firewall) ──────────────────────────
+# When enabled, governed tool calls are executed by the AWCP MCP server, which
+# runs the radar write-action gate BEFORE the tool and traces the run as a child
+# of this agent's span. If the server is unreachable the kit falls back to
+# executing locally (matching the radar-offline -> allow philosophy), so an agent
+# is never hard-broken by a missing control plane. All endpoints are env-driven.
+MCP_ENABLED          = os.getenv("AWCP_MCP_ENABLED",             "true").lower() == "true"
+MCP_URL              = os.getenv("AWCP_MCP_URL",                 "http://localhost:8002/sse")
+MCP_TIMEOUT          = float(os.getenv("AWCP_MCP_TIMEOUT",       "30"))
+# Heartbeat: the radar prunes a self-registered agent that goes silent for
+# AGENT_RADAR_SELF_PRUNE_AFTER (default 180s). We refresh liveness well inside
+# that window so the agent stays registered (and its write-action gate keeps
+# being enforced rather than 404→fail-open) even between tasks. Must be < 180s.
+HEARTBEAT_INTERVAL   = float(os.getenv("AWCP_HEARTBEAT_INTERVAL", "60"))
 ARTIFACT_DIR = ""    # set by mount()
 AGENT_NAME   = "agent"  # set by mount()
 
@@ -320,6 +335,321 @@ def _radar_signal(agent_id: str, ok: bool, reason: str = "") -> None:
         {"ok": ok, "reason": reason[:200]},
         timeout=2.0,
     )
+
+
+def _radar_heartbeat(meta: dict, port: int) -> None:
+    """Keep this self-registered agent alive in the radar.
+
+    The radar prunes a self entry that goes silent for SELF_PRUNE_AFTER_SEC. The
+    agent registers only once and the radar's process-scanner sees it under a
+    different `proc-<pid>` id, so nothing refreshes the self entry between tasks —
+    it would be pruned and its write-action gate would start 404→fail-open. We
+    refresh liveness via /signal (which does NOT reset onboarding), and if the
+    radar has forgotten us (404 → empty response, e.g. it restarted or pruned us
+    during a long idle) we re-register. Best-effort; never raises."""
+    while True:
+        time.sleep(HEARTBEAT_INTERVAL)
+        if not _AGENT_ID:
+            continue
+        try:
+            resp = _radar_call(f"/agents/{_AGENT_ID}/signal",
+                               {"ok": True, "reason": "heartbeat"}, timeout=2.0)
+            if not resp:
+                # unknown to the radar (pruned/restarted) or radar down — try to
+                # (re)register so a recovered radar re-admits us. No-op if down.
+                _radar_register(_AGENT_ID, meta, port)
+        except Exception:  # noqa: BLE001 — a heartbeat must never crash the agent
+            pass
+
+
+# ── MCP governance-plane client ───────────────────────────────────────────────
+# This agent is an MCP CLIENT. Governed tool calls go to the AWCP MCP server's
+# `execute_tool`, which is the write-action firewall: it asks the radar gate, runs
+# the registered tool, and traces it. We pass our agent_id + task_id + the current
+# W3C trace context so the server can attribute the gate decision to us and stitch
+# its tool span into this task's trace. Nothing here is hardcoded — the server URL,
+# enablement, and timeout are all env-driven.
+_MCP_AVAILABLE: bool | None = None   # lazily resolved: is the mcp client importable?
+
+
+def _mcp_client():
+    """Import the MCP SSE client lazily. Returns (ClientSession, sse_client) or
+    (None, None) if the `mcp` package isn't installed (then we fall back local)."""
+    global _MCP_AVAILABLE
+    try:
+        from mcp import ClientSession
+        from mcp.client.sse import sse_client
+        _MCP_AVAILABLE = True
+        return ClientSession, sse_client
+    except Exception:  # noqa: BLE001
+        if _MCP_AVAILABLE is None:
+            _log.warning("mcp.client.unavailable — `mcp` not installed; using local execution")
+        _MCP_AVAILABLE = False
+        return None, None
+
+
+def _trace_carrier() -> dict:
+    """The current W3C trace context, so the server's tool span links into ours."""
+    carrier: dict = {}
+    try:
+        from opentelemetry.propagate import inject
+        inject(carrier)
+    except Exception:  # noqa: BLE001
+        pass
+    return carrier
+
+
+async def _mcp_call_async(tool_name: str, tool_input: dict, risk: str,
+                          scope: str, approved: bool) -> str:
+    ClientSession, sse_client = _mcp_client()
+    if not _MCP_AVAILABLE:
+        raise RuntimeError("mcp client not installed")
+    task = _CURRENT.get("task")
+    args = {
+        "tool_name":     tool_name,
+        "tool_input":    tool_input or {},
+        "agent_id":      _AGENT_ID,
+        "task_id":       task["id"] if task else "",
+        "risk":          risk or "",
+        "scope":         scope or "",
+        "approved":      bool(approved),
+        "trace_context": _trace_carrier(),
+    }
+    async with sse_client(MCP_URL) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("execute_tool", args)
+            texts = [getattr(b, "text", "") for b in (result.content or [])
+                     if getattr(b, "type", None) == "text"]
+            return "\n".join(t for t in texts if t).strip()
+
+
+def _run_async(coro):
+    """Run a coroutine to completion from ANY context — including from inside a
+    framework's already-running event loop (PydanticAI's run_sync and LangGraph's
+    tool nodes execute inside one, where asyncio.run() would raise). We always run
+    on a fresh loop in a dedicated thread, so it never collides with a loop already
+    running on the calling thread."""
+    box: dict = {}
+
+    def _runner():
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    t = threading.Thread(target=_runner, daemon=True, name="awcp-mcp-call")
+    t.start()
+    t.join()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def mcp_execute(tool_name: str, tool_input: dict, *, risk: str = "",
+                scope: str = "", approved: bool = False) -> dict | None:
+    """Run a tool through the MCP governance plane. Returns the parsed envelope
+    {status, output, decision, mode, reason, risk}, or None if MCP is disabled /
+    unreachable so the caller falls back to LOCAL execution."""
+    if not MCP_ENABLED:
+        return None
+    try:
+        raw = _run_async(
+            asyncio.wait_for(
+                _mcp_call_async(tool_name, tool_input, risk, scope, approved),
+                timeout=MCP_TIMEOUT,
+            )
+        )
+        try:
+            env = json.loads(raw)
+            if isinstance(env, dict) and "status" in env:
+                return env
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Non-envelope text (older/plain tool) — treat as a successful read.
+        return {"status": "succeeded", "output": raw, "decision": "allow",
+                "mode": "unknown", "reason": "", "risk": risk}
+    except Exception as exc:  # noqa: BLE001 — never let MCP break a tool call
+        _log.warning("mcp.execute.unavailable tool=%s error=%r", tool_name, exc)
+        return None
+
+
+def call_tool(name: str, args: dict | None = None, *, risk: str = "low",
+              scope: str = "", detail: str = "") -> str:
+    """Run a tool ONLY via the MCP governance server — agents do NOT execute tools
+    locally. The server runs the radar write-action gate, executes the registered
+    tool, and traces it; here we open a child span, emit a Temporal `tool_called`
+    event, and (for HIGH risk) pause for operator approval first. Returns the
+    tool's text output, or a BLOCKED/ERROR message string.
+
+    This is the single entry point every agent tool forwards to, so the MCP server
+    is the one place tools run and every call is governed + recorded.
+    """
+    task = _CURRENT["task"]
+    step = {"action": name, "risk": risk, "status": "", "info": ""}
+
+    with _span("agent.tool." + name,
+               agent_id=_AGENT_ID, tool=name, action_risk=risk,
+               task_id=task["id"] if task else "") as span:
+
+        # HIGH-risk operator approval (kept in this agent's task-console UI).
+        if risk == "high" and APPROVAL_REQUIRED and task is not None:
+            ev = threading.Event()
+            _APPROVAL_EVENTS[task["id"]] = ev
+            _APPROVAL_DECISION.pop(task["id"], None)
+            task["awaiting"] = {"action": name, "detail": detail or name}
+            task["status"] = "awaiting_approval"
+            _add_step(task, {**step, "status": "awaiting_approval", "info": detail or name})
+            _log.info("action.awaiting_approval action=%s task_id=%s", name, task["id"])
+            got = ev.wait(timeout=APPROVAL_TIMEOUT)
+            _APPROVAL_EVENTS.pop(task["id"], None)
+            task["awaiting"] = None
+            task["status"] = "running"
+            if not got or _APPROVAL_DECISION.get(task["id"]) != "approve":
+                info = "operator denied" if got else "approval timed out"
+                _log.info("action.denied action=%s task_id=%s reason=%s", name, task["id"], info)
+                _add_step(task, {**step, "status": "denied", "info": info})
+                if span:
+                    span.set_attribute("gate.decision", "denied")
+                return f"DENIED: '{name}' was not approved."
+
+        # Execute on the MCP governance server (no local fallback — MCP-only).
+        env = mcp_execute(name, args or {}, risk=risk, scope=scope or name, approved=True)
+        if env is None:
+            msg = (f"ERROR: MCP server unreachable at {MCP_URL} — tool '{name}' was not "
+                   f"executed (this agent is configured to use MCP tools only).")
+            _log.error("tool.mcp_unavailable tool=%s url=%s", name, MCP_URL)
+            if task:
+                _add_step(task, {**step, "status": "failed", "info": msg})
+            return msg
+
+        decision = env.get("decision", "allow")
+        out = env.get("output", "")
+        if span:
+            span.set_attribute("gate.decision", decision)
+            span.set_attribute("govern.via", "mcp")
+
+        # Temporal: record this tool call (radar maps the event → an activity).
+        if task:
+            _emit_execution_event(task["id"], "tool_called", tool_name=name, risk=risk,
+                                  gate="denied" if decision == "deny" else "allowed")
+
+        if env.get("status") == "blocked" or decision == "deny":
+            _log.warning("tool.blocked tool=%s risk=%s reason=%s", name, risk, env.get("reason", ""))
+            if task:
+                _add_step(task, {**step, "status": "blocked",
+                                 "info": env.get("reason") or "denied by AWCP governance"})
+            return out or f"BLOCKED: '{name}' was denied by the AWCP write-action gate."
+        if env.get("status") == "error":
+            _log.error("tool.error tool=%s reason=%s", name, env.get("reason", ""))
+            if task:
+                _add_step(task, {**step, "status": "failed", "info": env.get("reason", "")})
+            return out or f"ERROR: {env.get('reason', '')}"
+
+        _log.info("tool.done tool=%s risk=%s via=mcp", name, risk)
+        if task:
+            _add_step(task, {**step, "status": "done", "info": str(out)[:300]})
+        return out
+
+
+# ── Dynamic tool discovery (the MCP server advertises its catalog) ─────────────
+# Agents declare NO tools of their own: at startup they ask the MCP server which
+# tools it offers (list_runtime_tools) and bind them into their framework. Drop a
+# tool into the server's tools/ folder and every agent gets it — no agent edits.
+async def _mcp_list_async() -> str:
+    ClientSession, sse_client = _mcp_client()
+    if not _MCP_AVAILABLE:
+        raise RuntimeError("mcp client not installed")
+    async with sse_client(MCP_URL) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("list_runtime_tools", {})
+            texts = [getattr(b, "text", "") for b in (result.content or [])
+                     if getattr(b, "type", None) == "text"]
+            return "\n".join(t for t in texts if t).strip()
+
+
+def discover_tools() -> list[dict]:
+    """The tool catalog the MCP server advertises — a list of specs
+    {name, description, parameters, required, risk, scope}. Empty if MCP is
+    disabled/unreachable (the agent then starts with no tools, MCP-only)."""
+    if not MCP_ENABLED:
+        _log.warning("tool discovery skipped — AWCP_MCP_ENABLED=false")
+        return []
+    try:
+        raw = _run_async(asyncio.wait_for(_mcp_list_async(), timeout=MCP_TIMEOUT))
+        specs = json.loads(raw)
+        specs = specs if isinstance(specs, list) else []
+        _log.info("mcp.discover url=%s tools=%s", MCP_URL, [s.get("name") for s in specs])
+        return specs
+    except Exception as exc:  # noqa: BLE001
+        _log.error("mcp.discover.failed url=%s error=%r", MCP_URL, exc)
+        return []
+
+
+_PY_TYPES = {"str": "str", "int": "int", "float": "float",
+             "bool": "bool", "dict": "dict", "list": "list"}
+
+
+def _forward_tool(name: str, args: dict, risk: str) -> str:
+    """Drop unset (None) optional args, then run the tool on the MCP server."""
+    clean = {k: v for k, v in (args or {}).items() if v is not None}
+    return call_tool(name, clean, risk=risk, scope=name)
+
+
+def _synth_forwarder(spec: dict):
+    """Build a real function whose signature mirrors the tool's parameters (so any
+    framework can introspect a JSON schema for it) and whose body forwards the call
+    to the MCP server. Tool names/params come from our own server catalog and are
+    simple identifiers, so this codegen is safe and contained."""
+    name = spec["name"]
+    required = set(spec.get("required") or [])
+    parts, callmap = [], []
+    for p in spec.get("parameters", []):
+        pn = p["name"]
+        ann = _PY_TYPES.get((p.get("type") or "").strip(), "str")
+        parts.append(f"{pn}: {ann}" if pn in required else f"{pn}: {ann} = None")
+        callmap.append(f"{pn!r}: {pn}")
+    sig = ", ".join(parts)
+    args = "{" + ", ".join(callmap) + "}"
+    src = (f"def {name}({sig}):\n"
+           f"    return _forward({name!r}, {args}, {spec.get('risk', 'low')!r})\n")
+    ns = {"_forward": _forward_tool, "str": str, "int": int, "float": float,
+          "bool": bool, "dict": dict, "list": list}
+    exec(src, ns)  # noqa: S102 — names come from our own MCP catalog
+    fn = ns[name]
+    fn.__doc__ = (spec.get("description") or name).strip()
+    return fn
+
+
+def build_tools(framework: str, specs: list[dict] | None = None):
+    """Turn the MCP server's advertised catalog into native tool objects for the
+    given agent framework. Call once at agent startup; the agent itself declares
+    no tools. Supported: langgraph | pydantic_ai | crewai."""
+    specs = discover_tools() if specs is None else specs
+    fw = (framework or "").lower()
+    if not specs:
+        _log.warning("build_tools: no tools discovered (framework=%s)", fw)
+        return []
+
+    if fw in ("langgraph", "langchain"):
+        from langchain_core.tools import StructuredTool
+        return [StructuredTool.from_function(
+                    func=_synth_forwarder(s), name=s["name"],
+                    description=(s.get("description") or s["name"]).strip())
+                for s in specs]
+
+    if fw in ("pydantic_ai", "pydanticai"):
+        from pydantic_ai import Tool
+        return [Tool(_synth_forwarder(s), name=s["name"],
+                     description=(s.get("description") or s["name"]).strip())
+                for s in specs]
+
+    if fw == "crewai":
+        from crewai.tools import tool as crew_tool
+        return [crew_tool(s["name"])(_synth_forwarder(s)) for s in specs]
+
+    return [_synth_forwarder(s) for s in specs]
 
 
 # ── Execution workflow bridge (Temporal task tracking) ────────────────────────
@@ -622,28 +952,11 @@ def sse(event: dict) -> str:
 
 
 def web_search(query: str, max_results: int = 5) -> str:
-    """Free web search (DuckDuckGo, no API key). Instrumented with an OTel span."""
-    _log.info("web_search query=%r max_results=%d", query[:200], max_results)
-    task = _CURRENT["task"]
-    if task:
-        _emit_execution_event(task["id"], "web_search",
-                              tool_name="web_search", query=query[:200])
-    with _span("agent.tool.web_search", query=query[:200], max_results=max_results):
-        try:
-            try:
-                from ddgs import DDGS
-            except ImportError:
-                from duckduckgo_search import DDGS
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max(1, min(max_results, 8))))
-            if not results:
-                return "No web results found."
-            return "\n\n".join(
-                f"Title: {r.get('title', '')}\nLink: {r.get('href', '')}\n{r.get('body', '')}"
-                for r in results
-            )
-        except Exception as e:  # noqa: BLE001
-            return f"web_search unavailable: {type(e).__name__}: {e}"
+    """Free web search — executed on the MCP governance server (a read). The agent
+    does not search locally; it forwards to the server's web_search tool."""
+    _log.info("web_search query=%r", query[:200])
+    return call_tool("web_search", {"query": query}, risk="low", scope="web_search") \
+        or "No web results found."
 
 
 # --------------------------------------------------------------------------
@@ -821,103 +1134,28 @@ def approve_task(tid: str, decision: str) -> bool:
     return True
 
 
-def governed_action(name: str, risk: str, do_fn, detail: str = ""):
-    """Run a governed write action:
-    1. Check the AWCP radar gate (falls back to allow when radar is offline).
-    2. For HIGH risk, pause for operator approval.
-    3. Execute the write, recording a step on the current task.
+def governed_action(name: str, risk: str, do_fn=None, detail: str = "",
+                    args: dict | None = None, scope: str = ""):
+    """Compatibility shim. All tool execution now goes through the MCP governance
+    server via call_tool(); the local `do_fn` is intentionally ignored because
+    agents are MCP-only. Kept so any caller still using the old name keeps working.
     """
-    task = _CURRENT["task"]
-    step = {"action": name, "risk": risk, "status": "", "info": ""}
-
-    with _span("agent.action.write",
-               agent_id=_AGENT_ID,
-               action_name=name,
-               action_risk=risk,
-               task_id=task["id"] if task else "") as action_span:
-
-        # AWCP radar gate
-        if risk in ("medium", "high"):
-            gate = _radar_gate(_AGENT_ID, name)
-            if action_span:
-                action_span.set_attribute("gate.decision", gate)
-            # Emit tool_called event so Temporal shows this step
-            if task:
-                _emit_execution_event(
-                    task["id"], "tool_called",
-                    tool_name=name, risk=risk,
-                    gate="denied" if gate == "deny" else "allowed",
-                )
-            if gate == "deny":
-                _log.warning(
-                    "action.blocked agent_id=%s action=%s risk=%s",
-                    _AGENT_ID, name, risk,
-                )
-                if task:
-                    _add_step(task, {**step, "status": "blocked",
-                                     "info": "denied by AWCP governance"})
-                return f"BLOCKED: '{name}' was denied by the AWCP write-action gate."
-
-        # High-risk operator approval
-        if risk == "high" and APPROVAL_REQUIRED and task is not None:
-            ev = threading.Event()
-            _APPROVAL_EVENTS[task["id"]] = ev
-            _APPROVAL_DECISION.pop(task["id"], None)
-            task["awaiting"] = {"action": name, "detail": detail}
-            task["status"] = "awaiting_approval"
-            _add_step(task, {**step, "status": "awaiting_approval", "info": detail})
-            _log.info("action.awaiting_approval action=%s task_id=%s", name, task["id"])
-            got = ev.wait(timeout=APPROVAL_TIMEOUT)
-            _APPROVAL_EVENTS.pop(task["id"], None)
-            task["awaiting"] = None
-            task["status"] = "running"
-            if not got or _APPROVAL_DECISION.get(task["id"]) != "approve":
-                info = "operator denied" if got else "approval timed out"
-                _log.info("action.denied action=%s task_id=%s reason=%s", name, task["id"], info)
-                _add_step(task, {**step, "status": "denied", "info": info})
-                if action_span:
-                    action_span.set_attribute("gate.decision", "denied")
-                return f"DENIED: external write '{name}' was not approved."
-
-        try:
-            out = do_fn()
-            _log.info("action.done action=%s risk=%s", name, risk)
-            if task:
-                _add_step(task, {**step, "status": "done", "info": str(out)[:300]})
-            if action_span:
-                action_span.set_attribute("action.status", "done")
-            return out
-        except Exception as e:  # noqa: BLE001
-            _log.error("action.failed action=%s risk=%s error=%r", name, risk, e)
-            if task:
-                _add_step(task, {**step, "status": "failed", "info": str(e)})
-            return f"ERROR: {e}"
+    return call_tool(name, args or {}, risk=risk, scope=scope or name, detail=detail)
 
 
 def save_artifact(name: str, content: str) -> str:
-    """Governed LOCAL write (medium risk): persist a result artifact to disk."""
-    def _do():
-        d = ARTIFACT_DIR or os.path.join(os.getcwd(), "artifacts")
-        os.makedirs(d, exist_ok=True)
-        safe = "".join(c for c in name if c.isalnum() or c in "-_.") or "artifact"
-        path = os.path.join(d, f"{int(_now())}-{safe}")
-        with open(path, "w") as f:
-            f.write(content)
-        return f"saved artifact: {path}"
-    return governed_action("save_artifact", "medium", _do, detail=name)
+    """Governed LOCAL write (medium risk) — executed on the MCP server (the
+    server owns the artifact store + the radar gate). MCP-only, no local write."""
+    return call_tool("save_artifact", {"name": name, "content": content},
+                     risk="medium", scope="save_artifact", detail=name)
 
 
 def external_post(summary: str) -> str:
-    """Self-governed EXTERNAL write (HIGH risk): POST to EXTERNAL_WRITE_URL."""
-    def _do():
-        body = json.dumps({"agent": AGENT_NAME, "summary": summary}).encode()
-        headers = {"content-type": "application/json"}
-        if EXTERNAL_WRITE_TOKEN:
-            headers["authorization"] = f"Bearer {EXTERNAL_WRITE_TOKEN}"
-        req = urllib.request.Request(EXTERNAL_WRITE_URL, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
-            return f"external POST {EXTERNAL_WRITE_URL} -> HTTP {r.status}"
-    return governed_action("external_post", "high", _do, detail=f"POST {EXTERNAL_WRITE_URL}")
+    """Governed EXTERNAL write (HIGH risk) — executed on the MCP server, gated by
+    the radar and preceded by operator approval. MCP-only, no local POST."""
+    return call_tool("external_post", {"summary": summary, "agent": AGENT_NAME},
+                     risk="high", scope="external_post",
+                     detail=f"POST {EXTERNAL_WRITE_URL}")
 
 
 def _worker_loop(run_goal) -> None:
@@ -1121,6 +1359,15 @@ def mount(app, *, meta: dict, run_goal, port: int = 8000) -> None:
         name="radar-register",
     ).start()
 
+    # Heartbeat: keep the self-registered entry alive (and re-register if the
+    # radar forgets us) so the write-action gate stays enforced, not fail-open.
+    threading.Thread(
+        target=_radar_heartbeat,
+        args=(meta, port),
+        daemon=True,
+        name="radar-heartbeat",
+    ).start()
+
     # ── Routes ────────────────────────────────────────────────────────────
 
     @app.get("/", response_class=HTMLResponse)
@@ -1136,6 +1383,8 @@ def mount(app, *, meta: dict, run_goal, port: int = 8000) -> None:
             "registered":       bool(_AGENT_ID),
             "agent_id":         _AGENT_ID,
             "radar_url":        RADAR_URL,
+            "mcp_enabled":      MCP_ENABLED,
+            "mcp_url":          MCP_URL,
         }
 
     @app.get("/health")

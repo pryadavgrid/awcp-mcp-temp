@@ -27,7 +27,7 @@ Endpoints: `GET /` (info), `GET /health`, `POST /invoke {input}`.
 
 ## How `agent_radar` detects it
 
-Launched as `python <absolute>/agent_runtime.py`, with `from pydantic_ai import Agent` at the
+Launched as `python <absolute>/pydanticai_agent.py`, with `from pydantic_ai import Agent` at the
 top. The radar reads the script, sees the `pydantic_ai` import, and registers it as
 `kind=agent_framework, framework=pydantic_ai` (detected_via `script_import`), then onboards it
 via a Temporal workflow and marks it **quarantined** (no telemetry/policy hooks).

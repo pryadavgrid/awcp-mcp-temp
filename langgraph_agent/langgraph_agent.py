@@ -8,16 +8,14 @@ steps using its tools, performing real governed WRITES:
 The task queue, worker loop, governance, approval flow and UI live in awcp_kit;
 this file only supplies the framework agent + the run_goal() hook.
 
-Run as:  python agent_runtime.py   (launched with an ABSOLUTE path by run.sh so
+Run as:  python langgraph_agent.py   (launched with an ABSOLUTE path by run.sh so
 the detector can read this file and see the `langgraph` import).
 """
 
-import datetime
 import os
 
 from langgraph.graph import StateGraph  # noqa: F401  (import marks this as LangGraph)
 from langgraph.prebuilt import create_react_agent
-from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 
 from fastapi import FastAPI
@@ -40,61 +38,12 @@ SYSTEM = (
 )
 
 
-# --- read / compute tools -------------------------------------------------
-@tool
-def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web for current/real-world information (no API key)."""
-    return kit.web_search(query, max_results)
-
-
-@tool
-def multiply(a: float, b: float) -> float:
-    """Multiply two numbers."""
-    return a * b
-
-
-@tool
-def add(a: float, b: float) -> float:
-    """Add two numbers."""
-    return a + b
-
-
-@tool
-def power(base: float, exponent: float) -> float:
-    """Raise base to the power of exponent."""
-    return base ** exponent
-
-
-@tool
-def word_count(text: str) -> int:
-    """Count the words in a piece of text."""
-    return len(text.split())
-
-
-@tool
-def current_time() -> str:
-    """Return the current local date/time (ISO-8601)."""
-    return datetime.datetime.now().isoformat(timespec="seconds")
-
-
-# --- governed WRITE tools (routed through the control-plane gate) ----------
-@tool
-def save_artifact(name: str, content: str) -> str:
-    """Save a result artifact to disk. GOVERNED local write (gated by the control
-    plane). Use when you have a result worth persisting."""
-    return kit.save_artifact(name, content)
-
-
-@tool
-def external_post(summary: str) -> str:
-    """Submit/publish a result to an external system over HTTP. HIGH-RISK governed
-    write: it is gated AND pauses for operator approval before sending. Use only
-    when the goal asks to submit, send, publish, or report the result externally."""
-    return kit.external_post(summary)
-
-
-TOOLS = [web_search, multiply, add, power, word_count, current_time,
-         save_artifact, external_post]
+# --- tools: discovered dynamically from the MCP server (NONE defined here) ----
+# This agent declares no tools of its own. At startup it asks the MCP server which
+# tools it offers (list_runtime_tools) and binds them; every call runs on the
+# server, governed by the radar gate and traced into Temporal + OTel. Add a tool
+# to the server's tools/ folder and it shows up here automatically.
+TOOLS = kit.build_tools("langgraph")
 TOOL_NAMES = [t.name for t in TOOLS]
 
 _llm = ChatOllama(model=MODEL, base_url=OLLAMA_BASE, temperature=0)

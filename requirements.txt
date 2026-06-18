@@ -32,3 +32,6 @@ pydantic-ai>=0.0.14
 
 # --- CrewAI Writer ---
 crewai>=0.40.0
+
+# --- MCP client (agents call the AWCP governance-plane MCP server's execute_tool) ---
+mcp>=1.0.0

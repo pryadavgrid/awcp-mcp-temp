@@ -15,6 +15,6 @@ fi
 LOG="${TMPDIR:-/tmp}/arxiv-agent.log"
 echo "📚 Starting arXiv research agent (background) on http://localhost:${ARXIV_PORT:-8103}"
 echo "   (free / local Ollama model: ${ARXIV_MODEL:-llama3.1:8b} · free arXiv API)"
-nohup ./.venv/bin/python "$PWD/agent_runtime.py" > "$LOG" 2>&1 &
+nohup ./.venv/bin/python "$PWD/arxiv_agent.py" > "$LOG" 2>&1 &
 echo "✅ running — PID $!   logs: $LOG"
-echo "   stop: pkill -f '$PWD/agent_runtime.py'"
+echo "   stop: pkill -f '$PWD/arxiv_agent.py'"

@@ -7,11 +7,10 @@ Pulls GOALS off a task queue and executes each in multiple steps:
 Queue/worker/governance/approval/UI live in awcp_kit; this file supplies the
 PydanticAI agent + the run_goal() hook.
 
-Run as:  python agent_runtime.py   (absolute path via run.sh so the detector sees
+Run as:  python pydanticai_agent.py   (absolute path via run.sh so the detector sees
 the `pydantic_ai` import).
 """
 
-import datetime
 import os
 
 from pydantic_ai import Agent  # noqa: F401  (import marks this as PydanticAI)
@@ -28,61 +27,24 @@ OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://localhost:11434")
 PORT = int(os.getenv("PAI_PORT", "8102"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-_model = OpenAIModel(MODEL, provider=OpenAIProvider(base_url=f"{OLLAMA_BASE}/v1", api_key="ollama"))
-AGENT = Agent(_model, system_prompt=(
+SYSTEM = (
     "You are a STRUCTURED-DATA EXTRACTION agent. Given a GOAL, gather the needed "
     "facts (use web_search for things you don't know, the math tools for arithmetic), "
     "then return your FINAL answer as a SINGLE valid JSON object that captures the "
     "requested information with clear snake_case keys and concise values. Output ONLY "
     "the JSON object — no prose, no explanation, no markdown code fences. If the goal "
-    "asks to save or submit the result, call save_artifact / external_post first."))
+    "asks to save or submit the result, call save_artifact / external_post first.")
 
-TOOL_NAMES = ["web_search", "multiply", "add", "word_count", "current_time",
-              "save_artifact", "external_post"]
+_model = OpenAIModel(MODEL, provider=OpenAIProvider(base_url=f"{OLLAMA_BASE}/v1", api_key="ollama"))
 
+# --- tools: discovered dynamically from the MCP server (NONE defined here) ----
+# No tools are declared in this file. The agent fetches the MCP server's catalog
+# and binds it; every call runs on the server (governed + traced).
+_specs = kit.discover_tools()
+TOOLS = kit.build_tools("pydantic_ai", _specs)
+TOOL_NAMES = [s["name"] for s in _specs]
 
-@AGENT.tool_plain
-def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web for current/real-world information (no API key)."""
-    return kit.web_search(query, max_results)
-
-
-@AGENT.tool_plain
-def multiply(a: float, b: float) -> float:
-    """Multiply two numbers."""
-    return a * b
-
-
-@AGENT.tool_plain
-def add(a: float, b: float) -> float:
-    """Add two numbers."""
-    return a + b
-
-
-@AGENT.tool_plain
-def word_count(text: str) -> int:
-    """Count the words in a piece of text."""
-    return len(text.split())
-
-
-@AGENT.tool_plain
-def current_time() -> str:
-    """Return the current local date/time (ISO-8601)."""
-    return datetime.datetime.now().isoformat(timespec="seconds")
-
-
-@AGENT.tool_plain
-def save_artifact(name: str, content: str) -> str:
-    """Save a result artifact to disk. GOVERNED local write (gated)."""
-    return kit.save_artifact(name, content)
-
-
-@AGENT.tool_plain
-def external_post(summary: str) -> str:
-    """Submit/publish a result to an external system. HIGH-RISK governed write:
-    gated AND pauses for operator approval. Use only when the goal asks to submit,
-    send, publish, or report externally."""
-    return kit.external_post(summary)
+AGENT = Agent(_model, system_prompt=SYSTEM, tools=TOOLS)
 
 
 def _tools_from_messages(messages) -> list[str]:

@@ -28,7 +28,7 @@ Endpoints: `GET /` (info), `GET /health`, `POST /invoke {input}`.
 
 ## How `agent_radar` detects it
 
-Launched as `python <absolute>/agent_runtime.py`, with `from crewai import ...` at the top of
+Launched as `python <absolute>/crewai_agent.py`, with `from crewai import ...` at the top of
 that file. The radar reads the referenced script, sees the `crewai` import, and registers it as
 `kind=agent_framework, framework=crewai` (detected_via `script_import`), then onboards it via a
 Temporal workflow and marks it **quarantined** (no telemetry/policy hooks).

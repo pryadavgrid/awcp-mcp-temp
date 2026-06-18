@@ -16,6 +16,6 @@ fi
 LOG="${TMPDIR:-/tmp}/crewai-agent.log"
 echo "👥 Starting CrewAI runtime agent (background) on http://localhost:${CREW_PORT:-8101}"
 echo "   (free / local Ollama model: ${CREW_MODEL:-ollama/llama3.1:8b})"
-nohup ./.venv/bin/python "$PWD/agent_runtime.py" > "$LOG" 2>&1 &
+nohup ./.venv/bin/python "$PWD/crewai_agent.py" > "$LOG" 2>&1 &
 echo "✅ running — PID $!   logs: $LOG"
-echo "   stop: pkill -f '$PWD/agent_runtime.py'"
+echo "   stop: pkill -f '$PWD/crewai_agent.py'"

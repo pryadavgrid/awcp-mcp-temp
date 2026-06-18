@@ -5,11 +5,10 @@ calling is version/model dependent, so the deterministic finalize in awcp_kit
 guarantees the runtime's output is still routed through the control plane
 (save_artifact = governed local write; external_post = high-risk gated write).
 
-Run as:  python agent_runtime.py   (absolute path via run.sh so the detector sees
+Run as:  python crewai_agent.py   (absolute path via run.sh so the detector sees
 the `crewai` import).
 """
 
-import datetime
 import os
 
 os.environ.setdefault("CREWAI_TELEMETRY_OPT_OUT", "true")
@@ -28,30 +27,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 _llm = LLM(model=MODEL, base_url=OLLAMA_BASE, temperature=0)
 
-# Governed tools as CrewAI tools (added when this CrewAI version exposes the
-# decorator; the deterministic finalize covers governance either way).
-TOOLS = []
-TOOL_NAMES = ["web_search", "save_artifact", "external_post"]
+# --- tools: discovered dynamically from the MCP server (NONE defined here) ----
+# No tools are declared in this file. The agent fetches the MCP server's catalog
+# and binds it. CrewAI tool calling is version/model dependent, so the kit's
+# deterministic finalize still routes the output through the governed
+# save_artifact / external_post on the server.
 try:
-    from crewai.tools import tool as crew_tool  # noqa: E402
-
-    @crew_tool("web_search")
-    def web_search(query: str) -> str:
-        """Search the web for current/real-world information (no API key)."""
-        return kit.web_search(query)
-
-    @crew_tool("save_artifact")
-    def save_artifact(content: str) -> str:
-        """Save a result artifact to disk. GOVERNED local write (gated)."""
-        return kit.save_artifact("result", content)
-
-    @crew_tool("external_post")
-    def external_post(summary: str) -> str:
-        """Submit/publish a result externally. HIGH-RISK governed write (gated +
-        operator approval)."""
-        return kit.external_post(summary)
-
-    TOOLS = [web_search, save_artifact, external_post]
+    _specs = kit.discover_tools()
+    TOOLS = kit.build_tools("crewai", _specs)
+    TOOL_NAMES = [s["name"] for s in _specs]
 except Exception:  # noqa: BLE001
     TOOLS, TOOL_NAMES = [], []
 

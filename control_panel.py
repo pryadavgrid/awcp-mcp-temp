@@ -5,7 +5,7 @@ Discovery is fully DYNAMIC and not hardcoded: every sub-folder of this `agents/`
 directory that contains a `run.sh` is treated as an agent (id = folder name).
 Add or remove an agent folder and the panel updates automatically — nothing about
 the specific agents, their ports, or models is baked in. Running state is found by
-matching the agent's own `agent_runtime.py` path among live processes, and the
+matching the agent's own `<agent>.py` runtime path among live processes, and the
 listening port (for the "Open UI" link) is discovered from the live process, not
 assumed. (The HTML page itself is a static template — that part is intentionally
 hardcoded, as requested.)
@@ -26,6 +26,25 @@ from urllib.parse import urlparse
 AGENTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.getenv("PANEL_PORT", "8099"))
 
+# ----------------------------------------------------------------------
+# Control-plane wiring for launched agents.
+#
+# control_panel launches each agent via its run.sh; the agent kit reads these
+# env vars (at import / first use). We default them to the AWCP gateway — the
+# one-port control plane that run_everything.sh serves on :8000 — so agents
+# started here REGISTER with the radar, drive Temporal execution workflows, and
+# route governed tools through the MCP server. This mirrors the gateway's own
+# launcher (awcp.gateway.agents_fs). Every value is overridable from the
+# environment, so a standalone radar (:8090) or a remote collector still works:
+#   AGENT_RADAR_URL=http://localhost:8090 python3 control_panel.py
+AGENT_LAUNCH_ENV = {
+    "AGENT_RADAR_URL": os.getenv("AGENT_RADAR_URL", "http://localhost:8000"),
+    "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
+    ),
+    "AWCP_MCP_URL": os.getenv("AWCP_MCP_URL", "http://localhost:8002/sse"),
+}
+
 
 # ----------------------------------------------------------------------
 # Dynamic discovery + process control (no agent-specific knowledge)
@@ -42,7 +61,7 @@ def discover() -> list[dict]:
                     "id": name,
                     "dir": d,
                     "run": run,
-                    "runtime": os.path.join(d, "agent_runtime.py"),
+                    "runtime": os.path.join(d, name + ".py"),
                 }
             )
     return agents
@@ -53,7 +72,7 @@ def _find(agent_id: str) -> dict | None:
 
 
 def _pids(agent: dict) -> list[int]:
-    """PIDs whose command line references this agent's own agent_runtime.py."""
+    """PIDs whose command line references this agent's own <agent>.py runtime."""
     try:
         out = subprocess.run(
             ["pgrep", "-f", agent["runtime"]], capture_output=True, text=True
@@ -96,9 +115,16 @@ def start(agent_id: str) -> tuple[bool, str]:
         return False, "unknown agent"
     if _pids(a):
         return True, "already running"
+    # Inject the control-plane env so the agent registers with the radar, drives
+    # Temporal, and routes governed tools through the MCP server. setdefault keeps
+    # any value the operator already exported (so :8090 / a remote collector win).
+    env = dict(os.environ)
+    for k, v in AGENT_LAUNCH_ENV.items():
+        env.setdefault(k, v)
     subprocess.Popen(
         ["bash", a["run"]],
         cwd=a["dir"],
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

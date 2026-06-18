@@ -10,3 +10,5 @@ opentelemetry-instrumentation-logging>=0.40b0
 opentelemetry-instrumentation-fastapi>=0.40b0
 opentelemetry-instrumentation-httpx>=0.40b0
 opentelemetry-instrumentation-requests>=0.40b0
+# MCP client — used to call the AWCP governance-plane MCP server (execute_tool)
+mcp>=1.0.0

@@ -27,7 +27,7 @@ Endpoints: `GET /` (info), `GET /health`, `POST /invoke {input}`.
 
 ## How `agent_radar` detects it
 
-It's launched as `python <absolute>/agent_runtime.py`, and that file imports `langgraph` at the
+It's launched as `python <absolute>/langgraph_agent.py`, and that file imports `langgraph` at the
 top. The radar's scanner reads the referenced script, sees the `from langgraph...` import, and
 registers it as `kind=agent_framework, framework=langgraph` (detected_via `script_import`). It
 then onboards via a Temporal workflow and marks it **quarantined** (no telemetry/policy hooks),
