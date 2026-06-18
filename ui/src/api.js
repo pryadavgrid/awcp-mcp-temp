@@ -1,11 +1,10 @@
-// Thin client for the AWCP gateway. Everything here is generic — it never names
-// an agent or a tool; the agent list, examples, tools and timeline all come from
-// the gateway at runtime, so the UI works for any agent the backend exposes.
-
-const API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// Thin client for the AWCP gateway. Every value the UI renders comes from these
+// endpoints at runtime — nothing is hardcoded. The gateway already enables CORS
+// (allow_origins=*), so the dev server on :5173 can call it directly.
+import { API_BASE, TEMPORAL_BASE } from './config'
 
 async function call(method, path, body) {
-  const res = await fetch(`${API}${path}`, {
+  const res = await fetch(`${API_BASE}${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -25,37 +24,24 @@ async function call(method, path, body) {
   return data
 }
 
-export const API_BASE = API
+// ── registry / radar ────────────────────────────────────────────────────────
+export const getHealth = () => call('GET', '/healthz')
+export const getAgents = () => call('GET', '/agents')
+export const getEvents = (limit = 50) => call('GET', `/events?limit=${limit}`)
+export const setAutonomy = (id, profile) =>
+  call('POST', `/agents/${encodeURIComponent(id)}/autonomy`, { profile })
 
-export const listAgents = () => call('GET', '/user/agents')
-
-// Per-agent token usage + budget (the token monitor feed). Optional: returns []
-// when the laminar module isn't mounted or no agent has reported usage yet — so
-// it only lists agents that have ALREADY spent tokens. To show a budget bar for
-// every agent (incl. ones that haven't spent yet) we also read the budget policy
-// + the registry below and resolve each agent's budget client-side.
+// ── token monitor (laminar) ──────────────────────────────────────────────────
 export const getUsage = () => call('GET', '/laminar/usage')
-
-// Live token policy: { overrides, risk_defaults (tiers), system_default, window_s }.
+export const getUsageOne = (id) => call('GET', `/laminar/usage/${encodeURIComponent(id)}`)
 export const getBudgets = () => call('GET', '/laminar/budgets')
+export const getLaminarStatus = () => call('GET', '/laminar/status')
+export const resetWindow = (id) => call('POST', `/laminar/reset/${encodeURIComponent(id)}`)
+// Set (or clear) a per-agent token budget override. tokens > 0 sets it; 0 clears
+// it so the agent falls back to its risk-tier / system-default budget.
+export const setBudget = (id, tokens) =>
+  call('POST', `/laminar/budgets/${encodeURIComponent(id)}`, { tokens })
 
-// The radar registry — every governed agent with its risk tier + declared
-// token_budget, keyed by the same id the agent reports as `agent_id`.
-export const getRegistryAgents = () => call('GET', '/agents')
-
-export const submitTask = (agent, input) =>
-  call('POST', '/user/submit', { agent, input })
-
-export const getStatus = (agent, taskId, workflowId) =>
-  call(
-    'GET',
-    `/user/status/${encodeURIComponent(agent)}/${encodeURIComponent(taskId)}` +
-      (workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : ''),
-  )
-
-export const approveTask = (agent, taskId, decision) =>
-  call(
-    'POST',
-    `/user/approve/${encodeURIComponent(agent)}/${encodeURIComponent(taskId)}`,
-    { decision },
-  )
+// Build a Temporal Web UI deep link for any workflow id.
+export const temporalUrl = (wfId) =>
+  `${TEMPORAL_BASE}/namespaces/default/workflows/${encodeURIComponent(wfId)}`

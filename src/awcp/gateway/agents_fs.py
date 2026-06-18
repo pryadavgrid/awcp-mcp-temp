@@ -57,7 +57,10 @@ def discover() -> list[dict]:
                     "id": name,
                     "dir": d,
                     "run": run,
-                    "runtime": os.path.join(d, "agent_runtime.py"),
+                    # Each agent's runtime is named after its folder (e.g.
+                    # arxiv_agent/arxiv_agent.py) — the same convention the
+                    # bundle's run.sh and control_panel.py use.
+                    "runtime": os.path.join(d, name + ".py"),
                 }
             )
     return agents
@@ -68,7 +71,7 @@ def find(agent_id: str) -> dict | None:
 
 
 def _pids(agent: dict) -> list[int]:
-    """PIDs whose command line references this agent's own agent_runtime.py."""
+    """PIDs whose command line references this agent's own <folder>.py runtime."""
     try:
         out = subprocess.run(
             ["pgrep", "-f", agent["runtime"]], capture_output=True, text=True

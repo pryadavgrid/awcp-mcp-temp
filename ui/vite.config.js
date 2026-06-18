@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// The dashboard is a plain SPA. It talks to the AWCP gateway over HTTP/CORS at
-// VITE_API_BASE (default http://localhost:8000). Nothing about the agents or
-// tools is configured here — that all comes from the gateway at runtime.
+// The dev server is launched by scripts/run_everything.sh as
+//   node_modules/.bin/vite --host --port 5173
+// with VITE_API_BASE pointing at the gateway. Nothing here touches the backend.
 export default defineConfig({
   plugins: [react()],
   server: { port: 5173, host: true },

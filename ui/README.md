@@ -1,51 +1,40 @@
-# AWCP Agent Console (React)
+# AWCP Dashboard
 
-A self-contained dashboard for the AWCP gateway: pick an agent, send a prompt,
-and watch every execution step (LLM call, web search, tool call, synthesize…)
-appear **live** as the agent runs — then read the formatted result.
+React + Vite + Tailwind control-plane UI for the AWCP gateway.
 
-This folder is **fully decoupled from the backend**. Delete it and nothing in
-`src/awcp` changes; it only talks to the gateway over HTTP.
+Four views (left menu):
 
-## What it shows (all dynamic — nothing hardcoded)
+| View              | Source endpoints                                              |
+| ----------------- | ------------------------------------------------------------- |
+| **Dashboard**     | `/healthz`, `/agents`, `/events` — fleet counters, recent workflows, live tool/gate decisions |
+| **Radar**         | `/agents` — every detected/registered agent                   |
+| **Workflow**      | `/agents` (onboarding) + `/laminar/usage[/{id}]` (task execution) — each row deep-links to the Temporal Web UI |
+| **Token Monitor** | `/laminar/usage`, `/laminar/budgets`, `POST /laminar/reset/{id}` — per-agent usage/budget/cost, reset window, link to the Laminar dashboard |
 
-- **Agents** come from `GET /user/agents` — whatever agents the bundle exposes,
-  with their framework / model / tools / examples and live running state.
-- **Timeline** comes from `GET /user/status/...` which reads the task's Temporal
-  workflow history back: one item per activity the agent actually triggered. A
-  new step type the backend starts emitting renders automatically.
-- **Result / tools / governed writes** are whatever the agent returned.
+Everything rendered is **live data from the gateway** — nothing is hardcoded.
+
+## Decoupling contract
+
+This folder is a pure frontend: it only calls the gateway over HTTP. **Deleting
+`ui/` has zero effect on the backend** — no Python imports it, and the gateway's
+CORS is already open (`allow_origins=*` in `src/awcp/gateway/app.py`).
 
 ## Run
 
-Requires the gateway running on `:8000` (`./scripts/run_gateway.sh`).
+`scripts/run_everything.sh` starts this automatically on **:5173** with
+`VITE_API_BASE` pointed at the gateway. Standalone:
 
 ```bash
 cd ui
 npm install
-npm run dev          # http://localhost:5173
+npm run dev      # http://localhost:5173
 ```
 
-Point at a non-default gateway:
+## Configuration (Vite env vars, all optional)
 
-```bash
-VITE_API_BASE=http://localhost:8000 npm run dev
-```
-
-Production build (static files in `dist/`):
-
-```bash
-npm run build && npm run preview
-```
-
-## How it works
-
-```
-[React] --POST /user/submit-->   [Gateway] --start--> agent /tasks   (agent self-instruments OTel)
-[React] --GET  /user/status-->   [Gateway] --reads--> Temporal history (one activity per step)
-```
-
-The gateway never blocks the UI: `submit` returns immediately with ids, and the
-dashboard polls `status` ~once a second until the task settles. High-risk writes
-that pause for approval surface Approve / Deny buttons (proxied via
-`POST /user/approve/...`).
+| Var                  | Default                  | Purpose                          |
+| -------------------- | ------------------------ | -------------------------------- |
+| `VITE_API_BASE`      | `http://localhost:8000`  | AWCP gateway base URL            |
+| `VITE_TEMPORAL_BASE` | `http://localhost:8233`  | Temporal Web UI (workflow links) |
+| `VITE_LAMINAR_URL`   | `http://localhost:5667/` | Official Laminar dashboard link  |
+| `VITE_POLL_MS`       | `4000`                   | Live-refresh interval (ms)       |
