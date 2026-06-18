@@ -105,6 +105,34 @@ PROJECT_API_KEY: str = os.getenv("LMNR_PROJECT_API_KEY", "")
 OTLP_ENDPOINT: str = os.getenv("LMNR_OTLP_ENDPOINT", "https://api.lmnr.ai:8443")
 OTLP_PROTOCOL: str = os.getenv("LMNR_OTLP_PROTOCOL", "grpc").lower()
 
+
+def _default_http_endpoint() -> str:
+    """Derive the HTTP OTLP endpoint from the gRPC endpoint when not set.
+    Self-hosted docker-compose maps gRPC→:8881 and HTTP→:8880 (port-1 offset).
+    Cloud uses separate fixed ports (:8443 gRPC, :443 HTTP)."""
+    explicit = os.getenv("LMNR_OTLP_HTTP_ENDPOINT", "").strip()
+    if explicit:
+        return explicit
+    grpc = OTLP_ENDPOINT  # already resolved above
+    # Cloud endpoints — canonical HTTP base is api.lmnr.ai (port 443 implicit)
+    if "api.lmnr.ai" in grpc:
+        return "https://api.lmnr.ai"
+    # Self-hosted: gRPC port is HTTP port + 1 per the lmnr docker-compose convention
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(grpc)
+        if p.port:
+            return f"{p.scheme}://{p.hostname}:{p.port - 1}"
+    except Exception:
+        pass
+    return grpc  # last resort: same base, caller appends /v1/traces
+
+
+# HTTP OTLP endpoint — used both by the manual OTLP fallback and the per-request
+# Laminar exporter fan-out. Defaults to the gRPC endpoint with port-1 for
+# self-hosted (see _default_http_endpoint), or api.lmnr.ai for cloud.
+OTLP_HTTP_ENDPOINT: str = _default_http_endpoint()
+
 DEFAULT_TOKEN_BUDGET: int = _env_int("LMNR_TOKEN_BUDGET", "50000")
 RISK_TOKEN_BUDGET: dict[str, int] = _parse_risk_budget()
 BUDGET_WINDOW_S: float = _env_float("LMNR_BUDGET_WINDOW_S", "3600")

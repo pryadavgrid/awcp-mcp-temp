@@ -1043,6 +1043,97 @@ def register(req: RegisterRequest) -> dict:
     return _to_dict(saved)
 
 
+@app.post("/agents/announce")
+async def announce(req: RegisterRequest) -> dict:
+    """Agent-initiated onboarding (Option B announce path).
+
+    The agent calls this at startup instead of /agents/register.  Two
+    differences from /agents/register:
+      1. The REGISTRY entry is created with onboarding_state='pending' before
+         the Temporal workflow is queued, so the agent is immediately visible
+         in GET /agents and gate calls work from the first millisecond.
+      2. The Temporal workflow is started synchronously inside this request —
+         no wait for _onboarding_manager's 3-second poll cycle.
+    The response carries onboarding_workflow_id and temporal_url so the
+    caller can observe its own onboarding progress.
+    Falls back to inline onboarding when Temporal is unavailable.
+    """
+    agent_id = req.id or f"reg-{_slug(req.name)}"
+
+    # Check for a restart: same slug ID, new PID.  Patch liveness + reset
+    # onboarding state so the pipeline re-runs for the new process instance.
+    existing = REGISTRY.get(agent_id)
+    if existing:
+        REGISTRY.patch(agent_id, pid=req.pid, alive=True,
+                       last_seen=time.time(), onboarding_state=None,
+                       telemetry_enabled=False, policy_observed=False,
+                       flags_observed=False)
+        _record_event("announced", agent_id, f"{req.name} re-announced (restart)", risk=existing.risk)
+        log.info("radar.announce.restart agent_id=%s pid=%s", agent_id, req.pid)
+    else:
+        entry = AgentEntry(
+            id=agent_id,
+            name=req.name,
+            kind=req.kind,
+            framework=req.framework,
+            source="self",
+            pid=req.pid,
+            runtime=req.runtime,
+            version=req.version,
+            owner=req.owner,
+            endpoint=req.endpoint,
+            transport=req.transport,
+            control_endpoint=req.control_endpoint,
+            write_scopes=req.write_scopes,
+            feature_flags=req.feature_flags,
+            flags_observed=(bool(req.feature_flags) and not REQUIRE_OBSERVED_FLAGS),
+            policy_callbacks=req.policy_callbacks,
+            telemetry_enabled=(req.telemetry_enabled and not REQUIRE_OBSERVED_TELEMETRY),
+            policy_observed=(bool(req.policy_callbacks) and not REQUIRE_OBSERVED_POLICY),
+            risk=req.risk,
+            autonomy_ladder=req.autonomy_ladder,
+            failure_budget=req.failure_budget,
+            # Set pending immediately — _onboarding_manager skips entries that
+            # already have onboarding_state set, so there is no double-onboard.
+            onboarding_state="pending",
+        )
+        REGISTRY.register(entry)
+        _record_event("announced", agent_id, req.name, risk=req.risk)
+        log.info(
+            "radar.announce agent_id=%s name=%r framework=%s pid=%s",
+            agent_id, req.name, req.framework, req.pid,
+        )
+
+    # Start the Temporal onboarding workflow immediately (no poll cycle wait).
+    if STATE["temporal"] and STATE["client"] is not None:
+        pid_tag = f"-{req.pid}" if req.pid else ""
+        wf_id = f"onboard-{agent_id}{pid_tag}-{int(time.time())}"
+        try:
+            await STATE["client"].start_workflow(
+                AgentOnboardingWorkflow.run,
+                agent_id,
+                id=wf_id,
+                task_queue=TASK_QUEUE,
+            )
+            REGISTRY.patch(agent_id, onboarding_state="running",
+                           onboarding_workflow_id=wf_id)
+            log.info(
+                "radar.announce.temporal.started agent_id=%s workflow_id=%s",
+                agent_id, wf_id,
+            )
+        except Exception as exc:
+            log.warning(
+                "radar.announce.temporal.fallback agent_id=%s error=%r",
+                agent_id, exc,
+            )
+            await _onboard_inline(agent_id)
+    else:
+        log.debug("radar.announce.inline agent_id=%s (temporal unavailable)", agent_id)
+        await _onboard_inline(agent_id)
+
+    return _to_dict(REGISTRY.get(agent_id))
+
+
 # ----------------------------------------------------------------------
 # Write-action gate + degradation ladder (governance, ported from awcp_agents)
 # ----------------------------------------------------------------------

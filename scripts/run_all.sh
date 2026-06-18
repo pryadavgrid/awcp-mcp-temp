@@ -1,6 +1,6 @@
 #!/bin/bash
 # ======================================================================
-# AWCP temp2 — ONE-SHOT runner (registry + token monitoring & control).
+# AWCP temp3 — ONE-SHOT runner (registry + token monitoring & control).
 #
 # Brings up, in order:
 #   1. venv + dependencies                  (first run only; includes tiktoken for
@@ -37,16 +37,18 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 export PYTHONPATH="$ROOT/src"
+# Load .env if present — set LMNR_PROJECT_API_KEY, LMNR_* overrides, etc.
+[ -f .env ] && set -a && source .env && set +a
 export OTEL_ENABLED="${OTEL_ENABLED:-true}"
 RADAR_PORT="${RADAR_PORT:-8090}"
-LOGDIR="${TMPDIR:-/tmp}/awcp-temp2-run"; mkdir -p "$LOGDIR"
+LOGDIR="${TMPDIR:-/tmp}/awcp-temp3-run"; mkdir -p "$LOGDIR"
 TEMPORAL_PID=""; MCP_PID=""; AGENT_SVC_PID=""; WORKER_PID=""; CTRL_SVC_PID=""
 
 # Namespaced Temporal queues (overridable): two radars on one Temporal dev
 # server must NOT share queue names, or one worker steals (and fails) the
-# other's workflows. These defaults keep temp2 isolated.
-export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-temp2-radar-onboarding}"
-export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-temp2-task-execution}"
+# other's workflows. These defaults keep temp3 isolated.
+export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-temp3-radar-onboarding}"
+export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-temp3-task-execution}"
 
 # Point awcp.laminar's OTLP exporter at the self-hosted Laminar stack (started
 # by the Docker compose below). Override to keep using Laminar cloud instead:
@@ -66,6 +68,29 @@ except Exception:
     pass
 PY
 }
+
+# Return the working directory of the listener on a given port (macOS lsof).
+_port_pid(){  lsof -ti :"$1" 2>/dev/null | head -1; }
+_pid_cwd(){   lsof -p "$1" 2>/dev/null | awk '/cwd/{print $NF}' | head -1; }
+
+# Kill any process on PORT whose cwd is NOT this ROOT.
+# No-op if the port is free or already owned by us.
+ensure_ours(){
+  local port=$1
+  local pid; pid=$(_port_pid "$port") || true
+  [ -z "$pid" ] && return 0
+  local cwd; cwd=$(_pid_cwd "$pid")
+  [ "$cwd" = "$ROOT" ] && return 0
+  warn "Port :$port occupied by foreign process PID=$pid (${cwd:-unknown}) — evicting…"
+  kill -9 "$pid" 2>/dev/null || true
+  sleep 0.5
+}
+
+# ── pre-flight: evict any stale processes from other directories ──────────────
+# Temporal (:7233/:8233) is shared — never evict it.
+# Docker ports are owned by Docker Desktop — never evict them.
+for _p in 8090 8001 8002 8003; do ensure_ours "$_p"; done
+unset _p
 
 cleanup(){
   echo
@@ -191,7 +216,9 @@ if [ "${DEMO:-0}" = "1" ]; then
     for i in $(seq 1 60); do curl -sf "$B/healthz" >/dev/null 2>&1 && break; sleep 1; done
     curl -sf "$B/healthz" >/dev/null 2>&1 || exit 0
     sleep 1
-    curl -s -X POST "$B/agents/register" -H 'content-type: application/json' -d '{
+    # Use /agents/announce so the demo agent is onboarded instantly via Temporal
+    # (same as a real awcp_kit agent would do) rather than waiting for the scanner.
+    curl -s -X POST "$B/agents/announce" -H 'content-type: application/json' -d '{
       "name":"demo-writer","kind":"agent_framework","framework":"langgraph","risk":"high",
       "telemetry_enabled":true,"feature_flags":{"governed_writes":true},
       "policy_callbacks":["'"$B"'/agents/reg-demo-writer/gate"]}' >/dev/null
@@ -216,8 +243,9 @@ fi
 
 # ── 9. the Agent Radar (foreground) ───────────────────────────────────
 echo
-echo "  ── AWCP temp2 — full stack ────────────────────────────────────"
+echo "  ── AWCP temp3 — full stack (agent-announce onboarding) ────────────────────────────────────"
 echo "     Registry / radar  : http://localhost:${RADAR_PORT}"
+echo "     Announce endpoint : http://localhost:${RADAR_PORT}/agents/announce  (instant Temporal onboarding)"
 echo "     Token monitor     : http://localhost:${RADAR_PORT}/laminar/ui"
 echo "     LLM gateway       : http://localhost:${RADAR_PORT}/llm   (pre-execution budget gate)"
 echo "     Agent service     : http://localhost:8001  (direct REST + /docs)"

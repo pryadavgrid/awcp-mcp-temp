@@ -140,6 +140,21 @@ def on_execution_start(payload: dict) -> None:
         }
 
 
+def _gen_ai_system(model: str) -> str:
+    """Derive gen_ai.system from a model name — best-effort, no hardcoded list."""
+    m = (model or "").lower()
+    if "gpt" in m or "o1" in m or "o3" in m or "o4" in m or "openai" in m:
+        return "openai"
+    if "claude" in m or "anthropic" in m:
+        return "anthropic"
+    if "gemini" in m or "google" in m:
+        return "google_ai_studio"
+    if "llama" in m or "mistral" in m or "qwen" in m or "deepseek" in m or "ollama" in m:
+        return "ollama"
+    # provider/model format (e.g. "groq/llama3")
+    return model.split("/")[0] if "/" in model else model or "unknown"
+
+
 def _extract_tokens(event: dict) -> tuple[int, int]:
     """Taxonomy-free token extraction: look in event['extra'] first (the schema's
     open extension point), then at the top level; accept the common aliases."""
@@ -211,6 +226,11 @@ def on_execution_event(task_id: str, event: dict) -> dict | None:
                     rec["trace_id"] = format(ctx.trace_id, "032x")
                     rec["span_id"] = format(ctx.span_id, "016x")
                 for k, v in {
+                    # lmnr.span.type = "LLM" tells Laminar's native dashboard
+                    # to render this span in its LLM-specific views with token
+                    # counts, cost breakdown, and model attribution.
+                    "lmnr.span.type": "LLM",
+                    "gen_ai.system": _gen_ai_system(model),
                     "awcp.agent.id": agent_id,
                     "awcp.task.id": task_id,
                     "awcp.step": step,

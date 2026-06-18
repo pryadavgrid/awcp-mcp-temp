@@ -126,7 +126,7 @@ class AgentEntry(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    """Body for POST /agents/register (self-registration webhook)."""
+    """Body for POST /agents/register and POST /agents/announce."""
 
     name: str
     kind: str = KIND_AGENT_FRAMEWORK
@@ -146,4 +146,5 @@ class RegisterRequest(BaseModel):
     autonomy_ladder: list[str] = Field(default_factory=list)
     failure_budget: int | None = None
     id: str | None = None
+    pid: int | None = None              # agent's own os.getpid() (announce path)
     extra: dict[str, Any] = Field(default_factory=dict)
