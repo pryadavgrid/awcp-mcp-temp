@@ -41,12 +41,43 @@
 #          UI_PORT=5173       React UI (Vite) port
 #          AWCP_AGENTS_DIR=…  external agent bundle (default: Downloads bundle)
 #          LMNR_PROJECT_API_KEY=…   also dual-export spans to Laminar
+#          LMNR_OTLP_ENDPOINT=…     Laminar OTLP ingest (default: self-hosted
+#                                   http://localhost:8881; use
+#                                   https://api.lmnr.ai:8443 for Laminar Cloud)
 # ======================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+
+# Load .env (if present) so secrets like LMNR_PROJECT_API_KEY are picked up
+# without exporting them by hand. Lines are KEY=VALUE; blank lines, comments and
+# an optional leading `export ` are tolerated, surrounding quotes stripped. A
+# value already in the environment wins, so `LMNR_PROJECT_API_KEY=… bash …`
+# still overrides the file.
+if [ -f "$ROOT/.env" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#export }"
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    case "$line" in *=*) ;; *) continue ;; esac     # skip lines without '='
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+    [ -z "${!key:-}" ] && export "$key=$val"
+  done < "$ROOT/.env"
+fi
+
 export PYTHONPATH="$ROOT/src"
 export OTEL_ENABLED="${OTEL_ENABLED:-true}"
+
+# Laminar OTLP ingest. Default to the SELF-HOSTED lmnr docker stack (the
+# lmnr-app-server container maps gRPC→:8881 and HTTP→:8880; dashboard at
+# http://localhost:5667) so spans + token usage land on the LOCAL Laminar
+# rather than the cloud. The exporter derives the HTTP endpoint (:8880) from
+# this automatically. Override for Laminar Cloud:
+#   LMNR_OTLP_ENDPOINT=https://api.lmnr.ai:8443 bash scripts/run_everything.sh
+export LMNR_OTLP_ENDPOINT="${LMNR_OTLP_ENDPOINT:-http://localhost:8881}"
+
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 UI_PORT="${UI_PORT:-5173}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-everything-run"; mkdir -p "$LOGDIR"

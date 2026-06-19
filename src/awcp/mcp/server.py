@@ -474,6 +474,10 @@ def list_runtime_tools() -> str:
                 "description": inspect.getdoc(handler) or "",
                 "parameters": parameters,
                 "required": required,
+                # Governance metadata so a discovering agent knows which tools are
+                # writes (and need operator approval) before it calls execute_tool.
+                "risk": get_tool_risk(name),
+                "scope": get_tool_scope(name),
             }
         )
 

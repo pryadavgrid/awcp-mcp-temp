@@ -77,6 +77,13 @@ def _attach_via_lmnr_sdk() -> bool:
     parsed_http = urlparse(config.OTLP_HTTP_ENDPOINT)
     http_port = parsed_http.port or (443 if (parsed_http.scheme or "https") == "https" else 8880)
 
+    # A plaintext http:// endpoint means a SELF-HOSTED Laminar without TLS (the
+    # lmnr docker stack: app-server gRPC→:8881, HTTP→:8880). The SDK's default
+    # gRPC exporter assumes TLS, so against a plaintext server it silently drops
+    # every span. Force the HTTP OTLP exporter instead — the app-server accepts
+    # OTLP/HTTP at :8880/v1/traces. Laminar Cloud (https) keeps the gRPC path.
+    force_http = (parsed.scheme or "https") == "http"
+
     # Creates lmnr_provider + installs LLM instrumentors. Does NOT replace the
     # global TracerProvider because setup_otel() already set a real SDK provider
     # (lmnr only replaces a ProxyTracerProvider).
@@ -85,7 +92,9 @@ def _attach_via_lmnr_sdk() -> bool:
         base_url=base_url,
         grpc_port=grpc_port,
         http_port=http_port,
+        force_http=force_http,
     )
+    log.info("laminar.exporter.lmnr_init endpoint=%s force_http=%s", base_url, force_http)
 
     # Add a Laminar HTTP exporter to the GLOBAL provider so the radar's manual
     # spans (bridge.py's laminar.token.usage) also appear in Laminar.

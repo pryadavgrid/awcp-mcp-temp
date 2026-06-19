@@ -1,9 +1,9 @@
 {
-  "name": "awcp-agent-console",
+  "name": "awcp-dashboard",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "AWCP Agent Console — React dashboard for the AWCP gateway (select an agent, run a prompt, watch the live step timeline). Self-contained: delete this folder and the backend is unaffected.",
+  "description": "AWCP Dashboard — React + Tailwind control-plane UI for the AWCP gateway (Dashboard / Radar / Workflow / Token Monitor). Self-contained: it only calls the gateway over HTTP, so deleting this folder has no effect on the backend.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -15,6 +15,9 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
     "vite": "^5.4.11"
   }
 }
