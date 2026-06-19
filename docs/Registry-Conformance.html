@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AWCP Registry — Conformance to the Canonical Schema</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --muted:#555; --faint:#777; --rule:#d8d8d2;
+    --accent:#7a1f1f;            /* oxblood — section markers / links */
+    --code-bg:#f5f3ee; --code-ink:#33312c;
+    --paper:#ffffff; --tint:#faf9f6;
+    --ok:#1f6b34; --warn:#8a5a00; --note:#3a4a7a;
+  }
+  *{box-sizing:border-box}
+  html{font-size:17px}
+  body{
+    margin:0; background:#ece9e2; color:var(--ink);
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    line-height:1.62; -webkit-font-smoothing:antialiased;
+  }
+  /* the "sheet of paper" */
+  .paper{
+    max-width:820px; margin:40px auto 80px; background:var(--paper);
+    padding:72px 84px; border:1px solid #ddd9cf;
+    box-shadow:0 1px 2px rgba(0,0,0,.06), 0 18px 50px rgba(0,0,0,.10);
+  }
+  @media (max-width:680px){ .paper{padding:40px 26px; margin:0} html{font-size:16px} }
+
+  /* masthead */
+  .masthead{ text-align:center; border-bottom:2px solid var(--ink); padding-bottom:22px; margin-bottom:8px }
+  .eyebrow{ font-variant:small-caps; letter-spacing:.18em; font-size:.74rem; color:var(--accent); font-weight:600 }
+  h1{ font-size:2.05rem; line-height:1.18; margin:.32em 0 .18em; font-weight:600; letter-spacing:-.01em }
+  .subtitle{ color:var(--muted); font-style:italic; font-size:1.02rem; margin:0 auto; max-width:46em }
+  .meta-line{ margin-top:16px; font-size:.78rem; color:var(--faint); font-variant:small-caps; letter-spacing:.08em }
+  .meta-line span{ margin:0 .5em }
+
+  /* abstract */
+  .abstract{ background:var(--tint); border:1px solid var(--rule); border-left:3px solid var(--accent);
+    padding:18px 22px; margin:30px 0; font-size:.96rem }
+  .abstract h2{ all:unset; display:block; font-variant:small-caps; letter-spacing:.12em; font-size:.78rem;
+    color:var(--accent); font-weight:700; margin-bottom:6px }
+
+  /* headings */
+  h2.sec{ font-size:1.3rem; margin:2.4em 0 .2em; padding-bottom:.18em; border-bottom:1px solid var(--rule);
+    font-weight:600; letter-spacing:-.01em }
+  h2.sec .num{ color:var(--accent); font-weight:700; margin-right:.5em; font-variant-numeric:tabular-nums }
+  h3.sub{ font-size:1.06rem; margin:1.7em 0 .3em; font-weight:600 }
+  h3.sub .step{ color:var(--accent); font-variant:small-caps; letter-spacing:.06em; font-size:.82rem; margin-right:.5em }
+
+  p{ margin:.7em 0 }
+  .lead{ font-size:1.05rem }
+
+  /* links */
+  a{ color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(122,31,31,.3) }
+  a:hover{ border-bottom-color:var(--accent) }
+
+  /* code */
+  code{ font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; font-size:.85em;
+    background:var(--code-bg); color:var(--code-ink); padding:.06em .38em; border-radius:3px;
+    border:1px solid #e7e3da }
+  pre{ background:var(--code-bg); border:1px solid #e7e3da; border-radius:5px; padding:14px 16px;
+    overflow:auto; font-size:.82rem; line-height:1.5 }
+  pre code{ background:none; border:none; padding:0 }
+
+  /* tables */
+  table{ border-collapse:collapse; width:100%; margin:1.1em 0; font-size:.9rem }
+  caption{ caption-side:top; text-align:left; font-style:italic; color:var(--muted);
+    font-size:.84rem; margin-bottom:.5em }
+  th,td{ text-align:left; vertical-align:top; padding:8px 11px; border-bottom:1px solid var(--rule) }
+  thead th{ border-bottom:2px solid var(--ink); font-variant:small-caps; letter-spacing:.05em; font-size:.82rem }
+  tbody tr:nth-child(even){ background:var(--tint) }
+
+  /* lists */
+  ul,ol{ margin:.6em 0 .6em 0; padding-left:1.3em }
+  li{ margin:.32em 0 }
+  ul.tight li{ margin:.16em 0 }
+
+  /* status badges */
+  .badge{ display:inline-block; font-family:ui-sans-serif,system-ui,sans-serif; font-size:.66rem;
+    font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:2px 8px; border-radius:3px;
+    vertical-align:middle; margin-left:.4em }
+  .badge.done{ background:#e6f0e8; color:var(--ok); border:1px solid #b7d6bf }
+  .badge.note{ background:#e9edf6; color:var(--note); border:1px solid #c2cce4 }
+
+  /* callouts */
+  .callout{ border:1px solid var(--rule); border-left:3px solid var(--note); background:#f7f8fb;
+    padding:12px 16px; margin:1em 0; font-size:.92rem }
+  .callout.warn{ border-left-color:var(--warn); background:#fbf8f0 }
+  .callout .tag{ font-variant:small-caps; letter-spacing:.08em; font-weight:700; font-size:.74rem;
+    color:var(--note); display:block; margin-bottom:3px }
+  .callout.warn .tag{ color:var(--warn) }
+
+  /* TOC */
+  nav.toc{ background:var(--tint); border:1px solid var(--rule); padding:16px 22px; margin:26px 0 }
+  nav.toc h2{ all:unset; display:block; font-variant:small-caps; letter-spacing:.12em; font-size:.78rem;
+    color:var(--accent); font-weight:700; margin-bottom:8px }
+  nav.toc ol{ margin:0; padding-left:1.4em; font-size:.92rem; columns:2; column-gap:34px }
+  nav.toc a{ border:none } nav.toc a:hover{ border-bottom:1px solid var(--accent) }
+
+  hr.rule{ border:none; border-top:1px solid var(--rule); margin:2.4em 0 }
+  .small{ font-size:.85rem; color:var(--muted) }
+  footer{ margin-top:3em; padding-top:1.2em; border-top:1px solid var(--rule);
+    font-size:.8rem; color:var(--faint); text-align:center; font-variant:small-caps; letter-spacing:.06em }
+  .arrow{ font-style:normal }
+</style>
+</head>
+<body>
+<article class="paper">
+
+  <header class="masthead">
+    <div class="eyebrow">AWCP · Technical Conformance Report</div>
+    <h1>The Agent Radar Registry and its Conformance to the Canonical Control-Plane Schema</h1>
+    <p class="subtitle">Aligning the temp3 Agent Radar's durable state with the absolute
+      <code>observability/init-db</code> schema and the governance model of the
+      Agent Workforce Control Plane Magazine.</p>
+    <div class="meta-line">
+      <span>Branch <code>awcp-registry-updated</code></span>·
+      <span>Eight steps · all complete</span>·
+      <span>Status: verified &amp; committed</span>
+    </div>
+  </header>
+
+  <section class="abstract">
+    <h2>Abstract</h2>
+    <p>This report records how the temporary <em>Agent Radar</em> (temp3) was migrated from
+    ad-hoc, file-based persistence to the <strong>canonical AWCP control-plane schema</strong>
+    defined in <code>observability/init-db</code>. That schema is treated as the absolute
+    source of truth; the application is permitted only to read and write it, never to create or
+    alter it. The work proceeded in eight steps — registry persistence, durable governance
+    events, an operator approval gate, closed-loop onboarding hooks, a token ledger, crash and
+    onboarding journals, least-privilege roles with partition maintenance, and a wired launcher
+    — each validated against a live Postgres carrying the schema and each mapped to the
+    vocabulary of the <em>Agent Workforce Control Plane Magazine</em>. Throughout, the radar
+    retains a <strong>fail-open</strong> posture: with no database reachable it falls back to
+    its prior in-memory / JSON behaviour, so adoption never makes the control plane worse.</p>
+  </section>
+
+  <nav class="toc">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#premise">Premise &amp; governance model</a></li>
+      <li><a href="#schema">The canonical schema</a></li>
+      <li><a href="#registry">Registry persistence</a></li>
+      <li><a href="#s1">Step 1 — Durable governance events</a></li>
+      <li><a href="#s2">Step 2 — Approval gate</a></li>
+      <li><a href="#s3">Step 3 — Closed-loop hooks &amp; TTL</a></li>
+      <li><a href="#s4">Step 4 — Token ledger</a></li>
+      <li><a href="#s5">Step 5 — Freeze &amp; onboarding journals</a></li>
+      <li><a href="#s6">Step 6 — Least privilege &amp; partitions</a></li>
+      <li><a href="#s7">Step 7 — Launch wiring</a></li>
+      <li><a href="#s8">Step 8 — Tests</a></li>
+      <li><a href="#remaining">Remaining items</a></li>
+    </ol>
+  </nav>
+
+  <!-- 1 -->
+  <h2 class="sec" id="premise"><span class="num">1.</span>Premise &amp; governance model</h2>
+  <p class="lead">This is a living conformance record for aligning the temp3 Agent Radar with the
+  <strong>absolute</strong> AWCP control-plane schema shipped in <code>observability/init-db</code> —
+  the concrete form of the governance model described in
+  <a href="./Agent-Workforce-Control-Plane-Magazine.html">Agent-Workforce-Control-Plane-Magazine.html</a>.</p>
+  <p>The magazine defines the durable governance surface as an <strong>Evidence Ledger</strong>
+  — <em>“workflow identity, actor, policy result, approval token, tool call, context snapshot
+  hash, degradation state, replay trace, rollback pointer”</em> — complemented by
+  <strong>Approval Tokens</strong> for gated writes and <strong>Graceful Degradation</strong>
+  for autonomy reduction. The canonical Postgres schema is precisely that surface made concrete.
+  Conformance therefore reduces to a single principle: <em>route the radar's state onto these
+  canonical tables rather than onto ad-hoc ones.</em></p>
+
+  <!-- 2 -->
+  <h2 class="sec" id="schema"><span class="num">2.</span>The canonical schema</h2>
+  <p>Source of truth: <code>observability/init-db/02-schema.sql</code>. Four schemas partition the
+  control plane's durable state by concern:</p>
+  <table>
+    <caption>Table&nbsp;1 — Canonical schemas and their tables.</caption>
+    <thead><tr><th>Schema</th><th>Tables</th><th>Concern</th></tr></thead>
+    <tbody>
+      <tr><td><code>registry</code></td><td><code>agents</code>, <code>freeze_journal</code>, <code>gateway_agents</code></td><td>Who exists, who is frozen, who is gatewayed</td></tr>
+      <tr><td><code>governance</code></td><td><code>approval_tokens</code>, <code>policy_decisions</code> <span class="small">(partitioned)</span>, <code>degradation_events</code> <span class="small">(partitioned)</span></td><td>Approvals, gate decisions, autonomy reduction</td></tr>
+      <tr><td><code>evidence</code></td><td><code>token_ledger</code> <span class="small">(partitioned)</span>, <code>ledger</code> <span class="small">(partitioned, hash-chained)</span></td><td>Append-only audit &amp; token/cost trail</td></tr>
+      <tr><td><code>ops</code></td><td><code>onboarding_runs</code>, <code>artifacts</code></td><td>Onboarding workflow state, stored artifacts</td></tr>
+    </tbody>
+  </table>
+  <div class="callout">
+    <span class="tag">Ownership invariant</span>
+    The schema is owned by <code>init-db</code> — psql scripts that run once on a fresh volume —
+    <strong>not</strong> by Alembic and <strong>not</strong> by the application. Application code
+    only reads and writes; it never issues <code>CREATE</code> or <code>ALTER</code>. The one
+    exception, monthly partition creation, is performed through a separate admin connection
+    (see <a href="#s6">§9</a>).
+  </div>
+
+  <!-- registry persistence -->
+  <h2 class="sec" id="registry"><span class="num">3.</span>Registry persistence <span class="badge done">Done</span></h2>
+  <p><code>src/awcp/radar/store.py</code> mirrors the live registry to <code>registry.agents</code>
+  instead of the local JSON file. The mapping between the Pydantic model and the SQL columns is
+  handled explicitly:</p>
+  <ul>
+    <li><code>AgentEntry.user</code> <span class="arrow">→</span> the <code>os_user</code> column;</li>
+    <li>epoch <code>float</code> timestamps <span class="arrow">↔</span> <code>timestamptz</code>
+      (via <code>to_timestamp()</code> on write, <code>EXTRACT(EPOCH …)</code> on read);</li>
+    <li>Python lists and dicts <span class="arrow">↔</span> <code>text[]</code> and <code>jsonb</code>.</li>
+  </ul>
+  <p>The JSON file remains a <strong>fail-open fallback</strong> whenever no database is reachable,
+  and — matching the prior contract — only <code>source='self'</code> entries survive a restart;
+  scanned processes are re-detected live. A full-sync on persist upserts the in-memory set and
+  prunes rows no longer present.</p>
+
+  <!-- 1 -->
+  <h2 class="sec" id="s1"><span class="num">4.</span>Step 1 — Durable governance events <span class="badge done">Done</span></h2>
+  <p><code>src/awcp/radar/db.py</code> no longer uses a flat <code>governance_events</code> table;
+  that table, <code>alembic.ini</code>, and <code>migrations/</code> were all removed. The
+  audit-worthy subset of events is now routed, by kind, to the canonical tables:</p>
+  <table>
+    <caption>Table&nbsp;2 — Event routing, expressed in the magazine's vocabulary.</caption>
+    <thead><tr><th>Magazine concept</th><th>Event kinds</th><th>Canonical table</th></tr></thead>
+    <tbody>
+      <tr><td>Gate Write Actions <span class="small">(denial)</span></td><td><code>gate_denied</code></td><td><code>governance.policy_decisions</code></td></tr>
+      <tr><td>Graceful Degradation</td><td><code>degraded</code>, <code>autonomy</code></td><td><code>governance.degradation_events</code></td></tr>
+      <tr><td>Evidence Ledger</td><td><code>approved</code>, <code>scope_added</code>, <code>scope_removed</code>, <code>registered</code>, <code>announced</code>, <code>removed</code>, <code>hook_stale</code>, <code>telemetry_observed</code>, <code>policy_observed</code>, <code>flags_observed</code>, <code>token_hard_stop</code>, <code>token_remote_stop</code>, <code>token_recover</code>, <code>gateway_bypass</code></td><td><code>evidence.ledger</code></td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Data-driven routing.</strong> A <code>_ROUTE</code> dictionary plus a default table;
+      adding a route is one entry, not a new branch. Nothing about the connection (host, port,
+      credentials) or table names is hardcoded outside <code>db.py</code> — the URL comes from
+      <code>AGENT_RADAR_DATABASE_URL</code>.</li>
+    <li><strong>Hash-chained evidence.</strong> Each <code>evidence.ledger</code> row stores
+      <code>prev_hash</code> (the previous row's hash) and <code>row_hash</code>
+      (<code>sha256(prev_hash + canonical row body)</code>), giving a tamper-evident, append-only
+      trail exactly as the magazine prescribes.</li>
+    <li><strong>NOT NULL columns honoured.</strong> <code>evidence.ledger.workflow_id</code> falls
+      back to the agent id when an event carries no workflow; <code>policy_decisions.tool_call</code>
+      and <code>decision</code> are always supplied. The numeric columns
+      <code>policy_decisions.risk</code> and <code>degradation_events.trace_sampling</code> are left
+      <code>NULL</code> — the risk <em>tier</em> string lives in the jsonb payload, not the numeric
+      column.</li>
+    <li><strong>Full context preserved.</strong> Every row's <code>payload</code> jsonb carries the
+      complete event; typed columns are populated best-effort (e.g. <code>to_profile</code> parsed
+      from the degraded detail). The original kind is stashed under <code>payload._kind</code> so
+      the unified audit read can recover it.</li>
+    <li><strong>Unchanged public API.</strong> <code>GET /events/audit</code> reads a
+      <code>UNION ALL</code> across the three tables and returns the same
+      <code>{ts, agent_id, event_type, payload}</code> shape as before.</li>
+    <li><strong>Fail-open.</strong> If the URL is unset or the schema is unreachable, durable
+      logging switches off and the radar runs on its in-memory ring (<code>GET /events</code>).</li>
+  </ul>
+
+  <!-- 2 -->
+  <h2 class="sec" id="s2"><span class="num">5.</span>Step 2 — Approval gate <span class="badge done">Done</span></h2>
+  <p>The operator gate for scope expansion is now durably backed by
+  <code>governance.approval_tokens</code> — the magazine's <em>“New write scopes … Human
+  approval.”</em></p>
+  <ul>
+    <li><strong>Scope add.</strong> A <code>/agents/register</code> call carrying new
+      <code>write_scopes</code> creates a <code>pending</code> token:
+      <code>action_class='scope_expansion'</code>, the new <code>write_scopes</code>,
+      <code>context_diff = {added, previous, new}</code>, and
+      <code>expires_at = now() + AGENT_RADAR_APPROVAL_TTL</code> (default 7 days, env-configurable).
+      It is inserted <em>after</em> the agent is persisted so the <code>agent_id</code> foreign key
+      to <code>registry.agents</code> holds.</li>
+    <li><strong>Approve.</strong> <code>POST /agents/{id}/approve</code> sets the open token(s) to
+      <code>status='approved'</code> with <code>decided_by</code> / <code>decided_at</code>, so the
+      gate does not re-arm.</li>
+    <li><strong>Restart rehydrate.</strong> Because <code>registry.agents</code> has no approval
+      column, the radar re-arms the in-memory gate on startup from any unexpired <code>pending</code>
+      tokens (<code>open_approval_agent_ids()</code>), restoring the cross-restart durability that
+      was lost when the registry moved off JSON.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag">temp3 tailoring</span>
+    <code>AgentEntry.approval_state</code> is <strong>kept</strong> as the live runtime gate so the
+    gate also works with no database; the token table is its durable backing and restart source of
+    truth. Canonical <code>status</code> CHECK values are honoured (<code>approved</code> /
+    <code>denied</code>); the numeric <code>risk</code> column is left <code>NULL</code>.
+  </div>
+
+  <!-- 3 -->
+  <h2 class="sec" id="s3"><span class="num">6.</span>Step 3 — Closed-loop hooks &amp; TTL reconciler <span class="badge done">Done</span></h2>
+  <p>With <code>last_*_ts</code> now persisted in <code>registry.agents</code>, the closed loop was
+  verified end-to-end and autonomy degradation was completed into
+  <code>governance.degradation_events</code>.</p>
+  <h3 class="sub"><span class="step">Gap 3</span>Observation flips — the bit is earned, not declared</h3>
+  <ul class="tight">
+    <li>policy <span class="arrow">←</span> a <code>/agents/{id}/gate</code> call (<code>_observe_policy</code>);</li>
+    <li>telemetry <span class="arrow">←</span> an execution <code>signal</code> / <code>tasks/execution</code> event (<code>_observe_telemetry</code>);</li>
+    <li>flags <span class="arrow">←</span> an execution event carrying flag state (<code>_observe_flags</code>).</li>
+  </ul>
+  <p>Defaults <code>AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY/POLICY=true</code> (flags <code>false</code>)
+  are stricter than the README's all-off dev default, but match the magazine's onboarding gate —
+  <em>declared <strong>and</strong> observed in execution.</em> Verified: a fresh agent stays
+  quarantined until both a gate call and a signal are seen, then becomes active, with
+  <code>last_policy_ts</code> / <code>last_telemetry_ts</code> persisted.</p>
+  <h3 class="sub"><span class="step">Gap 4</span>TTL reconciler</h3>
+  <p><code>_telemetry_reconciler</code> drops a proven hook that goes silent past
+  <code>AGENT_RADAR_TELEMETRY_TTL</code> and re-quarantines the agent, emitting <code>hook_stale</code>
+  <span class="arrow">→</span> <code>evidence.ledger</code>.</p>
+  <h3 class="sub"><span class="step">Conformance fix</span>Degradation transitions</h3>
+  <p>Autonomy-ladder downgrades now record full transitions. The three emit sites pass
+  <code>from_profile</code> / <code>to_profile</code> / <code>trigger</code>
+  (<code>token_budget</code>, <code>failure_budget</code>, <code>operator</code>) so rows are complete
+  per the magazine's from→to model. Verified: <code>active → trace_boost</code>,
+  <code>trigger=failure_budget</code>.</p>
+  <div class="callout">
+    <span class="tag">Deliberate simplifications</span>
+    A single <code>AGENT_RADAR_TELEMETRY_TTL</code> governs all three hooks (the README split it into
+    per-hook TTLs); one TTL is sufficient and simpler. And <code>hook_stale</code> — a re-quarantine,
+    i.e. a trust/status change — routes to <code>evidence.ledger</code>, not
+    <code>degradation_events</code>, which is reserved for autonomy-profile downgrades.
+  </div>
+
+  <!-- 4 -->
+  <h2 class="sec" id="s4"><span class="num">7.</span>Step 4 — Token ledger <span class="badge done">Done</span></h2>
+  <p>The laminar <code>TokenLedger</code> keeps its live sliding-window and lifetime view in memory —
+  the monitoring half, unchanged — while each call is now also mirrored to
+  <code>evidence.token_ledger</code>, the magazine's Evidence Ledger token trail.</p>
+  <ul>
+    <li><code>TokenLedger.record()</code> calls a new <code>_append_db()</code> alongside the existing
+      JSONL seam <span class="arrow">→</span> <code>db.record_token_usage()</code> inserts
+      <code>{ts, agent_id, task_id, step, model, input_tokens, output_tokens, cost}</code> with the
+      real call timestamp.</li>
+    <li>A lazy import of <code>awcp.radar.db</code> from <code>awcp.laminar.ledger</code> keeps laminar
+      decoupled from the radar DB layer — no import cycle.</li>
+    <li><code>evidence</code> is append-only by GRANT, so this is INSERT-only. Fail-open: a no-op when
+      no DB is reachable; the in-memory view and budgets are unaffected.</li>
+  </ul>
+
+  <!-- 5 -->
+  <h2 class="sec" id="s5"><span class="num">8.</span>Step 5 — Freeze &amp; onboarding journals <span class="badge done">Done</span></h2>
+  <ul>
+    <li><strong><code>registry.freeze_journal</code>.</strong> <code>_journal_set</code> /
+      <code>_journal_clear</code> now dual-write to the canonical table
+      (<code>record_freeze</code> / <code>clear_freeze</code>, <code>kind ∈ process|remote</code>).
+      The local JSON journal stays the <strong>crash-recovery source</strong> — readable even when the
+      DB is down, which is the more robust choice for restart repair; the table is the queryable
+      mirror.</li>
+    <li><strong><code>ops.onboarding_runs</code>.</strong> <code>record_onboarding_run</code> upserts
+      run state keyed by <code>workflow_id</code>: a Temporal start records <code>running</code> (real
+      workflow id); inline completion records <code>done</code> and stamps <code>finished_at</code>,
+      keyed by the real id or a stable <code>inline-&lt;agent&gt;</code> key.
+      <code>state ∈ pending|running|done</code>.</li>
+  </ul>
+  <div class="callout">
+    <span class="tag">Known gap (documented)</span>
+    The Temporal onboarding <em>worker</em> marks its run <code>done</code> elsewhere; this file
+    records the <code>running</code> start, so a Temporal run shows <code>running</code> until that
+    worker path is wired. The common inline path is fully recorded.
+  </div>
+
+  <!-- 6 -->
+  <h2 class="sec" id="s6"><span class="num">9.</span>Step 6 — Least privilege &amp; partition maintenance <span class="badge done">Done</span></h2>
+  <ul>
+    <li><strong>Least privilege.</strong> The application connects as <code>awcp_app</code> — the DML
+      role from <code>init-db/01-roles.sql</code> — not the superuser. This makes the canonical
+      guarantees real: it was verified that <code>awcp_app</code> is <em>denied</em>
+      <code>DELETE</code>/<code>UPDATE</code> on <code>evidence.*</code> (append-only) and
+      <em>denied</em> DDL. A separate <code>AGENT_RADAR_DB_ADMIN_URL</code> (the owner) is used
+      <em>only</em> for partition DDL at startup. Both URLs default to the init-db credentials and are
+      fully env-overridable.</li>
+    <li><strong>Partition maintenance.</strong> <code>ensure_partitions()</code> runs at
+      <code>init()</code> through the admin connection and creates the current plus
+      <code>AGENT_RADAR_PARTITION_MONTHS_AHEAD</code> (default 2) monthly partitions
+      <code>IF NOT EXISTS</code> for all four partitioned tables, so inserts never hit a missing
+      partition across a month boundary. Dates and identifiers are computed from a fixed internal
+      list, never user input. Best-effort: a warning, not a crash, if the role cannot issue DDL.</li>
+  </ul>
+  <p class="small">Verified: the app runs fully as <code>awcp_app</code>; partitions
+  <code>2026_06 / 07 / 08</code> were auto-created.</p>
+
+  <!-- 7 -->
+  <h2 class="sec" id="s7"><span class="num">10.</span>Step 7 — Launch wiring <span class="badge done">Done</span></h2>
+  <ul>
+    <li><code>run_everything.sh</code> now starts the canonical <code>postgres</code> service with the
+      rest of the stack and <strong>waits for it to be ready</strong> (<code>pg_isready</code>, up to
+      30&nbsp;s) before the gateway — so the registry persists to <code>registry.agents</code> from the
+      first request rather than falling back to JSON. Non-fatal: if Postgres never comes up, the radar
+      still runs fail-open.</li>
+    <li>The stale ad-hoc <code>awcp-postgres</code> container (<code>:5434</code>, no schema) and its
+      orphaned volume were removed; the compose now owns a single <code>postgres</code> on
+      <code>:5432</code> with the init-db schema.</li>
+  </ul>
+  <p class="small">Verified end-to-end against the real compose instance: the schema auto-applied (all
+  four schemas), the app connected as <code>awcp_app</code>, the registry persisted, and partitions
+  were present. The test volume was wiped so the first real launch gets a clean init-db apply.</p>
+
+  <!-- 8 -->
+  <h2 class="sec" id="s8"><span class="num">11.</span>Step 8 — Tests <span class="badge done">Done</span></h2>
+  <p><code>tests/radar/</code> covers the durable conformance layer in two tiers:</p>
+  <ul>
+    <li><strong>Pure / fail-open</strong> (<code>test_db_conformance.py</code>,
+      <code>test_store_persistence.py</code>) — run with no database and even without SQLAlchemy
+      installed: the routing map, partition month-range maths (including year rollover), the
+      durable-event whitelist, every write as a no-op when no DB, enum guards, and the registry JSON
+      fallback (self survives a restart, scan does not, remove persists).
+      <strong>11 pass / 11 skip</strong> with no DB.</li>
+    <li><strong>Integration</strong> — skipped unless <code>AGENT_RADAR_TEST_DATABASE_URL</code> points
+      at a Postgres with the init-db schema: event routing into the three canonical tables,
+      <code>decision='denied'</code>, the evidence hash chain, audit filters, approval token
+      request→decide, <code>evidence.token_ledger</code>, freeze upsert/clear, onboarding
+      <code>running→done</code>, and partition creation. <strong>22 pass</strong> against a throwaway
+      Postgres.</li>
+  </ul>
+  <pre><code>PYTHONPATH=src pytest tests/radar/
+# include the integration tier:
+AGENT_RADAR_TEST_DATABASE_URL=postgresql+psycopg://awcp:awcppassword@localhost:5432/awcp \
+  PYTHONPATH=src pytest tests/radar/</code></pre>
+
+  <!-- follow-ups, now done -->
+  <h2 class="sec" id="remaining"><span class="num">12.</span>Follow-up items <span class="badge done">Done</span></h2>
+  <ol>
+    <li><strong>Risk-tier alignment.</strong> The Gap-1 <code>RISK_ORDER</code> default is now
+      <code>low,medium,high</code> — matching the <code>registry.agents.risk</code> CHECK and the
+      magazine. <code>authoritative_risk</code> additionally <em>clamps</em> any out-of-set result
+      (e.g. a self-declared <code>critical</code> with no magazine opinion) to the most restrictive
+      known tier — fail-secure — so a resolved tier can never violate the canonical CHECK. Verified:
+      a declared-<code>critical</code> agent resolves to <code>high</code> and persists cleanly.</li>
+    <li><strong>Temporal onboarding completion.</strong> The <code>admit</code> activity now records
+      its run <code>done</code> in <code>ops.onboarding_runs</code> (keyed by the manager-assigned
+      <code>workflow_id</code>, with <code>finished_at</code> stamped), closing the gap where a
+      Temporal run previously stayed <code>running</code>. Verified end-to-end.</li>
+  </ol>
+  <p class="small">No conformance items remain open.</p>
+
+  <hr class="rule">
+  <p class="small"><strong>Design throughline.</strong> Every step preserves three properties: the
+  canonical schema is never modified by the app; durable state is mirrored, never replaced, so the
+  live in-memory views and budgets keep working; and the whole layer is fail-open, so a missing or
+  unreachable database degrades the radar to its prior behaviour rather than breaking it.</p>
+
+  <footer>AWCP · Registry Conformance · companion to the Control-Plane Magazine</footer>
+
+</article>
+</body>
+</html>

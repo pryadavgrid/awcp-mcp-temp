@@ -194,10 +194,18 @@ recorded.
 Run: `PYTHONPATH=src pytest tests/radar/` (set `AGENT_RADAR_TEST_DATABASE_URL` to
 include the integration tier).
 
+### Done — risk-tier alignment
+The Gap-1 `RISK_ORDER` default is now `low,medium,high` (matching the
+`registry.agents.risk` CHECK and the magazine). `authoritative_risk` additionally
+**clamps** any out-of-set result (e.g. a self-declared `critical` with no magazine
+opinion) to the most restrictive known tier — fail-secure — so a resolved tier can
+never violate the canonical CHECK. Verified: a declared-`critical` agent resolves to
+`high` and persists to `registry.agents` cleanly.
+
+### Done — Temporal onboarding completion
+The `admit` activity now records its run `done` in `ops.onboarding_runs` (keyed by
+the manager-assigned `workflow_id`, `finished_at` stamped), closing the gap where a
+Temporal run previously stayed `running`. Verified end-to-end.
+
 ## Remaining
-- Standing item: `registry.agents.risk` CHECK is `low/medium/high`, but the Gap-1
-  `RISK_ORDER` default still includes `critical` — align it (drop `critical`) so a
-  resolved tier can never violate the canonical CHECK.
-- Optional: Temporal onboarding **worker** should mark its run `done` in
-  `ops.onboarding_runs` (this repo records the `running` start; inline path is
-  fully recorded).
+_None — all conformance steps and follow-ups are complete._

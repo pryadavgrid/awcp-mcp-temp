@@ -48,4 +48,10 @@ async def admit(agent_id: str) -> str:
     if not e:
         return "missing"
     REGISTRY.patch(agent_id, onboarding_state="done")
+    # Mark the Temporal onboarding run done in ops.onboarding_runs, keyed by the
+    # workflow id the manager assigned. Fail-open (no-op without a DB).
+    from awcp.radar import db as _db
+    _db.record_onboarding_run(
+        e.onboarding_workflow_id or f"onboard-{agent_id}",
+        agent_id, "done", payload={"status": e.status})
     return e.status

@@ -116,12 +116,14 @@ FAILURE_BUDGET = DEFAULT_FAILURE_BUDGET
 # operator. The rule: a self-declared tier may only make an agent MORE
 # restrictive, never less. authoritative_risk(entry) is the max of what the agent
 # declared and what the control plane ASSIGNS it (from the governance magazine),
-# ordered low < medium < high < critical. Everything that consults a risk tier
-# for enforcement (budget_for here, the token-budget tier in laminar) should use
-# this, not entry.risk, so the declared value can never relax enforcement.
+# ordered low < medium < high (the canonical tiers). Everything that consults a
+# risk tier for enforcement (budget_for here, the token-budget tier in laminar)
+# should use this, not entry.risk, so the declared value can never relax enforcement.
 RISK_ORDER: list[str] = [
     s.strip().lower() for s in os.getenv(
-        "AGENT_RADAR_RISK_ORDER", "low,medium,high,critical").split(",") if s.strip()
+        # Canonical tiers per the magazine and the registry.agents CHECK
+        # (low | medium | high). Keep these in sync with init-db/02-schema.sql.
+        "AGENT_RADAR_RISK_ORDER", "low,medium,high").split(",") if s.strip()
 ]
 
 
@@ -164,7 +166,14 @@ def authoritative_risk(entry: AgentEntry) -> str:
     """The risk tier that ACTUALLY governs this agent: the more restrictive of
     its self-declared tier and the magazine-assigned tier. Self-declaration can
     only tighten, never loosen (hardening gap #1)."""
-    return more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
+    tier = more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
+    # Guarantee a canonical, CHECK-legal tier: anything outside RISK_ORDER (e.g. a
+    # self-declared unknown like "critical" with no magazine opinion) falls back to
+    # the MOST restrictive known tier — fail-secure, and never violates the
+    # registry.agents.risk CHECK (low|medium|high).
+    if tier not in RISK_ORDER:
+        return RISK_ORDER[-1] if RISK_ORDER else "high"
+    return tier
 
 
 def ladder_for(entry: AgentEntry) -> list[str]:
