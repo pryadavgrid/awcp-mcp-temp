@@ -38,6 +38,13 @@ class AgentEntry(BaseModel):
     source: str = "scan"                   # "scan" | "self"
     status: str = "quarantined"            # "quarantined" | "active"
     quarantine_reason: str | None = None
+    # Operator approval gate (hardening gap #5). None => not gated (normal
+    # hook-based onboarding decides status). "pending" => held in quarantine until
+    # an operator approves, regardless of hooks — set when a re-registration ADDS
+    # write_scopes (permission creep), so a restart can't silently widen grants.
+    # "approved" => the operator cleared it; behaves like None thereafter.
+    approval_state: str | None = None
+    approval_reason: str | None = None
 
     # --- write-action gate + degradation ladder (ported from awcp_agents) ---
     # autonomy_profile mirrors awcp_agents' active -> recommendation_only path,

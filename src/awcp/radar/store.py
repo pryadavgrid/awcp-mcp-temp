@@ -1,12 +1,27 @@
-"""In-memory registry with JSON persistence and scan reconciliation.
+"""In-memory registry with durable persistence and scan reconciliation.
 
-Thread-safe enough for one background scanner thread + the FastAPI request
-threads (a single lock guards all mutations).
+The live working set stays in memory (a dict guarded by one lock — enough for the
+single background scanner thread plus the FastAPI request threads). Durability is
+pluggable:
+
+  * Postgres (preferred) — the canonical control-plane DB. The registry is mirrored
+    to the registry.agents table defined in observability/init-db, so a restart
+    restores self-registered agents from the DB, not a JSON file. Selected when
+    AGENT_RADAR_DATABASE_URL is set, SQLAlchemy + a driver are importable, and the
+    registry.agents table exists.
+  * JSON file (fallback) — the original behavior. Used whenever Postgres is not
+    available, so a dev checkout with no database keeps working unchanged.
+
+Only self-registered entries survive a restart (scanned processes are re-detected
+live); that rule is identical across both backends. NOTE: approval_state /
+approval_reason are not yet persisted — registry.agents has no such columns; the
+operator-approval gate moves to governance.approval_tokens in a later step.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -14,11 +29,16 @@ from typing import Iterable
 
 from awcp.radar.models import AgentEntry
 
-# Where self-registered entries are persisted (scanned entries are re-derived).
+log = logging.getLogger("awcp.radar")
+
+# Where self-registered entries are persisted when Postgres is NOT used.
 PERSIST_PATH = os.getenv(
     "AGENT_RADAR_DB",
     os.path.join(os.getcwd(), "agent_radar_registry.json"),
 )
+# Canonical control-plane DB. When set (and reachable) the registry persists to
+# registry.agents instead of the JSON file above.
+DATABASE_URL = os.getenv("AGENT_RADAR_DATABASE_URL", "").strip()
 # A scanned process that disappears is pruned after this many seconds.
 PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_PRUNE_AFTER", "60"))
 # A self-registered agent is kept alive by its heartbeat (periodic re-register)
@@ -27,15 +47,177 @@ PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_PRUNE_AFTER", "60"))
 SELF_PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_SELF_PRUNE_AFTER", "180"))
 
 
+# ── Postgres persistence (registry.agents) ────────────────────────────────────
+# Raw SQL via SQLAlchemy Core so the table's exact columns/types (text[], jsonb,
+# timestamptz) are honored without re-declaring an ORM model that could drift from
+# the canonical init-db schema. The AgentEntry.user field maps to the os_user
+# column; epoch floats map to timestamptz via to_timestamp() / EXTRACT(EPOCH ...).
+_PG_COLUMNS = (
+    "id", "name", "kind", "framework", "source", "status", "quarantine_reason",
+    "autonomy_profile", "autonomy_reason", "failure_count",
+    "owner", "runtime", "version", "write_scopes", "feature_flags",
+    "flags_observed", "last_flags_ts", "telemetry_enabled", "last_telemetry_ts",
+    "policy_callbacks", "policy_observed", "last_policy_ts",
+    "risk", "autonomy_ladder", "failure_budget", "token_budget",
+    "endpoint", "transport", "capabilities", "control_endpoint",
+    "pid", "os_user", "cwd", "cmdline", "detected_via",
+    "onboarding_state", "onboarding_workflow_id",
+    "first_seen", "last_seen", "alive",
+)
+# columns that need a value expression other than a plain :param bind
+_PG_VALUE_EXPR = {
+    "feature_flags": "CAST(:feature_flags AS jsonb)",
+    "last_flags_ts": "to_timestamp(:last_flags_ts)",
+    "last_telemetry_ts": "to_timestamp(:last_telemetry_ts)",
+    "last_policy_ts": "to_timestamp(:last_policy_ts)",
+    "first_seen": "to_timestamp(:first_seen)",
+    "last_seen": "to_timestamp(:last_seen)",
+}
+
+
+def _pg_upsert_sql() -> str:
+    cols = ", ".join(_PG_COLUMNS)
+    vals = ", ".join(_PG_VALUE_EXPR.get(c, f":{c}") for c in _PG_COLUMNS)
+    # id is the conflict key; created_at is DB-managed; updated_at = now()
+    sets = ", ".join(f"{c}=EXCLUDED.{c}" for c in _PG_COLUMNS if c != "id")
+    return (
+        f"INSERT INTO registry.agents ({cols}, updated_at) "
+        f"VALUES ({vals}, now()) "
+        f"ON CONFLICT (id) DO UPDATE SET {sets}, updated_at=now()"
+    )
+
+
+def _pg_select_sql() -> str:
+    # map timestamptz back to epoch floats; only self-registered survive a restart
+    sel = []
+    for c in _PG_COLUMNS:
+        if c in ("last_flags_ts", "last_telemetry_ts", "last_policy_ts",
+                 "first_seen", "last_seen"):
+            sel.append(f"EXTRACT(EPOCH FROM {c}) AS {c}")
+        else:
+            sel.append(c)
+    return f"SELECT {', '.join(sel)} FROM registry.agents WHERE source='self'"
+
+
+def _row_params(e: AgentEntry) -> dict:
+    d = e.model_dump()
+    return {
+        "id": d["id"], "name": d["name"], "kind": d["kind"],
+        "framework": d["framework"], "source": d["source"], "status": d["status"],
+        "quarantine_reason": d["quarantine_reason"],
+        "autonomy_profile": d["autonomy_profile"], "autonomy_reason": d["autonomy_reason"],
+        "failure_count": d["failure_count"],
+        "owner": d["owner"], "runtime": d["runtime"], "version": d["version"],
+        "write_scopes": list(d["write_scopes"] or []),
+        "feature_flags": json.dumps(d["feature_flags"] or {}),
+        "flags_observed": d["flags_observed"], "last_flags_ts": d["last_flags_ts"],
+        "telemetry_enabled": d["telemetry_enabled"], "last_telemetry_ts": d["last_telemetry_ts"],
+        "policy_callbacks": list(d["policy_callbacks"] or []),
+        "policy_observed": d["policy_observed"], "last_policy_ts": d["last_policy_ts"],
+        "risk": d["risk"], "autonomy_ladder": list(d["autonomy_ladder"] or []),
+        "failure_budget": d["failure_budget"], "token_budget": d["token_budget"],
+        "endpoint": d["endpoint"], "transport": d["transport"],
+        "capabilities": list(d["capabilities"] or []), "control_endpoint": d["control_endpoint"],
+        "pid": d["pid"], "os_user": d["user"], "cwd": d["cwd"],
+        "cmdline": d["cmdline"], "detected_via": d["detected_via"],
+        "onboarding_state": d["onboarding_state"], "onboarding_workflow_id": d["onboarding_workflow_id"],
+        "first_seen": d["first_seen"], "last_seen": d["last_seen"], "alive": d["alive"],
+    }
+
+
+def _entry_from_row(row: dict) -> AgentEntry:
+    d = dict(row)
+    d["user"] = d.pop("os_user", None)               # column -> model field
+    for k in ("last_flags_ts", "last_telemetry_ts", "last_policy_ts",
+              "first_seen", "last_seen"):
+        if d.get(k) is not None:
+            d[k] = float(d[k])                       # Decimal/epoch -> float
+    return AgentEntry(**d)
+
+
+class _PgBackend:
+    """Postgres mirror of the registry. Built lazily; any failure (no URL, no
+    driver, unreachable DB, missing table) leaves it disabled and the Registry
+    falls back to the JSON file — durability never breaks the radar."""
+
+    def __init__(self) -> None:
+        self.ok = False
+        self._engine = None
+        self._upsert = ""
+        self._select = ""
+        if not DATABASE_URL:
+            return
+        try:
+            from sqlalchemy import create_engine, text
+            self._text = text
+            eng = create_engine(
+                DATABASE_URL, pool_pre_ping=True, pool_recycle=300,
+                connect_args={"connect_timeout": 3}
+                if DATABASE_URL.startswith(("postgresql", "postgres")) else {},
+            )
+            with eng.connect() as c:                 # require the canonical table
+                c.execute(text("SELECT 1 FROM registry.agents LIMIT 1"))
+            self._engine = eng
+            self._upsert = _pg_upsert_sql()
+            self._select = _pg_select_sql()
+            self.ok = True
+            log.info("radar.store persistence=postgres (registry.agents) at %s",
+                     DATABASE_URL.split("@")[-1])
+        except Exception as exc:  # noqa: BLE001 — fall back to JSON
+            log.warning("radar.store postgres unavailable (%r) — using JSON file", exc)
+
+    def load_self(self) -> list[AgentEntry]:
+        out: list[AgentEntry] = []
+        with self._engine.connect() as c:
+            for row in c.execute(self._text(self._select)).mappings():
+                try:
+                    out.append(_entry_from_row(row))
+                except Exception as exc:  # noqa: BLE001 — skip a bad row, keep the rest
+                    log.warning("radar.store skip bad registry row: %r", exc)
+        return out
+
+    def sync(self, entries: list[AgentEntry]) -> None:
+        ids = [e.id for e in entries]
+        with self._engine.begin() as c:
+            for e in entries:
+                c.execute(self._text(self._upsert), _row_params(e))
+            if ids:
+                c.execute(self._text("DELETE FROM registry.agents WHERE id <> ALL(:ids)"),
+                          {"ids": ids})
+            else:
+                c.execute(self._text("DELETE FROM registry.agents"))
+
+
 class Registry:
     def __init__(self) -> None:
         self._entries: dict[str, AgentEntry] = {}
         self._lock = threading.Lock()
         self.scan_count = 0
+        self._pg = _PgBackend()
         self._load()
 
-    # ---- persistence -------------------------------------------------------
+    # ---- persistence (postgres when available, else JSON) ------------------
     def _load(self) -> None:
+        if self._pg.ok:
+            try:
+                for entry in self._pg.load_self():
+                    self._entries[entry.id] = entry
+                return
+            except Exception as exc:  # noqa: BLE001
+                log.warning("radar.store postgres load failed (%r) — JSON fallback", exc)
+        self._load_json()
+
+    def _persist(self) -> None:
+        if self._pg.ok:
+            try:
+                self._pg.sync(list(self._entries.values()))
+                return
+            except Exception as exc:  # noqa: BLE001 — never break a request on persistence
+                log.warning("radar.store postgres persist failed (%r)", exc)
+                return
+        self._persist_json()
+
+    def _load_json(self) -> None:
         if not os.path.exists(PERSIST_PATH):
             return
         try:
@@ -50,7 +232,7 @@ class Registry:
         except Exception:
             pass
 
-    def _persist(self) -> None:
+    def _persist_json(self) -> None:
         try:
             tmp = PERSIST_PATH + ".tmp"
             with open(tmp, "w") as f:

@@ -87,6 +87,7 @@ class TokenLedger:
             lt["cost"] += rec["cost"]
             lt["calls"] += 1
         self._append_evidence(rec)
+        self._append_db(rec)
         return rec
 
     def _append_evidence(self, rec: dict) -> None:
@@ -96,6 +97,21 @@ class TokenLedger:
         try:
             with open(config.LEDGER_PATH, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec) + "\n")
+        except Exception:           # noqa: BLE001 — evidence must not break accounting
+            pass
+
+    def _append_db(self, rec: dict) -> None:
+        """Canonical durable sink: mirror the call into evidence.token_ledger.
+        Lazy import keeps laminar decoupled from the radar DB layer; fail-open
+        (a no-op when no DB is configured)."""
+        try:
+            from awcp.radar import db as _db
+            _db.record_token_usage(
+                agent_id=rec["agent_id"], input_tokens=rec["input_tokens"],
+                output_tokens=rec["output_tokens"], cost=rec["cost"],
+                model=rec["model"], task_id=rec.get("task_id"),
+                step=rec.get("step"), ts=rec.get("ts"),
+            )
         except Exception:           # noqa: BLE001 — evidence must not break accounting
             pass
 

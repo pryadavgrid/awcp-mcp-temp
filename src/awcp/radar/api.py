@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from awcp.radar import onboarding, policy
+from awcp.radar import db as _events_db
 from awcp.radar.models import AgentEntry, RegisterRequest
 from awcp.radar.store import REGISTRY, PERSIST_PATH
 from awcp.radar.scanner import SCANNER
@@ -119,6 +120,19 @@ def _record_event(kind: str, agent_id: str = "", detail: str = "", **extra) -> N
         {"ts": time.time(), "kind": kind, "agent_id": agent_id,
          "detail": detail, **extra}
     )
+    # Durable mirror: the audit-worthy subset is also written to the canonical
+    # schema (evidence.ledger / governance.policy_decisions / degradation_events,
+    # routed in db.record) so approvals/scope-changes/demotions survive a restart.
+    # Only DENY gate decisions are durable (recorded as "gate_denied"); allows stay
+    # in the live ring only. No-op when the DB is unavailable.
+    durable_kind = kind
+    if kind == "gate":
+        if not detail.startswith("deny"):
+            return
+        durable_kind = "gate_denied"
+    if durable_kind in _events_db.DURABLE_EVENT_TYPES:
+        _events_db.record(durable_kind, agent_id,
+                          {"detail": detail, **extra})
 
 
 # ----------------------------------------------------------------------
@@ -210,6 +224,11 @@ def _journal_set(agent_id: str, entry: dict) -> None:
     with _journal_lock:
         _freeze_journal[agent_id] = entry
         _journal_persist_locked()
+    # Durable mirror to the canonical registry.freeze_journal (the JSON file above
+    # stays the crash-recovery source, since it is readable even if the DB is down).
+    _events_db.record_freeze(agent_id, entry.get("kind", "process"),
+                             pid=entry.get("pid"), url=entry.get("url"),
+                             reason=entry.get("reason"), payload=entry)
 
 
 def _journal_clear(agent_id: str) -> None:
@@ -217,6 +236,7 @@ def _journal_clear(agent_id: str) -> None:
         if _freeze_journal.pop(agent_id, None) is None:
             return
         _journal_persist_locked()
+    _events_db.clear_freeze(agent_id)
 
 
 def _recover_orphaned_freezes() -> None:
@@ -356,6 +376,14 @@ def _token_resume_process(agent_id: str) -> None:
 
 def _post_control(url: str, payload: dict) -> bool:
     """POST a control directive to an agent's control_endpoint. True on 2xx."""
+    # SSRF guard: control_endpoint is agent-supplied — refuse private/link-local
+    # targets before POSTing to it (same metadata-service risk as link_mcp).
+    from awcp.radar.netguard import assert_safe_url, UnsafeURLError
+    try:
+        assert_safe_url(url)
+    except UnsafeURLError as exc:
+        log.warning("radar.token.control.refused url=%s reason=%r", url, exc)
+        return False
     try:
         r = httpx.post(url, json=payload, timeout=TOKEN_CONTROL_TIMEOUT,
                        headers={"ngrok-skip-browser-warning": "true"})
@@ -739,6 +767,11 @@ async def _onboard_inline(agent_id: str) -> None:
 
         METRICS.onboarding_completed.add(1, {"status": status, "path": path})
         _record_event("onboarded", agent_id, status, reason=reason or "", path=path)
+        # Onboarding run completed (inline path) -> ops.onboarding_runs. Keyed by
+        # the real workflow id when present, else a stable per-agent inline key.
+        _events_db.record_onboarding_run(
+            getattr(e, "onboarding_workflow_id", None) or f"inline-{agent_id}",
+            agent_id, "done", payload={"status": status, "path": path})
         log.info(
             "radar.onboard.completed agent_id=%s status=%s path=%s",
             agent_id, status, path,
@@ -769,6 +802,7 @@ async def _onboarding_manager() -> None:
                         REGISTRY.patch(
                             e.id, onboarding_state="running", onboarding_workflow_id=wf_id
                         )
+                        _events_db.record_onboarding_run(wf_id, e.id, "running")
                         log.info(
                             "radar.onboarding.temporal.started agent_id=%s workflow_id=%s",
                             e.id, wf_id,
@@ -888,6 +922,17 @@ async def _bypass_detector() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("radar.startup starting scanner and connecting to Temporal...")
+    # Durable governance-event log (fail-open: a no-op if no DB is configured).
+    _events_db.init()
+    # Re-arm the approval gate (Step 2): registry.agents carries no approval state,
+    # so rehydrate it from any still-open governance.approval_tokens. A no-op when
+    # no DB / no open tokens.
+    for _aid in _events_db.open_approval_agent_ids():
+        if REGISTRY.get(_aid):
+            REGISTRY.patch(_aid, approval_state="pending", status="quarantined",
+                           approval_reason="awaiting operator approval (scope change)",
+                           quarantine_reason="awaiting operator approval (scope change)")
+            log.info("radar.startup approval gate re-armed agent_id=%s", _aid)
     SCANNER.start()
     # Crash recovery FIRST: release anything a previous (possibly SIGKILLed) radar
     # left frozen/suspended, before the reconciler re-establishes live state.
@@ -956,7 +1001,9 @@ try:
         REGISTRY.patch(agent_id, autonomy_profile=new_profile,
                        autonomy_reason=why, failure_count=0)
         METRICS.record_signal(ok=False, degraded=True)
-        _record_event("degraded", agent_id, f"-> {new_profile}", reason=why)
+        _record_event("degraded", agent_id, f"-> {new_profile}", reason=why,
+                      from_profile=e.autonomy_profile, to_profile=new_profile,
+                      trigger="token_budget")
         log.warning("radar.token.degraded agent_id=%s -> %s (%s)",
                     agent_id, new_profile, why)
         # NB: the forceful hard stop (SIGSTOP / remote suspend) is deliberately
@@ -988,6 +1035,9 @@ def _to_dict(e: AgentEntry) -> dict:
         d["temporal_url"] = (
             f"{TEMPORAL_UI_BASE}/namespaces/default/workflows/{e.onboarding_workflow_id}"
         )
+    # surface the AUTHORITATIVE risk (max of declared + magazine-assigned) so the
+    # operator sees the tier actually enforced, not just what the agent declared.
+    d["authoritative_risk"] = policy.authoritative_risk(e)
     # surface the EFFECTIVE degradation policy (after risk/override resolution)
     d["effective_budget"] = policy.budget_for(e)
     d["effective_ladder"] = policy.ladder_for(e)
@@ -1010,10 +1060,32 @@ def get_agent(agent_id: str) -> dict:
     return _to_dict(e)
 
 
+def _assert_safe_agent_urls(req: RegisterRequest) -> None:
+    """SSRF guard at the registration boundary (hardening gap #2). An agent's
+    declared endpoint (SSE link target) and control_endpoint (remote hard-stop
+    webhook) are URLs the radar will later fetch, so reject private/link-local
+    targets here with HTTP 400 instead of only refusing silently at fetch time.
+    Only http(s) URLs are checked — a stdio endpoint or other non-URL transport
+    is left alone. The fetch-time guards in link_mcp/_post_control stay as
+    defense-in-depth (DNS can re-point between register and fetch)."""
+    from awcp.radar.netguard import assert_safe_url, UnsafeURLError
+    for field, url in (("endpoint", req.endpoint),
+                       ("control_endpoint", req.control_endpoint)):
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        try:
+            assert_safe_url(url)
+        except UnsafeURLError as exc:
+            raise HTTPException(status_code=400, detail=f"unsafe {field}: {exc}")
+
+
 @router.post("/agents/register")
 def register(req: RegisterRequest) -> dict:
+    _assert_safe_agent_urls(req)
+    agent_id = req.id or f"reg-{_slug(req.name)}"
+    existing = REGISTRY.get(agent_id)
     entry = AgentEntry(
-        id=req.id or f"reg-{_slug(req.name)}",
+        id=agent_id,
         name=req.name,
         kind=req.kind,
         framework=req.framework,
@@ -1045,8 +1117,56 @@ def register(req: RegisterRequest) -> dict:
         autonomy_ladder=req.autonomy_ladder,
         failure_budget=req.failure_budget,
     )
+    # Authoritative risk (hardening gap #1): a self-declared tier may only make
+    # the agent MORE restrictive, never less — store the max of declared and the
+    # magazine-assigned tier so the gate/budget can't be relaxed by declaring
+    # "low". Onboarding's map_identity reaffirms this.
+    entry.risk = policy.authoritative_risk(entry)
     # let the onboarding pipeline decide status/capabilities (re-onboard on update)
     entry.onboarding_state = None
+
+    # Scope-drift guard (hardening gap #5): on RE-registration, compare incoming
+    # write_scopes against what we already had. ADDED scopes are permission creep
+    # — hold the agent for operator re-approval (sticky via approval_state) rather
+    # than silently widening grants on a restart. Dropped scopes are a safe
+    # reduction and applied directly.
+    if existing:
+        entry.first_seen = existing.first_seen
+        # Carry forward the approval gate: register() is a full overwrite, so a
+        # fresh payload would otherwise reset approval_state to None and let an
+        # agent escape a pending re-approval just by re-registering unchanged.
+        entry.approval_state = existing.approval_state
+        entry.approval_reason = existing.approval_reason
+        added = sorted(set(req.write_scopes) - set(existing.write_scopes or []))
+        removed = sorted(set(existing.write_scopes or []) - set(req.write_scopes))
+        if added:
+            entry.approval_state = "pending"
+            entry.approval_reason = f"scope_added: {added} — operator re-approval required"
+            entry.status = "quarantined"
+            entry.quarantine_reason = entry.approval_reason
+            saved = REGISTRY.register(entry)
+            # Durable operator gate (Step 2): the in-memory approval_state above is
+            # the live gate; the canonical governance.approval_tokens row is what
+            # makes it survive a restart (registry.agents has no approval column).
+            # Created AFTER register() so the agent row exists for the FK. Fail-open.
+            _events_db.record_approval_request(
+                agent_id, req.write_scopes,
+                context_diff={"added": added,
+                              "previous": sorted(existing.write_scopes or []),
+                              "new": sorted(req.write_scopes)},
+                requested_by=req.owner,
+            )
+            _record_event("scope_added", agent_id,
+                          f"new write_scopes {added} -> quarantined (re-approval required)",
+                          added=added)
+            log.warning("radar.register.scope_added agent_id=%s added=%s -> quarantined",
+                        agent_id, added)
+            return _to_dict(saved)
+        if removed:
+            _record_event("scope_removed", agent_id, f"dropped write_scopes {removed}",
+                          removed=removed)
+            log.info("radar.register.scope_removed agent_id=%s removed=%s", agent_id, removed)
+
     saved = REGISTRY.register(entry)
     _record_event("registered", saved.id, saved.name, risk=saved.risk)
     log.info(
@@ -1071,6 +1191,7 @@ async def announce(req: RegisterRequest) -> dict:
     caller can observe its own onboarding progress.
     Falls back to inline onboarding when Temporal is unavailable.
     """
+    _assert_safe_agent_urls(req)
     agent_id = req.id or f"reg-{_slug(req.name)}"
 
     # Check for a restart: same slug ID, new PID.  Patch liveness + reset
@@ -1110,8 +1231,11 @@ async def announce(req: RegisterRequest) -> dict:
             # already have onboarding_state set, so there is no double-onboard.
             onboarding_state="pending",
         )
+        # Authoritative risk (hardening gap #1) — same rule as /agents/register:
+        # declared tier may only tighten, never relax.
+        entry.risk = policy.authoritative_risk(entry)
         REGISTRY.register(entry)
-        _record_event("announced", agent_id, req.name, risk=req.risk)
+        _record_event("announced", agent_id, req.name, risk=entry.risk)
         log.info(
             "radar.announce agent_id=%s name=%r framework=%s pid=%s",
             agent_id, req.name, req.framework, req.pid,
@@ -1130,6 +1254,7 @@ async def announce(req: RegisterRequest) -> dict:
             )
             REGISTRY.patch(agent_id, onboarding_state="running",
                            onboarding_workflow_id=wf_id)
+            _events_db.record_onboarding_run(wf_id, agent_id, "running")
             log.info(
                 "radar.announce.temporal.started agent_id=%s workflow_id=%s",
                 agent_id, wf_id,
@@ -1238,7 +1363,9 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
             updated.failure_count, budget, req.reason,
         )
         _record_event("degraded", agent_id,
-                      f"-> {updated.autonomy_profile}", reason=updated.autonomy_reason or "")
+                      f"-> {updated.autonomy_profile}", reason=updated.autonomy_reason or "",
+                      from_profile=e.autonomy_profile, to_profile=updated.autonomy_profile,
+                      trigger="failure_budget")
     elif not req.ok:
         log.info(
             "radar.signal.failure agent_id=%s count=%d budget=%d reason=%r",
@@ -1272,8 +1399,34 @@ def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
         agent_id, autonomy_profile=req.profile, failure_count=0,
         autonomy_reason=f"operator set to {req.profile}",
     )
-    _record_event("autonomy", agent_id, f"operator set to {req.profile}")
+    _record_event("autonomy", agent_id, f"operator set to {req.profile}",
+                  from_profile=e.autonomy_profile, to_profile=req.profile, trigger="operator")
     return {"agent_id": agent_id, "autonomy_profile": updated.autonomy_profile}
+
+
+@router.post("/agents/{agent_id}/approve")
+def approve(agent_id: str) -> dict:
+    """Operator action — clear a pending re-approval gate (hardening gap #5).
+    After an agent was held for adding write_scopes, the operator approves the
+    new grants here; the approval gate lifts and the SAME onboarding hook check
+    decides whether it returns to active."""
+    e = _require(agent_id)
+    if e.approval_state != "pending":
+        return {"agent_id": agent_id, "approval_state": e.approval_state,
+                "status": e.status, "note": "no pending approval"}
+    probe = e.model_copy(update={"approval_state": "approved", "approval_reason": None})
+    status, reason = onboarding.decide_status(probe)
+    updated = REGISTRY.patch(agent_id, approval_state="approved", approval_reason=None,
+                             status=status, quarantine_reason=reason)
+    # Settle the durable token(s) so the gate does NOT re-arm on the next restart.
+    _events_db.decide_approval(agent_id, "approved")
+    _record_event("approved", agent_id,
+                  f"operator approved scope change -> {status}",
+                  scopes=list(updated.write_scopes or []))
+    log.info("radar.approve agent_id=%s -> status=%s scopes=%s",
+             agent_id, status, list(updated.write_scopes or []))
+    return {"agent_id": agent_id, "approval_state": "approved",
+            "status": updated.status, "write_scopes": list(updated.write_scopes or [])}
 
 
 class RiskRequest(BaseModel):
@@ -1507,6 +1660,25 @@ def events(limit: int = 50) -> list[dict]:
     """The recent-decisions log (newest first). A live registry audit view — not
     the durable Evidence Ledger."""
     return list(_EVENTS)[: max(1, min(limit, _EVENTS.maxlen or 200))]
+
+
+@router.get("/events/audit")
+def events_audit(agent_id: str = "", since: float = 0.0,
+                 event_type: str = "", limit: int = 100) -> dict:
+    """The DURABLE governance audit trail, unified across the canonical tables
+    (evidence.ledger + governance.policy_decisions + governance.degradation_events)
+    — survives restarts, unlike GET /events. Filter by agent_id, event_type, and
+    `since` (UNIX epoch seconds). Returns {"enabled": <bool>, "events": [...]};
+    enabled=false means no DB is configured and only GET /events is available."""
+    return {
+        "enabled": _events_db.enabled(),
+        "events": _events_db.query(
+            agent_id=agent_id or None,
+            since=since or None,
+            event_type=event_type or None,
+            limit=limit,
+        ),
+    }
 
 
 @router.get("/healthz")

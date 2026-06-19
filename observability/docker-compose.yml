@@ -20,8 +20,37 @@ volumes:
   lmnr_clickhouse_data: {}
   lmnr_clickhouse_logs: {}
   lmnr_quickwit_data: {}
+  postgres_data: {}
 
 services:
+
+  # ══════════════════════════════════════════
+  # AWCP Postgres — canonical control-plane DB (registry / governance / evidence
+  # / ops schema). Bootstrapped from ./init-db on a brand-new volume; this is the
+  # same schema defined in files/observability and is the durable home for the
+  # registry (registry.agents) instead of the local JSON file. Connect from the
+  # host: postgresql+psycopg://awcp:awcppassword@localhost:5432/awcp
+  # ══════════════════════════════════════════
+  postgres:
+    image: postgres:16
+    container_name: awcp-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-awcp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-awcppassword}
+      POSTGRES_DB: ${POSTGRES_DB:-awcp}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-awcp}", "-d", "${POSTGRES_DB:-awcp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awcp-obs
 
   # ══════════════════════════════════════════
   # OTel Collector — receives from Python apps

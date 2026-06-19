@@ -35,6 +35,14 @@ arxiv>=2.1.0
 # --- Agent Radar (dynamic registry / process discovery) ---
 psutil>=5.9.0
 
+# --- Canonical control-plane DB (registry / governance / evidence / ops) ---
+# The registry persists to registry.agents and durable governance events flow to
+# evidence.ledger / governance.policy_decisions / governance.degradation_events.
+# Schema is owned by observability/init-db (psql init scripts), not migrations.
+# Fail-open: the radar runs without these if no DB is reachable.
+SQLAlchemy>=2.0.0
+psycopg[binary]>=3.1.0   # Postgres driver (postgresql+psycopg://)
+
 # --- OpenTelemetry (observability) ---
 # Pinned for Python 3.14 compatibility (protobuf C-ext is broken on 3.14 below these)
 opentelemetry-api>=1.42.1

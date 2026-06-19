@@ -95,6 +95,27 @@ export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_
 # fail open. Same value as AWCP_AGENT_RADAR_URL; exported under the name the
 # server + agent kits actually read. Overridable from the environment.
 export AGENT_RADAR_URL="${AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
+# The agent kits (awcp_kit) read AWCP_RADAR_URL, not AGENT_RADAR_URL, to decide
+# whether to self-register + report per-call token usage + call the gate. Without
+# it the kit stays fully decoupled (the radar only scan-detects the process, so no
+# tokens/budget). Export the SAME gateway-derived value so a bundle agent spawned
+# from here reports onto its own row instead of firing at a dead default port.
+# All three names resolve from ${GATEWAY_PORT} — no port is hardcoded here.
+export AWCP_RADAR_URL="${AWCP_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
+
+# Canonical control-plane DB (registry / governance / evidence / ops). When the
+# observability Postgres is up (docker compose, schema from observability/init-db)
+# the registry persists to registry.agents instead of the local JSON file, and
+# durable governance/evidence flows to the canonical tables. If Postgres is
+# unreachable everything transparently falls back to JSON / in-memory.
+#
+# Least privilege: the app connects as awcp_app (DML; evidence is append-only by
+# GRANT — see observability/init-db/01-roles.sql), while a separate ADMIN url (the
+# postgres owner) is used ONLY to create monthly partitions at startup. All creds
+# default to the init-db values and are env-overridable — nothing host/port is
+# hardcoded in the app.
+export AGENT_RADAR_DATABASE_URL="${AGENT_RADAR_DATABASE_URL:-postgresql+psycopg://${AWCP_APP_USER:-awcp_app}:${AWCP_APP_PASSWORD:-awcp_app_password}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
+export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg://${POSTGRES_USER:-awcp}:${POSTGRES_PASSWORD:-awcppassword}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
 
 # Temporal task queues the gateway's in-process workers listen on. Kept distinct
 # from run_all.sh's temp2-* queues so the gateway and a standalone radar can share
@@ -157,9 +178,25 @@ else
     echo
   fi
   if docker info >/dev/null 2>&1; then
-    say "Starting telemetry stack (OTel/Tempo/Prometheus/Loki/Grafana)…"
+    say "Starting telemetry stack (OTel/Tempo/Prometheus/Loki/Grafana + Postgres)…"
     docker compose -f observability/docker-compose.yml up -d || \
       warn "docker compose failed — gateway still runs; OTel exports will warn until it's up."
+    # Wait for the canonical Postgres to accept connections before the gateway
+    # starts, so the registry persists to registry.agents from the first request
+    # instead of falling back to JSON. init-db applies the schema on a fresh
+    # volume; this also gives it time to finish. Non-fatal: if it never comes up,
+    # the radar runs fail-open on JSON/in-memory.
+    say "Waiting for Postgres (registry.agents) to be ready…"
+    _pg_ok=""
+    for i in $(seq 1 30); do
+      if docker compose -f observability/docker-compose.yml exec -T postgres \
+           pg_isready -U "${POSTGRES_USER:-awcp}" -d "${POSTGRES_DB:-awcp}" >/dev/null 2>&1; then
+        _pg_ok=1; break
+      fi
+      sleep 1
+    done
+    [ -n "$_pg_ok" ] && say "Postgres is up — registry persists to the canonical schema." \
+      || warn "Postgres not ready — registry will run fail-open on JSON until it is."
   else
     warn "Docker daemon didn't come up — skipping telemetry stack."
   fi

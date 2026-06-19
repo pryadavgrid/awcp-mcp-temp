@@ -110,6 +110,63 @@ PROFILE_LADDER = DEFAULT_PROFILE_LADDER
 FAILURE_BUDGET = DEFAULT_FAILURE_BUDGET
 
 
+# ── Authoritative risk (hardening gap #1) ──────────────────────────────────────
+# An agent declares its own risk tier at registration, but a COMPROMISED agent
+# could declare "low" to win a bigger budget / more leeway and slip past the
+# operator. The rule: a self-declared tier may only make an agent MORE
+# restrictive, never less. authoritative_risk(entry) is the max of what the agent
+# declared and what the control plane ASSIGNS it (from the governance magazine),
+# ordered low < medium < high < critical. Everything that consults a risk tier
+# for enforcement (budget_for here, the token-budget tier in laminar) should use
+# this, not entry.risk, so the declared value can never relax enforcement.
+RISK_ORDER: list[str] = [
+    s.strip().lower() for s in os.getenv(
+        "AGENT_RADAR_RISK_ORDER", "low,medium,high,critical").split(",") if s.strip()
+]
+
+
+def _risk_rank(tier: str | None) -> int:
+    """Position of a tier in RISK_ORDER. Unknown tiers rank -1 (least
+    restrictive) so any RECOGNISED tier always wins the max — an attacker can't
+    smuggle in an unknown string to dodge the ordering."""
+    t = (tier or "").strip().lower()
+    return RISK_ORDER.index(t) if t in RISK_ORDER else -1
+
+
+def more_restrictive(a: str | None, b: str | None) -> str:
+    """Return whichever of two risk tiers is more restrictive (higher in
+    RISK_ORDER). Used both at the gate and during onboarding's identity mapping
+    so neither path can DOWNGRADE an agent's risk below what it declared."""
+    a_l = (a or "").strip().lower()
+    b_l = (b or "").strip().lower()
+    if not a_l:
+        return b_l or "low"
+    if not b_l:
+        return a_l
+    return a_l if _risk_rank(a_l) >= _risk_rank(b_l) else b_l
+
+
+def assigned_risk_for(entry: AgentEntry) -> str | None:
+    """The risk tier the control plane ASSIGNS this agent from the governance
+    magazine (by agent name, else the magazine's __default__). None when the
+    magazine has no opinion. Lazy import avoids an import cycle with onboarding."""
+    try:
+        from awcp.radar import onboarding
+        profile = onboarding.magazine_profile(getattr(entry, "name", "") or "")
+    except Exception:
+        profile = None
+    if not profile:
+        return None
+    return (profile.get("risk") or "").strip().lower() or None
+
+
+def authoritative_risk(entry: AgentEntry) -> str:
+    """The risk tier that ACTUALLY governs this agent: the more restrictive of
+    its self-declared tier and the magazine-assigned tier. Self-declaration can
+    only tighten, never loosen (hardening gap #1)."""
+    return more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
+
+
 def ladder_for(entry: AgentEntry) -> list[str]:
     """The agent's own degradation ladder, or the system default."""
     return entry.autonomy_ladder or DEFAULT_PROFILE_LADDER
@@ -122,7 +179,9 @@ def budget_for(entry: AgentEntry) -> int:
     3. else the system default."""
     if entry.failure_budget:
         return entry.failure_budget
-    return RISK_BUDGET.get(getattr(entry, "risk", "medium"), DEFAULT_FAILURE_BUDGET)
+    # Use the AUTHORITATIVE risk, not entry.risk: a self-declared "low" must not
+    # be able to buy a bigger failure budget than the magazine assigns.
+    return RISK_BUDGET.get(authoritative_risk(entry), DEFAULT_FAILURE_BUDGET)
 
 
 def _rung(entry: AgentEntry) -> tuple[list[str], int]:
