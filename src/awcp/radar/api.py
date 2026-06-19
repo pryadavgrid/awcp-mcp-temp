@@ -1056,7 +1056,7 @@ def register(req: RegisterRequest) -> dict:
     return _to_dict(saved)
 
 
-@app.post("/agents/announce")
+@router.post("/agents/announce")
 async def announce(req: RegisterRequest) -> dict:
     """Agent-initiated onboarding (Option B announce path).
 
