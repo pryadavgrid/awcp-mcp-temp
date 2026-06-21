@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from awcp.radar import onboarding, policy
 from awcp.radar import db as _events_db
 from awcp.radar.models import AgentEntry, RegisterRequest
-from awcp.radar.store import REGISTRY, PERSIST_PATH
+from awcp.radar.store import REGISTRY
 from awcp.radar.scanner import SCANNER
 from awcp.radar.temporal.config import TEMPORAL_SERVER_URL, TASK_QUEUE, TEMPORAL_UI_BASE
 from awcp.radar.temporal.workflows.onboarding import AgentOnboardingWorkflow
@@ -197,35 +197,21 @@ _token_remote_stopped: dict[str, str] = {}    # agent_id -> control_endpoint WE 
 _token_uncontrolled: set[str] = set()         # over-budget but no pid / endpoint to act on
 _token_proc_lock = threading.Lock()
 
-# ── crash-recovery journal ────────────────────────────────────────────────────
-# Every stop WE apply is also written to a small on-disk journal. A radar that is
-# SIGKILLed cannot SIGCONT/resume on the way down, so a frozen process would stay
-# frozen forever. On the NEXT startup the radar reads this journal and releases
-# every orphaned stop (see _recover_orphaned_freezes). Sits next to the registry
-# DB and honours AGENT_RADAR_DB. Uses its OWN lock so journal I/O never deadlocks
-# against _token_proc_lock.
-FREEZE_JOURNAL = os.getenv("AGENT_RADAR_FREEZE_JOURNAL", PERSIST_PATH + ".freeze.json")
+# ── crash-recovery journal (Postgres-exclusive) ───────────────────────────────
+# Every stop WE apply is recorded in registry.freeze_journal (Postgres). A radar
+# that is SIGKILLed cannot SIGCONT/resume on the way down, so a frozen process
+# would stay frozen forever. On the NEXT startup the radar reads the journal from
+# Postgres and releases every orphaned stop (see _recover_orphaned_freezes). There
+# is NO on-disk JSON journal — freeze state lives only in Postgres. An in-memory
+# mirror (+ its own lock) keeps reads cheap and avoids deadlocking _token_proc_lock.
 _freeze_journal: dict[str, dict] = {}        # agent_id -> {"kind": "process"|"remote", ...}
 _journal_lock = threading.Lock()
-
-
-def _journal_persist_locked() -> None:
-    """Write the journal atomically. Caller holds _journal_lock."""
-    try:
-        tmp = FREEZE_JOURNAL + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"frozen": _freeze_journal}, f)
-        os.replace(tmp, FREEZE_JOURNAL)
-    except Exception as exc:                  # noqa: BLE001 — must never break enforcement
-        log.warning("radar.token.journal.persist_failed error=%r", exc)
 
 
 def _journal_set(agent_id: str, entry: dict) -> None:
     with _journal_lock:
         _freeze_journal[agent_id] = entry
-        _journal_persist_locked()
-    # Durable mirror to the canonical registry.freeze_journal (the JSON file above
-    # stays the crash-recovery source, since it is readable even if the DB is down).
+    # Persist to the canonical registry.freeze_journal (Postgres only).
     _events_db.record_freeze(agent_id, entry.get("kind", "process"),
                              pid=entry.get("pid"), url=entry.get("url"),
                              reason=entry.get("reason"), payload=entry)
@@ -235,26 +221,20 @@ def _journal_clear(agent_id: str) -> None:
     with _journal_lock:
         if _freeze_journal.pop(agent_id, None) is None:
             return
-        _journal_persist_locked()
     _events_db.clear_freeze(agent_id)
 
 
 def _recover_orphaned_freezes() -> None:
     """Startup repair: release every stop journaled by a previous radar instance.
 
-    A SIGKILLed radar leaves its journal on disk; those stops are orphans (the
+    A SIGKILLed radar leaves freeze rows in Postgres; those stops are orphans (the
     process/remote agent will never be resumed by the dead radar). We resume them
     all and clear the journal. This is also CORRECT, not just safe: the in-memory
     token ledger is lost on restart, so budgets start fresh — a previously
     over-budget agent should run again, and the reconciler will re-freeze it only
     if it crosses the limit anew."""
-    try:
-        with open(FREEZE_JOURNAL, encoding="utf-8") as f:
-            journaled = json.load(f).get("frozen", {})
-    except FileNotFoundError:
-        return
-    except Exception as exc:                  # noqa: BLE001
-        log.warning("radar.token.journal.load_failed error=%r", exc)
+    journaled = _events_db.load_freezes()
+    if not journaled:
         return
     recovered = 0
     for agent_id, ent in (journaled or {}).items():
@@ -280,7 +260,7 @@ def _recover_orphaned_freezes() -> None:
             pass
     with _journal_lock:
         _freeze_journal.clear()
-        _journal_persist_locked()
+    _events_db.clear_all_freezes()
     if recovered:
         _record_event("token_recover", "", f"resumed {recovered} orphaned stop(s) after restart")
         log.info("radar.token.recover resumed=%d after restart", recovered)

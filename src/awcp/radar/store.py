@@ -1,21 +1,16 @@
-"""In-memory registry with durable persistence and scan reconciliation.
+"""In-memory registry with Postgres-exclusive durable persistence + scan reconciliation.
 
 The live working set stays in memory (a dict guarded by one lock — enough for the
 single background scanner thread plus the FastAPI request threads). Durability is
-pluggable:
-
-  * Postgres (preferred) — the canonical control-plane DB. The registry is mirrored
-    to the registry.agents table defined in observability/init-db, so a restart
-    restores self-registered agents from the DB, not a JSON file. Selected when
-    AGENT_RADAR_DATABASE_URL is set, SQLAlchemy + a driver are importable, and the
-    registry.agents table exists.
-  * JSON file (fallback) — the original behavior. Used whenever Postgres is not
-    available, so a dev checkout with no database keeps working unchanged.
+**Postgres only** — the canonical control-plane DB. The registry is mirrored to the
+registry.agents table defined in observability/init-db, so a restart restores
+self-registered agents from the DB. There is NO JSON fallback: data is never
+written to a local file. If Postgres is unreachable, the registry simply runs in
+memory (no persistence) and logs a warning — it never falls back to JSON.
 
 Only self-registered entries survive a restart (scanned processes are re-detected
-live); that rule is identical across both backends. NOTE: approval_state /
-approval_reason are not yet persisted — registry.agents has no such columns; the
-operator-approval gate moves to governance.approval_tokens in a later step.
+live). NOTE: approval_state / approval_reason are not persisted — registry.agents
+has no such columns; the operator-approval gate lives in governance.approval_tokens.
 """
 
 from __future__ import annotations
@@ -31,13 +26,8 @@ from awcp.radar.models import AgentEntry
 
 log = logging.getLogger("awcp.radar")
 
-# Where self-registered entries are persisted when Postgres is NOT used.
-PERSIST_PATH = os.getenv(
-    "AGENT_RADAR_DB",
-    os.path.join(os.getcwd(), "agent_radar_registry.json"),
-)
-# Canonical control-plane DB. When set (and reachable) the registry persists to
-# registry.agents instead of the JSON file above.
+# Canonical control-plane DB — the ONLY persistence backend. When set and
+# reachable the registry persists to registry.agents; there is no JSON fallback.
 DATABASE_URL = os.getenv("AGENT_RADAR_DATABASE_URL", "").strip()
 # A scanned process that disappears is pruned after this many seconds.
 PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_PRUNE_AFTER", "60"))
@@ -196,54 +186,25 @@ class Registry:
         self._pg = _PgBackend()
         self._load()
 
-    # ---- persistence (postgres when available, else JSON) ------------------
+    # ---- persistence (Postgres only — no JSON fallback) --------------------
     def _load(self) -> None:
-        if self._pg.ok:
-            try:
-                for entry in self._pg.load_self():
-                    self._entries[entry.id] = entry
-                return
-            except Exception as exc:  # noqa: BLE001
-                log.warning("radar.store postgres load failed (%r) — JSON fallback", exc)
-        self._load_json()
-
-    def _persist(self) -> None:
-        if self._pg.ok:
-            try:
-                self._pg.sync(list(self._entries.values()))
-                return
-            except Exception as exc:  # noqa: BLE001 — never break a request on persistence
-                log.warning("radar.store postgres persist failed (%r)", exc)
-                return
-        self._persist_json()
-
-    def _load_json(self) -> None:
-        if not os.path.exists(PERSIST_PATH):
+        if not self._pg.ok:
+            log.warning("radar.store persistence DISABLED — Postgres unavailable; "
+                        "registry runs in memory only (no JSON fallback)")
             return
         try:
-            with open(PERSIST_PATH) as f:
-                raw = json.load(f)
-            for item in raw.get("agents", []):
-                entry = AgentEntry(**item)
-                # only self-registered entries survive a restart; scanned ones
-                # are re-detected live.
-                if entry.source == "self":
-                    self._entries[entry.id] = entry
-        except Exception:
-            pass
+            for entry in self._pg.load_self():
+                self._entries[entry.id] = entry
+        except Exception as exc:  # noqa: BLE001 — never crash startup on a load error
+            log.warning("radar.store postgres load failed (%r) — starting empty", exc)
 
-    def _persist_json(self) -> None:
+    def _persist(self) -> None:
+        if not self._pg.ok:
+            return  # no DB -> in-memory only; data is never written to JSON
         try:
-            tmp = PERSIST_PATH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(
-                    {"agents": [e.model_dump() for e in self._entries.values()]},
-                    f,
-                    indent=2,
-                )
-            os.replace(tmp, PERSIST_PATH)
-        except Exception:
-            pass
+            self._pg.sync(list(self._entries.values()))
+        except Exception as exc:  # noqa: BLE001 — never break a request on persistence
+            log.warning("radar.store postgres persist failed (%r)", exc)
 
     # ---- reads -------------------------------------------------------------
     def all(self) -> list[AgentEntry]:

@@ -27,10 +27,12 @@ never creates or alters tables.
 ## Progress
 
 ### Done — registry persistence → `registry.agents`
-`src/awcp/radar/store.py` mirrors the live registry to `registry.agents` instead
-of the local JSON file. Field mapping is handled (`AgentEntry.user` → `os_user`,
-epoch floats ↔ `timestamptz`, `text[]` / `jsonb`). JSON remains a fail-open
-fallback when no DB is reachable. Only `source='self'` entries survive a restart.
+`src/awcp/radar/store.py` mirrors the live registry to `registry.agents`. Field
+mapping is handled (`AgentEntry.user` → `os_user`, epoch floats ↔ `timestamptz`,
+`text[]` / `jsonb`). Persistence is **Postgres-exclusive** — the JSON fallback was
+removed: if Postgres is unreachable the registry runs in memory only and writes
+nothing to disk (it never falls back to JSON). Only `source='self'` entries
+survive a restart.
 
 ### Done — Step 1: durable governance events → canonical tables
 `src/awcp/radar/db.py` no longer uses a flat `governance_events` table (removed,
@@ -133,10 +135,10 @@ The laminar `TokenLedger` keeps the live sliding-window / lifetime view in memor
   the in-memory lifetime view still reports them; no-DB path still records.
 
 ### Done — Step 5: freeze journal & onboarding runs → canonical tables
-- **`registry.freeze_journal`** — `_journal_set`/`_journal_clear` now dual-write to
-  the canonical table (`record_freeze`/`clear_freeze`, `kind ∈ process|remote`).
-  The local JSON journal stays the **crash-recovery source** (readable even when the
-  DB is down — more robust for restart repair); the table is the queryable mirror.
+- **`registry.freeze_journal`** — `_journal_set`/`_journal_clear` persist to the
+  canonical table (`record_freeze`/`clear_freeze`, `kind ∈ process|remote`).
+  Crash-recovery (`_recover_orphaned_freezes`) reads the journal back from Postgres
+  (`load_freezes`) — there is **no on-disk JSON journal** (Postgres-exclusive).
 - **`ops.onboarding_runs`** — `record_onboarding_run` upserts run state keyed by
   `workflow_id`: Temporal start → `running` (real wf id); inline completion → `done`
   (stamps `finished_at`), keyed by the real wf id or a stable `inline-<agent>` key.
@@ -183,8 +185,8 @@ recorded.
 - **Pure / fail-open** (`test_db_conformance.py`, `test_store_persistence.py`) — run
   with no database and even without SQLAlchemy installed: routing map, partition
   month-range maths (incl. year rollover), the durable-event whitelist, every write
-  as a no-op when no DB, enum guards, and the registry JSON fallback (self survives
-  a restart, scan does not, remove persists). **11 pass / 11 skip** with no DB.
+  as a no-op when no DB, enum guards, and the Postgres-exclusive registry store
+  (with no DB it persists nothing — never writes JSON). **11 pass / 11 skip** with no DB.
 - **Integration** (skipped unless `AGENT_RADAR_TEST_DATABASE_URL` points at a
   Postgres with the init-db schema) — event routing into the three canonical tables,
   `decision='denied'`, the evidence **hash chain**, audit filters, approval token

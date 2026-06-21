@@ -188,8 +188,9 @@
           shared or queryable store of who exists.</td>
         <td class="now"><span class="lbl">After:</span> Mirrored to canonical
           <code>registry.agents</code> (<code>text[]</code>/<code>jsonb</code>/<code>timestamptz</code>
-          mapped, <code>user→os_user</code>); restored from the DB on restart. JSON kept only as a
-          fail-open fallback.</td>
+          mapped, <code>user→os_user</code>); restored from the DB on restart.
+          <strong>Postgres-exclusive — no JSON</strong> (with no DB it runs in memory only,
+          never writes a file).</td>
       </tr>
       <tr>
         <td><strong>1 · Durable events</strong></td>
@@ -233,10 +234,10 @@
         <td><strong>5 · Freeze &amp; onboarding</strong></td>
         <td class="was"><span class="lbl">Before:</span> The freeze journal was a local JSON file
           only; onboarding-run state existed only as a field on the agent row.</td>
-        <td class="now"><span class="lbl">After:</span> Freezes dual-write to
-          <code>registry.freeze_journal</code> (JSON kept as the crash-recovery source); onboarding
-          runs recorded in <code>ops.onboarding_runs</code> (<code>running→done</code>,
-          <code>finished_at</code> stamped).</td>
+        <td class="now"><span class="lbl">After:</span> Freezes persist to
+          <code>registry.freeze_journal</code> and crash-recovery reads them back from Postgres
+          (no on-disk JSON journal); onboarding runs recorded in <code>ops.onboarding_runs</code>
+          (<code>running→done</code>, <code>finished_at</code> stamped).</td>
       </tr>
       <tr>
         <td><strong>6 · Least privilege &amp; partitions</strong></td>
@@ -326,17 +327,17 @@
 
   <!-- registry persistence -->
   <h2 class="sec" id="registry"><span class="num">3.</span>Registry persistence <span class="badge done">Done</span></h2>
-  <p><code>src/awcp/radar/store.py</code> mirrors the live registry to <code>registry.agents</code>
-  instead of the local JSON file. The mapping between the Pydantic model and the SQL columns is
-  handled explicitly:</p>
+  <p><code>src/awcp/radar/store.py</code> mirrors the live registry to <code>registry.agents</code>.
+  The mapping between the Pydantic model and the SQL columns is handled explicitly:</p>
   <ul>
     <li><code>AgentEntry.user</code> <span class="arrow">→</span> the <code>os_user</code> column;</li>
     <li>epoch <code>float</code> timestamps <span class="arrow">↔</span> <code>timestamptz</code>
       (via <code>to_timestamp()</code> on write, <code>EXTRACT(EPOCH …)</code> on read);</li>
     <li>Python lists and dicts <span class="arrow">↔</span> <code>text[]</code> and <code>jsonb</code>.</li>
   </ul>
-  <p>The JSON file remains a <strong>fail-open fallback</strong> whenever no database is reachable,
-  and — matching the prior contract — only <code>source='self'</code> entries survive a restart;
+  <p>Persistence is <strong>Postgres-exclusive</strong> — the JSON fallback was removed: if Postgres
+  is unreachable the registry runs in memory only and writes nothing to disk (it never falls back to
+  JSON). Only <code>source='self'</code> entries survive a restart;
   scanned processes are re-detected live. A full-sync on persist upserts the in-memory set and
   prunes rows no longer present.</p>
 
@@ -463,11 +464,11 @@
   <h2 class="sec" id="s5"><span class="num">8.</span>Step 5 — Freeze &amp; onboarding journals <span class="badge done">Done</span></h2>
   <ul>
     <li><strong><code>registry.freeze_journal</code>.</strong> <code>_journal_set</code> /
-      <code>_journal_clear</code> now dual-write to the canonical table
+      <code>_journal_clear</code> persist to the canonical table
       (<code>record_freeze</code> / <code>clear_freeze</code>, <code>kind ∈ process|remote</code>).
-      The local JSON journal stays the <strong>crash-recovery source</strong> — readable even when the
-      DB is down, which is the more robust choice for restart repair; the table is the queryable
-      mirror.</li>
+      Crash-recovery (<code>_recover_orphaned_freezes</code>) reads the journal back from Postgres
+      (<code>load_freezes</code>) — there is <strong>no on-disk JSON journal</strong>
+      (Postgres-exclusive).</li>
     <li><strong><code>ops.onboarding_runs</code>.</strong> <code>record_onboarding_run</code> upserts
       run state keyed by <code>workflow_id</code>: a Temporal start records <code>running</code> (real
       workflow id); inline completion records <code>done</code> and stamps <code>finished_at</code>,
@@ -524,8 +525,8 @@
     <li><strong>Pure / fail-open</strong> (<code>test_db_conformance.py</code>,
       <code>test_store_persistence.py</code>) — run with no database and even without SQLAlchemy
       installed: the routing map, partition month-range maths (including year rollover), the
-      durable-event whitelist, every write as a no-op when no DB, enum guards, and the registry JSON
-      fallback (self survives a restart, scan does not, remove persists).
+      durable-event whitelist, every write as a no-op when no DB, enum guards, and the
+      Postgres-exclusive registry store (with no DB it persists nothing — never writes JSON).
       <strong>11 pass / 11 skip</strong> with no DB.</li>
     <li><strong>Integration</strong> — skipped unless <code>AGENT_RADAR_TEST_DATABASE_URL</code> points
       at a Postgres with the init-db schema: event routing into the three canonical tables,
