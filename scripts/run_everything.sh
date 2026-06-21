@@ -103,6 +103,14 @@ export AGENT_RADAR_URL="${AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # All three names resolve from ${GATEWAY_PORT} — no port is hardcoded here.
 export AWCP_RADAR_URL="${AWCP_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 
+# Route every agent's MODEL calls through the token-aware /llm gateway instead of
+# letting them hit Ollama directly — so the tiktoken pre-check can deny an
+# over-budget call BEFORE it spends tokens (no bypass). AWCP_GATEWAY_UPSTREAM
+# points that proxy at the REAL model runtime so it never loops back on itself;
+# OLLAMA_BASE (what agents read) points at the proxy. Both env-overridable.
+export AWCP_GATEWAY_UPSTREAM="${AWCP_GATEWAY_UPSTREAM:-http://localhost:11434}"
+export OLLAMA_BASE="${OLLAMA_BASE:-http://localhost:${GATEWAY_PORT}/llm}"
+
 # Canonical control-plane DB (registry / governance / evidence / ops). When the
 # observability Postgres is up (docker compose, schema from observability/init-db)
 # the registry persists to registry.agents instead of the local JSON file, and

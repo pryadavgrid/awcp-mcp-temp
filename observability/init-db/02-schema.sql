@@ -17,7 +17,11 @@ CREATE TABLE registry.agents (
     quarantine_reason      text,
 
     autonomy_profile       text NOT NULL DEFAULT 'active'
-                           CHECK (autonomy_profile IN ('active','recommendation_only','suspended')),
+                           -- full AWCP degradation ladder (policy.DEFAULT_PROFILE_LADDER):
+                           -- active -> trace_boost -> throttled -> safe_profile ->
+                           -- recommendation_only -> suspended
+                           CHECK (autonomy_profile IN ('active','trace_boost','throttled',
+                                                       'safe_profile','recommendation_only','suspended')),
     autonomy_reason        text,
     failure_count          integer NOT NULL DEFAULT 0,
 
