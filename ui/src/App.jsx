@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import Radar from './pages/Radar.jsx'
 import Workflows from './pages/Workflows.jsx'
 import TokenMonitor from './pages/TokenMonitor.jsx'
+import Hooks from './pages/Hooks.jsx'
 import { usePoll } from './hooks/usePoll.js'
 import { getHealth } from './api.js'
 import { API_BASE } from './config.js'
@@ -13,6 +14,7 @@ const TITLES = {
   radar: 'Radar',
   workflow: 'Workflow',
   tokens: 'Token Monitor',
+  hooks: 'Agent Hooks',
 }
 
 export default function App() {
@@ -58,6 +60,7 @@ export default function App() {
           {active === 'radar' && <Radar />}
           {active === 'workflow' && <Workflows />}
           {active === 'tokens' && <TokenMonitor />}
+          {active === 'hooks' && <Hooks />}
         </div>
       </main>
     </div>
