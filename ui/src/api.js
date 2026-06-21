@@ -27,6 +27,8 @@ async function call(method, path, body) {
 // ── registry / radar ────────────────────────────────────────────────────────
 export const getHealth = () => call('GET', '/healthz')
 export const getAgents = () => call('GET', '/agents')
+// The bundle agents + their live tool catalogs (folder id, registry agent_id, tools).
+export const getUserAgents = () => call('GET', '/user/agents')
 export const getEvents = (limit = 50) => call('GET', `/events?limit=${limit}`)
 export const setAutonomy = (id, profile) =>
   call('POST', `/agents/${encodeURIComponent(id)}/autonomy`, { profile })
@@ -41,6 +43,21 @@ export const resetWindow = (id) => call('POST', `/laminar/reset/${encodeURICompo
 // it so the agent falls back to its risk-tier / system-default budget.
 export const setBudget = (id, tokens) =>
   call('POST', `/laminar/budgets/${encodeURIComponent(id)}`, { tokens })
+
+// ── agent hooks ───────────────────────────────────────────────────────────────
+// Registered hooks + per-hook stats, the recent-events ring buffer, and the
+// live enable/disable toggles. Served by the gateway when the
+// src/awcp/agent_hooks package is mounted; a 404 means it isn't.
+export const getHooks = () => call('GET', '/hooks')
+export const getHooksRecent = (limit = 60) => call('GET', `/hooks/recent?limit=${limit}`)
+export const enableHook = (name) => call('POST', `/hooks/${encodeURIComponent(name)}/enable`)
+export const disableHook = (name) => call('POST', `/hooks/${encodeURIComponent(name)}/disable`)
+// Policy-guard: enable/configure it (deny-list) at runtime, and one-click test it.
+export const getGuard = () => call('GET', '/hooks/guard')
+export const setGuard = (denyTools, enabled = true) =>
+  call('POST', '/hooks/guard', { deny_tools: denyTools, enabled })
+export const testGuard = (agentId, action) =>
+  call('POST', '/hooks/guard/test', { agent_id: agentId, action })
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>
