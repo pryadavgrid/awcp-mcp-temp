@@ -117,9 +117,9 @@ export AWCP_RADAR_URL="${AWCP_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 export AGENT_RADAR_DATABASE_URL="${AGENT_RADAR_DATABASE_URL:-postgresql+psycopg://${AWCP_APP_USER:-awcp_app}:${AWCP_APP_PASSWORD:-awcp_app_password}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
 export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg://${POSTGRES_USER:-awcp}:${POSTGRES_PASSWORD:-awcppassword}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
 
-# Temporal task queues the gateway's in-process workers listen on. Kept distinct
-# from run_all.sh's temp2-* queues so the gateway and a standalone radar can share
-# one Temporal dev server without stealing each other's workflows.
+# Temporal task queues the gateway's in-process workers listen on. Namespaced so
+# the gateway and any standalone radar can share one Temporal dev server without
+# stealing each other's workflows.
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 

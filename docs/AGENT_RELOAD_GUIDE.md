@@ -1,5 +1,11 @@
 # Agent Reload Guide
 
+> **⚠️ Legacy / superseded.** This guide describes the older standalone agent service
+> (`start_server.sh`, the direct REST service on `:8001`), which has been removed. The
+> platform now runs from the single launcher — `bash scripts/run_everything.sh` — with the
+> gateway and its workers in one process; restart that to pick up agent changes. See the
+> README. The notes below are kept for historical context only.
+
 ## Understanding the Issue
 
 **Problem**: Changes to agents (adding/removing agent files) only take effect when the server is completely restarted, not with `--reload` flag alone.

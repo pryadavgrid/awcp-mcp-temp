@@ -1711,10 +1711,10 @@ def index() -> FileResponse:
 # Standalone ASGI app — radar-only deployments.
 #
 # The AWCP gateway (awcp.gateway.app) imports `router` above and mounts it, so it
-# does NOT use this object. But the radar-centric runners (scripts/run_all.sh,
-# run_radar.sh, run_awcp.sh) serve `awcp.radar.api:app` directly on :8090, with
-# every route — including /llm/*, /laminar/* and the web UI — living at the ROOT,
-# which is what the bundled UI's absolute links expect.
+# does NOT use this object. It remains for a radar-only deployment that serves
+# `awcp.radar.api:app` directly (e.g. `uvicorn awcp.radar.api:app --port 8090`),
+# with every route — including /llm/*, /laminar/* and the web UI — living at the
+# ROOT, which is what the bundled UI's absolute links expect.
 #
 # Defining `app` at import time is required so `uvicorn awcp.radar.api:app` can
 # find it. When the gateway imports this module the object is simply created and

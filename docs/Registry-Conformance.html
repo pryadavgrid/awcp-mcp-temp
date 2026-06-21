@@ -70,6 +70,21 @@
   th,td{ text-align:left; vertical-align:top; padding:8px 11px; border-bottom:1px solid var(--rule) }
   thead th{ border-bottom:2px solid var(--ink); font-variant:small-caps; letter-spacing:.05em; font-size:.82rem }
   tbody tr:nth-child(even){ background:var(--tint) }
+  /* before/after summary table */
+  table.ba{ table-layout:fixed; font-size:.86rem }
+  table.ba th:nth-child(1), table.ba td:nth-child(1){ width:16% }
+  table.ba th:nth-child(2), table.ba td:nth-child(2),
+  table.ba th:nth-child(3), table.ba td:nth-child(3){ width:42% }
+  table.ba td.was{ color:var(--muted) }
+  table.ba td.now{ color:var(--ink) }
+  table.ba td .lbl{ display:none }
+  @media (max-width:680px){
+    table.ba, table.ba thead, table.ba tbody, table.ba tr, table.ba th, table.ba td{ display:block; width:auto }
+    table.ba thead{ display:none }
+    table.ba td{ border:none; padding:2px 0 }
+    table.ba tr{ border-bottom:1px solid var(--rule); padding:8px 0 }
+    table.ba td .lbl{ display:inline; font-variant:small-caps; letter-spacing:.06em; color:var(--accent); margin-right:.4em }
+  }
 
   /* lists */
   ul,ol{ margin:.6em 0 .6em 0; padding-left:1.3em }
@@ -116,7 +131,7 @@
       Agent Workforce Control Plane Magazine.</p>
     <div class="meta-line">
       <span>Branch <code>awcp-registry-updated</code></span>·
-      <span>Eight steps · all complete</span>·
+      <span>Eight steps + follow-ups · all complete</span>·
       <span>Status: verified &amp; committed</span>
     </div>
   </header>
@@ -131,14 +146,18 @@
     events, an operator approval gate, closed-loop onboarding hooks, a token ledger, crash and
     onboarding journals, least-privilege roles with partition maintenance, and a wired launcher
     — each validated against a live Postgres carrying the schema and each mapped to the
-    vocabulary of the <em>Agent Workforce Control Plane Magazine</em>. Throughout, the radar
-    retains a <strong>fail-open</strong> posture: with no database reachable it falls back to
-    its prior in-memory / JSON behaviour, so adoption never makes the control plane worse.</p>
+    vocabulary of the <em>Agent Workforce Control Plane Magazine</em>. Two follow-ups then closed
+    the last gaps: aligning the risk tiers to the canonical <code>low/medium/high</code> CHECK
+    (with a fail-secure clamp) and recording Temporal onboarding completion in
+    <code>ops.onboarding_runs</code>. Throughout, the radar retains a <strong>fail-open</strong>
+    posture: with no database reachable it falls back to its prior in-memory / JSON behaviour, so
+    adoption never makes the control plane worse.</p>
   </section>
 
   <nav class="toc">
     <h2>Contents</h2>
     <ol>
+      <li><a href="#summary">Change summary — before vs after</a></li>
       <li><a href="#premise">Premise &amp; governance model</a></li>
       <li><a href="#schema">The canonical schema</a></li>
       <li><a href="#registry">Registry persistence</a></li>
@@ -150,9 +169,123 @@
       <li><a href="#s6">Step 6 — Least privilege &amp; partitions</a></li>
       <li><a href="#s7">Step 7 — Launch wiring</a></li>
       <li><a href="#s8">Step 8 — Tests</a></li>
-      <li><a href="#remaining">Remaining items</a></li>
+      <li><a href="#remaining">Follow-up items</a></li>
     </ol>
   </nav>
+
+  <!-- change summary -->
+  <h2 class="sec" id="summary"><span class="num">§</span>Change summary — before vs after</h2>
+  <p>What each step actually changed, end to end — the prior behaviour and what replaced it,
+  including the two follow-ups.</p>
+  <table class="ba">
+    <caption>Table&nbsp;1 — Per-step impact: the state before the change and after it.</caption>
+    <thead><tr><th>Step</th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Registry persistence</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Live registry in memory, snapshotted to a
+          local <code>agent_radar_registry.json</code> file; visible only to that one process; no
+          shared or queryable store of who exists.</td>
+        <td class="now"><span class="lbl">After:</span> Mirrored to canonical
+          <code>registry.agents</code> (<code>text[]</code>/<code>jsonb</code>/<code>timestamptz</code>
+          mapped, <code>user→os_user</code>); restored from the DB on restart. JSON kept only as a
+          fail-open fallback.</td>
+      </tr>
+      <tr>
+        <td><strong>1 · Durable events</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Governance events lived in a volatile
+          in-memory ring plus an ad-hoc flat <code>governance_events</code> table with its own Alembic
+          migration — divergent from the canonical model and lost across that table's absence.</td>
+        <td class="now"><span class="lbl">After:</span> Routed to <code>evidence.ledger</code>
+          (hash-chained), <code>governance.policy_decisions</code> and
+          <code>governance.degradation_events</code>; the flat table + Alembic removed;
+          <code>GET /events/audit</code> reads a union of the three, same API shape.</td>
+      </tr>
+      <tr>
+        <td><strong>2 · Approval gate</strong></td>
+        <td class="was"><span class="lbl">Before:</span> A scope-expansion hold lived only in an
+          in-memory <code>approval_state</code> field — lost on restart, since
+          <code>registry.agents</code> has no approval column.</td>
+        <td class="now"><span class="lbl">After:</span> Durably backed by
+          <code>governance.approval_tokens</code> (<code>pending→approved/denied</code>, expiry,
+          <code>context_diff</code>); the gate is rehydrated from open tokens on startup, so it
+          survives a restart.</td>
+      </tr>
+      <tr>
+        <td><strong>3 · Hooks &amp; TTL</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Hook flags could be trusted on declaration;
+          degradation records (where present) lacked the from→to transition; the closed loop was
+          unverified against the schema.</td>
+        <td class="now"><span class="lbl">After:</span> Flags are <em>earned by observation</em> with
+          <code>last_*_ts</code> persisted; the TTL reconciler re-quarantines silent hooks
+          (→<code>evidence.ledger</code>); degradation rows carry
+          <code>from_profile/to_profile/trigger</code>. Verified end-to-end.</td>
+      </tr>
+      <tr>
+        <td><strong>4 · Token ledger</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Per-call token/cost accounting lived only in
+          memory plus an optional JSONL file.</td>
+        <td class="now"><span class="lbl">After:</span> Each call is also mirrored to canonical
+          <code>evidence.token_ledger</code> (append-only); the in-memory sliding-window/budget view
+          is unchanged.</td>
+      </tr>
+      <tr>
+        <td><strong>5 · Freeze &amp; onboarding</strong></td>
+        <td class="was"><span class="lbl">Before:</span> The freeze journal was a local JSON file
+          only; onboarding-run state existed only as a field on the agent row.</td>
+        <td class="now"><span class="lbl">After:</span> Freezes dual-write to
+          <code>registry.freeze_journal</code> (JSON kept as the crash-recovery source); onboarding
+          runs recorded in <code>ops.onboarding_runs</code> (<code>running→done</code>,
+          <code>finished_at</code> stamped).</td>
+      </tr>
+      <tr>
+        <td><strong>6 · Least privilege &amp; partitions</strong></td>
+        <td class="was"><span class="lbl">Before:</span> The app connected as the DB superuser, so the
+          evidence append-only GRANT was not actually enforced; partitioned tables had only the single
+          <code>2026_06</code> partition.</td>
+        <td class="now"><span class="lbl">After:</span> The app connects as <code>awcp_app</code>
+          (DML; <code>DELETE</code>/<code>UPDATE</code> on <code>evidence</code> and DDL <em>denied</em>);
+          a separate admin URL creates the current + 2 monthly partitions at startup.</td>
+      </tr>
+      <tr>
+        <td><strong>7 · Launch wiring</strong></td>
+        <td class="was"><span class="lbl">Before:</span> The launcher started the stack but did not
+          bring up or wait for Postgres; a stale ad-hoc <code>:5434</code> container (no schema)
+          shadowed the real one.</td>
+        <td class="now"><span class="lbl">After:</span> The launcher starts the canonical Postgres and
+          waits for <code>pg_isready</code> before the gateway, so the registry persists from the first
+          request; the stale <code>:5434</code> container + orphaned volume were removed — one
+          <code>postgres</code> on <code>:5432</code>.</td>
+      </tr>
+      <tr>
+        <td><strong>8 · Tests</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Only ad-hoc manual checks; no committed tests
+          for the durable layer.</td>
+        <td class="now"><span class="lbl">After:</span> <code>tests/radar/</code> — a fail-open tier
+          (11 tests, runs with no DB / no SQLAlchemy) and an opt-in Postgres integration tier
+          (22 tests).</td>
+      </tr>
+      <tr>
+        <td><strong>Follow-up · Risk tiers</strong></td>
+        <td class="was"><span class="lbl">Before:</span> The <code>RISK_ORDER</code> default included
+          <code>critical</code>, which the <code>registry.agents.risk</code> CHECK rejects — a resolved
+          <code>critical</code> tier would fail the registry write.</td>
+        <td class="now"><span class="lbl">After:</span> Default is <code>low,medium,high</code>;
+          <code>authoritative_risk</code> clamps any out-of-set result to the most restrictive known
+          tier (fail-secure), so a resolved tier can never violate the CHECK. A declared-<code>critical</code>
+          agent resolves to <code>high</code> and persists cleanly.</td>
+      </tr>
+      <tr>
+        <td><strong>Follow-up · Temporal onboarding</strong></td>
+        <td class="was"><span class="lbl">Before:</span> Temporal onboarding runs stayed
+          <code>running</code> in <code>ops.onboarding_runs</code> — only the inline path recorded
+          <code>done</code>.</td>
+        <td class="now"><span class="lbl">After:</span> The <code>admit</code> activity records the run
+          <code>done</code> (with <code>finished_at</code>) for the Temporal path too, keyed by the
+          workflow id.</td>
+      </tr>
+    </tbody>
+  </table>
 
   <!-- 1 -->
   <h2 class="sec" id="premise"><span class="num">1.</span>Premise &amp; governance model</h2>
@@ -173,7 +306,7 @@
   <p>Source of truth: <code>observability/init-db/02-schema.sql</code>. Four schemas partition the
   control plane's durable state by concern:</p>
   <table>
-    <caption>Table&nbsp;1 — Canonical schemas and their tables.</caption>
+    <caption>Table&nbsp;2 — Canonical schemas and their tables.</caption>
     <thead><tr><th>Schema</th><th>Tables</th><th>Concern</th></tr></thead>
     <tbody>
       <tr><td><code>registry</code></td><td><code>agents</code>, <code>freeze_journal</code>, <code>gateway_agents</code></td><td>Who exists, who is frozen, who is gatewayed</td></tr>
@@ -213,7 +346,7 @@
   that table, <code>alembic.ini</code>, and <code>migrations/</code> were all removed. The
   audit-worthy subset of events is now routed, by kind, to the canonical tables:</p>
   <table>
-    <caption>Table&nbsp;2 — Event routing, expressed in the magazine's vocabulary.</caption>
+    <caption>Table&nbsp;3 — Event routing, expressed in the magazine's vocabulary.</caption>
     <thead><tr><th>Magazine concept</th><th>Event kinds</th><th>Canonical table</th></tr></thead>
     <tbody>
       <tr><td>Gate Write Actions <span class="small">(denial)</span></td><td><code>gate_denied</code></td><td><code>governance.policy_decisions</code></td></tr>

@@ -269,6 +269,16 @@
 <span class="c-cmd">./.venv/bin/pip</span> install <span class="c-flag">-r</span> <span class="c-path">requirements.txt</span></code></pre>
   </div>
 
+  <div class="note">
+    <b>⚠️ Legacy / superseded.</b> The per-service launchers below
+    (<code>run_worker.sh</code>, <code>run_control.sh</code>, <code>start_mcp.sh</code>,
+    <code>start_server.sh</code>, ports <code>:8001/:8002/:8003</code>) have been removed. The
+    platform now runs from the single launcher — <code>bash scripts/run_everything.sh</code> —
+    which brings up Temporal, the MCP server, the registry/radar and the in-process workers behind
+    the gateway on <code>:8000</code> (UI on <code>:5173</code>). See the README. The steps below are
+    retained for historical context.
+  </div>
+
   <h3>Step 1 — Start Temporal (the boss + its dashboard)</h3>
   <pre><code><span class="c-cmd">temporal</span> server start-dev</code></pre>
   <p class="small">This starts the workflow engine on <code>localhost:7233</code> and its web dashboard on <code>localhost:8233</code>.</p>

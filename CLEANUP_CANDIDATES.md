@@ -52,20 +52,11 @@ These are write-up files generated during development chat sessions — "here is
 
 ---
 
-## 5 — Scripts superseded by `run_all.sh`
+## 5 — Scripts consolidated into `run_everything.sh` ✅ done
 
-`scripts/run_all.sh` now starts all 9 services in the correct order with full PID tracking and graceful shutdown. The individual service scripts below each start only one piece of the stack. They have not been updated to match current config (namespaced Temporal queues, LMNR env vars, etc.) and will produce a broken partial environment if used.
+Resolved. `scripts/run_everything.sh` is now the **single launcher** (whole platform behind the gateway on `:8000`, workers in-process). The previous all-in-one runners (`run_all.sh`, `run_awcp.sh`) and the single-component scripts (`run_radar.sh`, `run_worker.sh`, `run_control.sh`, `start_mcp.sh`, `start_server.sh`) have been **removed**. Docs/UI references were updated to `run_everything.sh`.
 
-| File | What it starts | Lines | Superseded by |
-|---|---|---|---|
-| `scripts/run_awcp.sh` | Temporal + radar only (no agent service, no worker, no control surface, no Laminar env) | 114 | `run_all.sh` (all 9 services) |
-| `scripts/run_radar.sh` | Radar only (:8090) | 7 | `run_all.sh` step 9 |
-| `scripts/run_worker.sh` | Temporal worker only | 7 | `run_all.sh` step 6 |
-| `scripts/run_control.sh` | Control surface only (:8003) | 8 | `run_all.sh` step 7 |
-| `scripts/start_mcp.sh` | MCP server only (:8002) | 9 | `run_all.sh` step 4 |
-| `scripts/start_server.sh` | Agent service only (:8001) | 9 | `run_all.sh` step 5 |
-
-`scripts/clean_cache.sh` (8 lines — finds and removes `__pycache__` dirs) is not superseded but is trivially reproducible as a one-liner. Low priority.
+`scripts/clean_cache.sh` (finds and removes `__pycache__` dirs) is kept as a small utility.
 
 ---
 
@@ -114,4 +105,4 @@ These are lower priority — they have at least one reference or some remaining 
 | Stale but referenced docs | 4 |
 | **Total flagged** | **26** |
 
-Active source files in `src/`, `tests/`, `observability/`, `scripts/run_all.sh`, `requirements.txt`, `README.md`, and all files under `docs/Agent-Workforce-Control-Plane-Magazine.html` + `docs/AWCP_Magazine_vs_temp2.html` are **not flagged** — they are in active use.
+Active source files in `src/`, `tests/`, `observability/`, `scripts/run_everything.sh`, `requirements.txt`, `README.md`, and all files under `docs/Agent-Workforce-Control-Plane-Magazine.html` + `docs/AWCP_Magazine_vs_temp2.html` are **not flagged** — they are in active use.

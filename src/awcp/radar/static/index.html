@@ -320,7 +320,7 @@ tick(); setInterval(tick,3000);
   window.lmnrCopyCmd=function(){
     var k=sessionStorage.getItem(SK);
     if(!k){window.lmnrChange();return;}
-    var cmd='LMNR_PROJECT_API_KEY='+k+' bash scripts/run_all.sh';
+    var cmd='LMNR_PROJECT_API_KEY='+k+' bash scripts/run_everything.sh';
     navigator.clipboard.writeText(cmd).then(function(){
       var msg=document.getElementById('lmnr-copy-msg');
       msg.textContent='· copied!';

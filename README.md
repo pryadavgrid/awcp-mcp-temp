@@ -27,23 +27,31 @@ independently — the radar detects them automatically by scanning your processe
 ### 1 — Start the control plane (one command)
 
 ```bash
-bash scripts/run_awcp.sh          # first run also creates the venv + installs requirements
-# to also export telemetry to the stack:
-OTEL_ENABLED=true bash scripts/run_awcp.sh
+bash scripts/run_everything.sh    # first run also creates the venv + installs requirements
 ```
 
-This single script brings up, in order:
-1. the **Docker daemon** (starts it if it isn't running) → the **telemetry stack**
-   (OTel Collector → Tempo, Prometheus, Loki, Grafana) via `observability/docker-compose.yml`;
-2. the **Temporal** dev server (engine `:7233`, UI `:8233`);
-3. the **Agent Radar** registry on `:8090` (runs in the foreground — **Ctrl+C** stops the
-   radar and the Temporal it started).
+`run_everything.sh` is the **single launcher** — it brings the whole platform up behind one
+port (`:8000`, the gateway) and starts, in order:
+1. the **venv + dependencies** (first run only);
+2. the **Docker daemon** (starts it if it isn't running) → the **telemetry stack**
+   (OTel Collector → Tempo, Prometheus, Loki, Grafana) **and the canonical Postgres**
+   (`registry`/`governance`/`evidence`/`ops` schema from `observability/init-db`);
+3. the **Temporal** dev server (engine `:7233`, UI `:8233`);
+4. **Ollama** (`:11434`) and the **MCP control server** (`:8002`, SSE);
+5. the **React UI** (`:5173`) and the **AWCP Gateway** (`:8000`, foreground) — which mounts the
+   registry/radar, the token monitor, and runs the onboarding/execution workers in-process.
+   **Ctrl+C** stops everything this script started.
 
-Toggles: `SKIP_TELEMETRY=1` (skip the Docker stack), `SKIP_INSTALL=1` (skip pip).
+Toggles: `SKIP_TELEMETRY=1` (skip the Docker stack), `SKIP_MCP=1`, `SKIP_OLLAMA=1`,
+`SKIP_UI=1`, `SKIP_INSTALL=1`, `DEMO=1` (seed a synthetic agent + token-control walkthrough),
+`GATEWAY_PORT=8000`, `UI_PORT=5173`.
 
 | Open | URL |
 |---|---|
-| **Agent Radar** (registry UI) | http://localhost:8090 |
+| **React UI** (give prompts) | http://localhost:5173 |
+| **Gateway / Registry dashboard** | http://localhost:8000  *(Tokens column)* |
+| **Token monitor** | http://localhost:8000/laminar/ui |
+| **API docs** | http://localhost:8000/docs |
 | **Grafana** (dashboards) | http://localhost:3000  *(login `admin` / `awcp1234`)* |
 | **Temporal** UI | http://localhost:8233 |
 | **Prometheus** | http://localhost:9090 |
@@ -170,38 +178,20 @@ with **no server or workflow changes**.
 
 ## Running it (single machine)
 
-Prereqs: **Python ≥ 3.10**, **Ollama** running with the models, and the **Temporal CLI**.
+Prereqs: **Python ≥ 3.10**, **Ollama** running with the models, **Docker** (for the telemetry
+stack + Postgres), and optionally the **Temporal CLI**.
+
+Everything runs from the single launcher — there are no per-component scripts to start
+separately; the gateway runs the onboarding/execution workers, the MCP control server, the
+registry/radar, and the token monitor in one process:
 
 ```bash
-# 1. Install
-python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-ollama pull gemma2:2b && ollama pull llama3.1:8b
-
-# 2. Temporal (engine :7233, web UI :8233)
-temporal server start-dev
-
-# 3. The worker (defaults to a local stdio MCP server — no env needed)
-./scripts/run_worker.sh
-
-# 4a. The control surface (web UI)
-./scripts/run_control.sh            # http://localhost:8003
-
-# 4b. …or trigger from the CLI
-temporal workflow execute \
-  --type AgentGovernanceWorkflow --task-queue awcp-governance-queue \
-  --workflow-id r1 \
-  --input '{"agent_name":"ollama-advanced","input":"current price of gold per gram"}'
+bash scripts/run_everything.sh
 ```
 
-Watch the run in the control surface or the Temporal UI (`http://localhost:8233`).
-
-### Other launchers
-| Script | What it starts | Port |
-|---|---|---|
-| `scripts/run_worker.sh` | Temporal worker (drives the MCP server) | — |
-| `scripts/run_control.sh` | Control surface (web UI + trigger API) | 8003 |
-| `scripts/start_mcp.sh` | MCP server over **SSE** + dashboard | 8002 |
-| `scripts/start_server.sh` | Legacy direct REST agent service | 8001 |
+Use the `SKIP_*` toggles from [§1](#1--start-the-control-plane-one-command) to leave a component
+out (e.g. `SKIP_TELEMETRY=1`, `SKIP_OLLAMA=1`, `SKIP_UI=1`). Drive runs from the React UI
+(`http://localhost:5173`) and watch them in the Temporal UI (`http://localhost:8233`).
 
 ---
 
@@ -347,13 +337,15 @@ tool calls and all — with no other changes.
 The worker can use a **remote** MCP server over SSE instead of a local one, so a teammate's
 Temporal can drive the models on the host's machine.
 
-- **Host:** `./scripts/start_mcp.sh` then expose it: `ngrok http 8002 --basic-auth "team:pass"`.
-- **Teammate's worker:** set the env and start:
+- **Host:** start the stack with `bash scripts/run_everything.sh` (the MCP control server is on
+  `:8002`) and expose it: `ngrok http 8002 --basic-auth "team:pass"`. To run *only* the MCP
+  server, launch it directly: `./.venv/bin/uvicorn awcp.mcp.server:app --host 0.0.0.0 --port 8002`.
+- **Teammate:** point the in-process worker at the remote MCP and start the stack:
   ```bash
   export AWCP_MCP_SSE_URL="https://<host-ngrok>.ngrok-free.app/sse"
   export AWCP_MCP_SSE_AUTH="team:pass"          # if host used --basic-auth
   # export TEMPORAL_SERVER_URL="host:7233"      # if their Temporal isn't local
-  ./scripts/run_worker.sh
+  bash scripts/run_everything.sh                # its gateway worker uses the remote MCP
   ```
 
 ⚠️ The MCP server exposes `run_command`/`read_file`/`write_file` — always protect the tunnel
