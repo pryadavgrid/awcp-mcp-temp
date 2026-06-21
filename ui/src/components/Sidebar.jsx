@@ -3,6 +3,7 @@ const ITEMS = [
   { id: 'radar', label: 'Radar', icon: '◎' },
   { id: 'workflow', label: 'Workflow', icon: '⤳' },
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
+  { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
 ]
 
 export function Sidebar({ active, onSelect, health }) {
