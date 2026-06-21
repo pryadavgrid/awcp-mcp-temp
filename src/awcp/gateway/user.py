@@ -37,7 +37,7 @@ from awcp.gateway import agents_fs as fs
 router = APIRouter(prefix="/user", tags=["user"])
 
 # Temporal Web UI base — used only to build deep links to the task's workflow.
-TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
+TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8080")
 TEMPORAL_SERVER_URL = os.getenv("TEMPORAL_SERVER_URL", "localhost:7233")
 
 # Tunables (env-driven — nothing about timing is baked in).

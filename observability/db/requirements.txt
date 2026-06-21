@@ -1,0 +1,4 @@
+# Isolated deps for the JSON->Postgres migration toolkit.
+# Installed into observability/db/.venv by setup_venv.sh so the project's
+# main .venv is left untouched.
+psycopg[binary]>=3.1

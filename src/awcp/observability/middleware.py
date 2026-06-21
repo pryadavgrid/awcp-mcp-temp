@@ -26,6 +26,49 @@ logger = logging.getLogger(__name__)
 # FastAPI Auto-Instrumentation
 
 
+def _install_safe_route_details() -> None:
+    """Guard OTel's route resolver against FastAPI's `_IncludedRouter`.
+
+    opentelemetry-instrumentation-fastapi 0.63b1's `_get_route_details()` wraps
+    the FULL-match branch in `try/except AttributeError` for routes that lack a
+    `.path` attribute, but the PARTIAL-match branch reads `starlette_route.path`
+    unguarded. FastAPI >= ~0.137 stores every `include_router(...)` as an
+    `_IncludedRouter` (a `BaseRoute` with NO `.path`). A method-mismatched
+    request — e.g. a CORS preflight `OPTIONS` on a POST-only route — produces a
+    PARTIAL match against that router, hits the unguarded line, and raises
+    AttributeError, which uvicorn turns into HTTP 500. In the browser that
+    surfaces as "Failed to fetch" because the preflight never returns the CORS
+    headers. Mirror the FULL branch's guard on the PARTIAL branch until the
+    pinned OTel version ships the fix upstream.
+    """
+    import opentelemetry.instrumentation.fastapi as _otel_fastapi
+    from starlette.routing import Match, Route
+
+    def _safe_get_route_details(scope):
+        app = scope["app"]
+        route = None
+        for starlette_route in app.routes:
+            match, _ = (
+                Route.matches(starlette_route, scope)
+                if isinstance(starlette_route, Route)
+                else starlette_route.matches(scope)
+            )
+            if match == Match.FULL:
+                try:
+                    route = starlette_route.path
+                except AttributeError:
+                    route = scope.get("path")
+                break
+            if match == Match.PARTIAL:
+                try:
+                    route = starlette_route.path
+                except AttributeError:
+                    route = scope.get("path")
+        return route
+
+    _otel_fastapi._get_route_details = _safe_get_route_details
+
+
 def instrument_fastapi(app) -> None:
     """
     Call this after creating your FastAPI app.
@@ -33,6 +76,7 @@ def instrument_fastapi(app) -> None:
       - http.method, http.route, http.status_code
       - Duration histogram
     """
+    _install_safe_route_details()  # must run before any request is served
     FastAPIInstrumentor.instrument_app(
         app,
         excluded_urls="health,metrics",  # Don't trace health checks

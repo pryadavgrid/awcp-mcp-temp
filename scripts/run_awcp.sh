@@ -98,11 +98,21 @@ else
   warn "Temporal CLI not found — radar will onboard inline (install: brew install temporal)."
 fi
 
+# Temporal Web UI port depends on who started it: dev-server serves :8233,
+# docker-compose (auto-setup) UI maps to :8080. Probe the live one and bind
+# radar deep-links to it (a pre-set env wins via ':-').
+if   [ -n "$(port_open 8233)" ]; then TEMPORAL_UI="http://localhost:8233"
+elif [ -n "$(port_open 8080)" ]; then TEMPORAL_UI="http://localhost:8080"
+else                                  TEMPORAL_UI="http://localhost:8233"
+fi
+export AGENT_RADAR_TEMPORAL_UI="${AGENT_RADAR_TEMPORAL_UI:-$TEMPORAL_UI}"
+export AWCP_TEMPORAL_UI_BASE="${AWCP_TEMPORAL_UI_BASE:-$TEMPORAL_UI}"
+
 # ── 4. the AWCP registry (radar) — foreground ────────────────────────
 echo
 echo "  ── AWCP is up (magazine mode) ────────────────────────────────"
 echo "     Registry (radar) : http://localhost:8090"
-echo "     Temporal UI      : http://localhost:8233"
+echo "     Temporal UI      : ${TEMPORAL_UI}"
 echo "     Grafana          : http://localhost:3000   (admin / admin)"
 echo "     Prometheus       : http://localhost:9090"
 echo

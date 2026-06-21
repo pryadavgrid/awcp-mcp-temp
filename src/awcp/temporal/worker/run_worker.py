@@ -16,6 +16,7 @@ from awcp.temporal.activities.mcp_gateway import (
     mcp_run_tool,
     mcp_select_tools,
     mcp_synthesize_answer,
+    policy_gate,
     # mcp_search_arxiv,
 )
 from awcp.observability.setup import setup_otel
@@ -47,6 +48,7 @@ async def main():
             mcp_select_tools,
             mcp_run_tool,
             mcp_synthesize_answer,
+            policy_gate,
             # mcp_search_arxiv,
         ],
     )

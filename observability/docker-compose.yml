@@ -5,13 +5,13 @@
 # Stop:  docker compose -f observability/docker-compose.yml down
 # Logs:  docker compose -f observability/docker-compose.yml logs -f
 
-version: "3.8"
-
+# version: "3.8"
 networks:
   awcp-obs:
     driver: bridge
 
 volumes:
+  postgres_data: {}
   prometheus_data: {}
   tempo_data: {}
   loki_data: {}
@@ -22,6 +22,32 @@ volumes:
   lmnr_quickwit_data: {}
 
 services:
+
+  # ══════════════════════════════════════════
+  # OPA — Open Policy Agent (governance policy-as-code)
+  # The magazine's Step 03 gate engine. The radar's policy_engine queries
+  #   POST http://localhost:8181/v1/data/awcp/governance/decision
+  # to evaluate write-action governance from awcp.rego. Policies + data are
+  # mounted read-only; editing observability/opa/policies or /data hot-reloads
+  # the policy without a code deploy. Set AWCP_POLICY_ENGINE=opa|shadow to use it.
+  # ══════════════════════════════════════════
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: awcp-opa
+    restart: unless-stopped
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "/policies"
+      - "/data"
+    volumes:
+      - ./opa/policies:/policies:ro
+      - ./opa/data:/data:ro
+    ports:
+      - "8181:8181"
+    networks:
+      - awcp-obs
 
   # ══════════════════════════════════════════
   # OTel Collector — receives from Python apps
@@ -123,6 +149,63 @@ services:
       - prometheus
       - tempo
       - loki
+
+  # ══════════════════════════════════════════
+  # Postgres + Temporal — workflow orchestration
+  # ══════════════════════════════════════════
+  postgres:
+    image: postgres:16
+    container_name: awcp-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-awcp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-awcppassword}
+      POSTGRES_DB: ${POSTGRES_DB:-awcp}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"     # canonical — shadowed if a local (brew) postgres already owns localhost:5432
+      - "55432:5432"    # fallback host port: always reaches THIS container even when 5432 is taken
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-awcp}", "-d", "${POSTGRES_DB:-awcp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - awcp-obs
+
+  temporal:
+    image: temporalio/auto-setup:1.22
+    container_name: awcp-temporal
+    restart: always
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-awcp}
+      - POSTGRES_PWD=${POSTGRES_PASSWORD:-awcppassword}
+      - POSTGRES_SEEDS=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-awcp}
+    ports:
+      - "7233:7233"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - awcp-obs
+
+  temporal-ui:
+    image: temporalio/ui:2.37.0
+    container_name: awcp-temporal-ui
+    restart: always
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+    networks:
+      - awcp-obs
 
   # ══════════════════════════════════════════
   # Laminar — self-hosted LLM observability UI

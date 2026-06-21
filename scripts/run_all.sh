@@ -156,6 +156,16 @@ else
   warn "Temporal CLI not found — radar will onboard inline (install: brew install temporal)."
 fi
 
+# Temporal Web UI port depends on who started it: dev-server serves :8233,
+# docker-compose (auto-setup) UI maps to :8080. Probe the live one and bind
+# radar + control deep-links to it (a pre-set env wins via ':-').
+if   [ -n "$(port_open 8233)" ]; then TEMPORAL_UI="http://localhost:8233"
+elif [ -n "$(port_open 8080)" ]; then TEMPORAL_UI="http://localhost:8080"
+else                                  TEMPORAL_UI="http://localhost:8233"
+fi
+export AGENT_RADAR_TEMPORAL_UI="${AGENT_RADAR_TEMPORAL_UI:-$TEMPORAL_UI}"
+export AWCP_TEMPORAL_UI_BASE="${AWCP_TEMPORAL_UI_BASE:-$TEMPORAL_UI}"
+
 # ── 4. MCP control server (:8002, SSE) — background ───────────────────
 if [ "${SKIP_MCP:-0}" = "1" ]; then
   warn "SKIP_MCP=1 — not starting the MCP server."
@@ -251,7 +261,7 @@ echo "     LLM gateway       : http://localhost:${RADAR_PORT}/llm   (pre-executi
 echo "     Agent service     : http://localhost:8001  (direct REST + /docs)"
 echo "     MCP server        : http://localhost:8002  (SSE)"
 echo "     Control surface   : http://localhost:8003  (browser UI → Temporal)"
-echo "     Temporal UI       : http://localhost:8233  (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Temporal UI       : ${TEMPORAL_UI}  (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
 echo "     Grafana           : http://localhost:3000  (admin / awcp1234)"
 echo "     Prometheus        : http://localhost:9090"
 echo "     Laminar UI        : http://localhost:5667  (self-hosted LLM observability)"

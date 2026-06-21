@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from awcp.radar import onboarding, policy
+from awcp.radar import onboarding, policy, policy_engine, approval
 from awcp.radar.models import AgentEntry, RegisterRequest
 from awcp.radar.store import REGISTRY, PERSIST_PATH
 from awcp.radar.scanner import SCANNER
@@ -1154,6 +1154,22 @@ class GateRequest(BaseModel):
     action: str = ""
     write: bool = True            # the magazine gates WRITE-capable actions
     scope: str = ""               # the action's write scope (checked vs declared write_scopes)
+    # --- magazine Step 03: OPA + approval tokens. All optional/back-compat: an
+    # old caller that sends only action/write/scope keeps working unchanged. ---
+    tool_name: str = ""           # the concrete tool (dangerous-tool risk classification)
+    workflow_id: str = ""         # Temporal workflow this action belongs to (token binding)
+    task_id: str = ""             # task this action belongs to (token binding)
+    actor: str = "agent"          # who is acting (agent | operator | system)
+    approval_token: str = ""      # operator-issued token that unblocks one high-risk write
+
+
+class ApprovalRequest(BaseModel):
+    """Operator issues a narrow, expiring approval token for one exact action."""
+    action: str = ""
+    scope: str = ""
+    workflow_id: str = ""
+    task_id: str = ""
+    ttl_seconds: int | None = None   # override AWCP_APPROVAL_TTL_SECONDS for this token
 
 
 class SignalRequest(BaseModel):
@@ -1196,7 +1212,10 @@ def gate(agent_id: str, req: GateRequest) -> dict:
                 "autonomy_profile": e.autonomy_profile}
 
     t0 = time.monotonic()
-    decision = policy.evaluate_action(e, action=req.action, is_write=req.write, scope=req.scope)
+    # Route through the policy engine (local | opa | shadow). It evaluates the
+    # same write-action gate, adds the magazine's requires_approval outcome under
+    # OPA, and validates any operator approval token the caller carries.
+    decision = policy_engine.evaluate(e, req)
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
         decision=decision["decision"],
@@ -1204,15 +1223,43 @@ def gate(agent_id: str, req: GateRequest) -> dict:
         duration=elapsed,
         risk=e.risk,
     )
+    detail = f"{decision['decision']} ({decision['mode']})"
+    if decision.get("requires_approval"):
+        detail = f"requires_approval ({decision['mode']})"
     log.info(
-        "radar.gate agent_id=%s action=%r decision=%s mode=%s risk=%s dur_ms=%.2f",
+        "radar.gate agent_id=%s action=%r decision=%s mode=%s requires_approval=%s "
+        "risk=%s engine=%s dur_ms=%.2f",
         agent_id, (req.action or "")[:64], decision["decision"],
-        decision["mode"], e.risk, elapsed * 1000,
+        decision["mode"], bool(decision.get("requires_approval")), e.risk,
+        policy_engine.ENGINE_MODE, elapsed * 1000,
     )
-    _record_event("gate", agent_id, f"{decision['decision']} ({decision['mode']})",
-                  action=req.action)
+    _record_event("gate", agent_id, detail, action=req.action)
     return {"agent_id": agent_id, **decision,
+            "engine": policy_engine.ENGINE_MODE,
             "status": e.status, "autonomy_profile": e.autonomy_profile}
+
+
+@router.post("/agents/{agent_id}/approval")
+def issue_approval(agent_id: str, req: ApprovalRequest) -> dict:
+    """Operator action: mint a narrow, expiring, single-use approval token that
+    unblocks ONE high-risk write for this agent (the magazine's approval token).
+    The agent then retries the same action carrying `approval_token`."""
+    e = _require(agent_id)
+    grant = approval.issue(
+        agent_id, action=req.action, scope=req.scope,
+        workflow_id=req.workflow_id, task_id=req.task_id, ttl=req.ttl_seconds,
+    )
+    _record_event("approval", agent_id,
+                  f"token issued for {req.action or req.scope or 'action'}",
+                  action=req.action, scope=req.scope)
+    return grant
+
+
+@router.get("/policy/status")
+def policy_status() -> dict:
+    """Active policy engine (local | opa | shadow), OPA reachability, and the
+    running count of shadow-mode local/OPA disagreements (the rollout signal)."""
+    return policy_engine.status()
 
 
 @router.post("/agents/{agent_id}/signal")
@@ -1527,6 +1574,7 @@ def healthz() -> dict:
         "temporal_connected": STATE["temporal"],
         "otel_enabled": _OTEL_ENABLED,
         "laminar": _laminar.status_summary() if _LAMINAR else {"enabled": False},
+        "policy": policy_engine.status(probe=False),
     }
 
 

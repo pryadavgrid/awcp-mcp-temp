@@ -13,6 +13,7 @@ import os
 import time
 from contextlib import asynccontextmanager, contextmanager
 
+import httpx
 from opentelemetry import propagate, trace as otel_trace
 from opentelemetry.trace import Status, StatusCode
 from temporalio import activity
@@ -33,6 +34,13 @@ from awcp.observability.middleware import AWCPMetrics
 
 
 logger = logging.getLogger(__name__)
+
+# Radar write-action gate (the policy_gate activity calls it over HTTP). Same
+# env knobs the MCP firewall uses, so the gate behaves identically wherever it is
+# consulted. Nothing hardcoded — URL, timeout, and fail mode are all env-driven.
+RADAR_URL = os.getenv("AGENT_RADAR_URL", "http://localhost:8090").rstrip("/")
+GATE_TIMEOUT = float(os.getenv("AWCP_GATE_TIMEOUT", "3"))
+GATE_FAIL_OPEN = os.getenv("AWCP_GATE_FAIL_OPEN", "true").lower() == "true"
 
 # Lazy metrics — created on first activity call, after setup_otel() has run
 _awcp_metrics: AWCPMetrics | None = None
@@ -350,6 +358,57 @@ async def mcp_run_tool(payload: dict) -> dict:
         except Exception:
             _get_metrics().record_activity("run_tool", time.time() - start, "failed")
             raise
+
+
+@activity.defn(name="policy_gate")
+async def policy_gate(payload: dict) -> dict:
+    """Policy gate step (magazine Step 03) — ask the radar's write-action gate
+    BEFORE a state-changing tool runs, so the workflow can pause/deny durably.
+
+    Returns the radar's decision dict {decision, mode, reason, requires_approval,
+    ...}. On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a
+    missing control plane never hard-breaks the workflow (unless ops fail-closed).
+    """
+    agent_id = payload.get("agent_id") or ""
+    ctx = _extract_ctx(payload)
+    start = time.time()
+
+    with _act_span("policy_gate", ctx, agent_id=agent_id,
+                   tool_name=payload.get("tool_name")):
+        if not agent_id:
+            # No identity to gate against — treat as ungoverned (same as the MCP firewall).
+            _get_metrics().record_activity("policy_gate", time.time() - start, "success")
+            return {"decision": "allow", "mode": "ungoverned",
+                    "reason": "no agent_id — action not attributed to a governed agent",
+                    "requires_approval": False}
+        body = {
+            "action": payload.get("action") or payload.get("tool_name") or "",
+            "write": bool(payload.get("write", True)),
+            "scope": payload.get("scope") or "",
+            "tool_name": payload.get("tool_name") or "",
+            "workflow_id": payload.get("workflow_id") or "",
+            "task_id": payload.get("task_id") or "",
+            "actor": payload.get("actor") or "agent",
+            "approval_token": payload.get("approval_token") or "",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=GATE_TIMEOUT) as c:
+                resp = await c.post(f"{RADAR_URL}/agents/{agent_id}/gate", json=body)
+            if resp.status_code == 200:
+                _get_metrics().record_activity("policy_gate", time.time() - start, "success")
+                return resp.json()
+            decision = {"decision": "allow" if GATE_FAIL_OPEN else "deny",
+                        "mode": "gate_unavailable",
+                        "reason": f"radar gate returned HTTP {resp.status_code}",
+                        "requires_approval": False}
+        except Exception as exc:  # noqa: BLE001 — the gate must never crash the workflow
+            logger.warning("temporal.policy_gate.error agent_id=%s error=%r", agent_id, exc)
+            decision = {"decision": "allow" if GATE_FAIL_OPEN else "deny",
+                        "mode": "gate_unavailable",
+                        "reason": f"radar gate unreachable: {type(exc).__name__}",
+                        "requires_approval": False}
+        _get_metrics().record_activity("policy_gate", time.time() - start, "success")
+        return decision
 
 
 @activity.defn(name="synthesize_answer")

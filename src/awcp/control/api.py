@@ -37,7 +37,7 @@ setup_otel("awcp-control-api")
 _metrics = AWCPMetrics()
 
 # Temporal Web UI base (dev server default). Used only to build deep links.
-TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
+TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8080")
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
