@@ -202,6 +202,27 @@ else
   fi
 fi
 
+# ── 2b. Laminar reachability preflight (the token-monitor dashboard) ──
+# The self-hosted Laminar stack (dashboard :5667, OTLP ingest gRPC :8881 /
+# HTTP :8880) is NOT started by this script — it runs from its OWN docker-compose
+# (the lmnr-ai/lmnr repo), separate from observability/docker-compose.yml above.
+# So if a project key is set we verify the ingest is actually reachable here,
+# turning a silent "no traces in Laminar" into an explicit, actionable warning.
+if [ -n "${LMNR_PROJECT_API_KEY:-}" ]; then
+  if [ -n "$(port_open 8881)" ] || [ -n "$(port_open 8880)" ]; then
+    say "Laminar ingest reachable (gRPC :8881 / HTTP :8880) — token spans will dual-export to Laminar."
+    [ -z "$(port_open 5667)" ] && \
+      warn "  …but the Laminar dashboard (:5667) isn't answering — start the lmnr frontend to view the traces."
+  else
+    warn "LMNR_PROJECT_API_KEY is set but the Laminar stack is NOT running (:8881/:8880/:5667 all closed)."
+    warn "  Start it from the lmnr repo first, e.g.:  docker compose -f /path/to/lmnr/docker-compose.yml up -d"
+    warn "  Until then token spans have nowhere to land and the :5667 dashboard won't exist."
+  fi
+else
+  warn "LMNR_PROJECT_API_KEY not set — token spans won't reach the :5667 Laminar dashboard"
+  warn "  (the LOCAL token monitor at /laminar/ui still works without it)."
+fi
+
 # ── 3. Temporal dev server (must be up BEFORE the gateway) ────────────
 if [ -n "$(port_open 7233)" ]; then
   say "Temporal already running on :7233 — reusing it (queues: $AGENT_RADAR_TASK_QUEUE / $AGENT_EXEC_TASK_QUEUE)."
@@ -312,9 +333,12 @@ echo "     Ollama                 : http://localhost:11434"
 echo "     agents bundle          : $AWCP_AGENTS_DIR"
 [ "${DEMO:-0}" = "1" ] && \
 echo "     Demo (DEMO=1)          : synthetic 'demo-writer' walks the token-control loop (~20s after boot)."
-[ -n "${LMNR_PROJECT_API_KEY:-}" ] && \
-echo "     Laminar export         : ON → ${LMNR_OTLP_ENDPOINT:-https://api.lmnr.ai:8443}" || \
-echo "     Laminar export         : off (set LMNR_PROJECT_API_KEY to dual-export spans)"
+if [ -n "${LMNR_PROJECT_API_KEY:-}" ]; then
+echo "     Laminar dashboard      : http://localhost:5667   (open the PROJECT whose API key is in .env — traces/tokens land there)"
+echo "     Laminar export         : ON → ${LMNR_OTLP_ENDPOINT}   (LLM/token spans only; set LMNR_EXPORT_ONLY_LLM=false to send every span)"
+else
+echo "     Laminar export         : off (set LMNR_PROJECT_API_KEY in .env to dual-export token spans to :5667)"
+fi
 echo
 echo "  ▶ In the React UI: pick an agent → type a goal → submit → watch the live"
 echo "    step timeline (folded from the Temporal workflow). Traces/metrics/logs"

@@ -35,6 +35,55 @@ log = logging.getLogger("awcp.laminar")
 _attached: bool = False
 
 
+def _is_llm_or_governance_span(span) -> bool:
+    """True for the spans Laminar actually renders value for: the LLM/token
+    usage spans, AWCP governance spans, and the task-lifecycle request spans
+    (config.EXPORT_KEEP_SPAN_NAMES) that PARENT the token spans — keeping the
+    latter is what lets `laminar.token.usage` nest inside its full
+    `POST /tasks/execution/...` trace instead of arriving as an orphan row.
+    Everything else (GET /agents and other high-frequency polling spans) is HTTP
+    noise that buries the token data, so it is dropped from the Laminar fan-out
+    only (it still reaches Tempo/Grafana)."""
+    name = getattr(span, "name", "") or ""
+    if name == "laminar.token.usage" or name.startswith("awcp"):
+        return True
+    # Keep the configured task-lifecycle request spans (and their ASGI
+    # http-receive/http-send children, which share the substring) so the token
+    # span's parent trace is present and it renders as a full tree.
+    if any(keep in name for keep in config.EXPORT_KEEP_SPAN_NAMES):
+        return True
+    attrs = getattr(span, "attributes", None) or {}
+    try:
+        if attrs.get("lmnr.span.type"):
+            return True
+        return any(str(k).startswith("gen_ai.") for k in attrs)
+    except Exception:  # noqa: BLE001 — attribute view edge cases must not drop spans
+        return True
+
+
+def _laminar_processor(exporter):
+    """Build the span processor for the Laminar fan-out: a BatchSpanProcessor
+    that drops non-LLM spans, unless LMNR_EXPORT_ONLY_LLM=false.
+
+    We SUBCLASS BatchSpanProcessor (rather than wrap it) so every SpanProcessor
+    lifecycle hook the SDK calls stays intact — including private ones like
+    `_on_ending`, which newer opentelemetry-sdk releases invoke on each processor
+    when a span ends. Only `on_end` is overridden, to apply the filter."""
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    if not config.EXPORT_ONLY_LLM:
+        return BatchSpanProcessor(exporter)
+
+    class _FilteringBatchSpanProcessor(BatchSpanProcessor):
+        def on_end(self, span) -> None:
+            if _is_llm_or_governance_span(span):
+                super().on_end(span)
+
+    log.info("laminar.exporter.filter on (LLM/governance spans only — set "
+             "LMNR_EXPORT_ONLY_LLM=false to send all spans)")
+    return _FilteringBatchSpanProcessor(exporter)
+
+
 def attach_laminar_exporter() -> bool:
     """Attach Laminar as a span destination. Idempotent, never raises."""
     global _attached
@@ -101,7 +150,6 @@ def _attach_via_lmnr_sdk() -> bool:
     try:
         from opentelemetry import trace
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter as HttpExporter,
         )
@@ -110,7 +158,7 @@ def _attach_via_lmnr_sdk() -> bool:
         if isinstance(provider, TracerProvider):
             ep = config.OTLP_HTTP_ENDPOINT.rstrip("/") + "/v1/traces"
             provider.add_span_processor(
-                BatchSpanProcessor(
+                _laminar_processor(
                     HttpExporter(
                         endpoint=ep,
                         headers={"authorization": f"Bearer {config.PROJECT_API_KEY}"},
@@ -136,7 +184,6 @@ def _attach_manual_otlp() -> bool:
     try:
         from opentelemetry import trace
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         provider = trace.get_tracer_provider()
         if not isinstance(provider, TracerProvider):
@@ -165,7 +212,7 @@ def _attach_manual_otlp() -> bool:
             ep = config.OTLP_HTTP_ENDPOINT.rstrip("/") + "/v1/traces"
             exporter = _Http(endpoint=ep, headers=dict(headers))
 
-        provider.add_span_processor(BatchSpanProcessor(exporter))
+        provider.add_span_processor(_laminar_processor(exporter))
         _attached = True
         log.info("laminar.exporter.attached via=manual_otlp endpoint=%s protocol=%s",
                  config.OTLP_ENDPOINT, config.OTLP_PROTOCOL)

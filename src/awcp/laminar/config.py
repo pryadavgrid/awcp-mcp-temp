@@ -143,6 +143,31 @@ WARN_RATIO: float = _env_float("LMNR_WARN_RATIO", "0.8")
 # that report tokens via execution events rather than the LLM gateway.
 ENFORCE_AT_WARN: bool = _env_bool("LMNR_ENFORCE_AT_WARN", "true")
 
+# When true (default), only LLM/token + AWCP governance spans (plus the
+# task-lifecycle request spans named in EXPORT_KEEP_SPAN_NAMES) are fanned out to
+# Laminar. Laminar is an LLM-observability backend, so the high-frequency HTTP
+# poll spans (the UIs hit /agents, /laminar/usage, /events every couple seconds)
+# are kept OUT of it and remain in Tempo/Grafana only. Without this the handful
+# of `laminar.token.usage` LLM spans get buried under THOUSANDS of GET /agents
+# polling spans in the Laminar dashboard, so token/trace data looks "missing".
+# Set LMNR_EXPORT_ONLY_LLM=false to dual-export every span to Laminar as before.
+EXPORT_ONLY_LLM: bool = _env_bool("LMNR_EXPORT_ONLY_LLM", "true")
+
+# Span-name substrings ALWAYS kept in the Laminar fan-out even while
+# EXPORT_ONLY_LLM filters out the polling noise. The `laminar.token.usage` span
+# is created as a CHILD of the task-execution request span (POST
+# /tasks/execution/{task_id}/event); if that parent is dropped, the token span
+# reaches Laminar parentless and renders as an orphaned `laminar.token.usage`
+# row with no trace tree — instead of nesting inside its full
+# `POST /tasks/execution/...` trace with token counts rolled up to the root.
+# Keeping these spans (and their `http receive`/`http send` ASGI children, which
+# share the substring) restores that tree WITHOUT re-admitting the GET /agents
+# flood. Comma-separated; set LMNR_EXPORT_KEEP_SPANS="" to keep only LLM spans.
+EXPORT_KEEP_SPAN_NAMES: list[str] = [
+    s.strip() for s in os.getenv("LMNR_EXPORT_KEEP_SPANS", "tasks/execution").split(",")
+    if s.strip()
+]
+
 PRICE_TABLE: dict[str, dict[str, float]] = _parse_price_table()
 LEDGER_PATH: str = os.getenv("LMNR_LEDGER_PATH", "/tmp/awcp-token-ledger.jsonl")
 RECORDS_MAX: int = _env_int("LMNR_RECORDS_MAX", "500")
