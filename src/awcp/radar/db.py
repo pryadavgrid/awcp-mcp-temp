@@ -467,6 +467,49 @@ def clear_freeze(agent_id: str) -> None:
         log.debug("radar.db.clear_freeze failed agent=%s error=%r", agent_id, exc)
 
 
+def load_freezes() -> dict[str, dict]:
+    """Load all freeze records as {agent_id: entry} — the crash-recovery source.
+    Each entry is the original freeze payload (kind, pid, create_time, url, ...),
+    backfilled from the typed columns. Empty dict when disabled."""
+    if not _enabled or _engine is None:
+        return {}
+    try:
+        with _engine.connect() as c:
+            rows = c.execute(_text(
+                "SELECT agent_id, kind, pid, url, reason, payload "
+                "FROM registry.freeze_journal")).mappings().all()
+        out: dict[str, dict] = {}
+        for r in rows:
+            ent = r["payload"] or {}
+            if isinstance(ent, str):
+                try:
+                    ent = json.loads(ent)
+                except Exception:  # noqa: BLE001
+                    ent = {}
+            ent = dict(ent)
+            ent.setdefault("kind", r["kind"])
+            if r["pid"] is not None:
+                ent.setdefault("pid", r["pid"])
+            if r["url"]:
+                ent.setdefault("url", r["url"])
+            out[r["agent_id"]] = ent
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.load_freezes failed error=%r", exc)
+        return {}
+
+
+def clear_all_freezes() -> None:
+    """Drop every freeze record (used after startup crash-recovery). No-op when disabled."""
+    if not _enabled or _engine is None:
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(_text("DELETE FROM registry.freeze_journal"))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("radar.db.clear_all_freezes failed error=%r", exc)
+
+
 # ── Onboarding runs (ops.onboarding_runs) ─────────────────────────────────────
 # Per-onboarding workflow state, keyed by workflow_id. finished_at is stamped when
 # the run reaches 'done'. Fail-open.

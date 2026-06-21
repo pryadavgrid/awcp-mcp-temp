@@ -15,37 +15,42 @@ import pytest
 from awcp.radar.models import AgentEntry
 
 
-# ── JSON fallback (no DB) ──────────────────────────────────────────────────────
+# ── No DB → in-memory only, NEVER JSON ─────────────────────────────────────────
 
 @pytest.fixture()
-def store_json(tmp_path, monkeypatch):
+def store_nodb(tmp_path, monkeypatch):
+    """store reloaded with NO database configured. The cwd is a temp dir so we can
+    assert that absolutely nothing is written to disk."""
     monkeypatch.delenv("AGENT_RADAR_DATABASE_URL", raising=False)
-    monkeypatch.setenv("AGENT_RADAR_DB", str(tmp_path / "registry.json"))
+    monkeypatch.chdir(tmp_path)
     import awcp.radar.store as store
     importlib.reload(store)
-    return store
+    return store, tmp_path
 
 
-class TestJsonFallback:
-    def test_backend_is_json_not_pg(self, store_json):
-        assert store_json.REGISTRY._pg.ok is False
+class TestNoDbNeverWritesJson:
+    def test_backend_disabled_without_db(self, store_nodb):
+        store, _ = store_nodb
+        assert store.REGISTRY._pg.ok is False
+        # the JSON fallback has been removed entirely
+        assert not hasattr(store.REGISTRY, "_persist_json")
+        assert not hasattr(store, "PERSIST_PATH")
 
-    def test_self_survives_reload_scan_does_not(self, store_json):
-        r = store_json.REGISTRY
+    def test_persist_writes_no_file(self, store_nodb):
+        store, tmp = store_nodb
+        r = store.REGISTRY
         r.register(AgentEntry(id="reg-self", name="s", kind="agent", source="self"))
-        # a scanned entry is persisted in the snapshot but must NOT be restored
-        r.register(AgentEntry(id="proc-1", name="p", kind="agent", source="scan"))
-        fresh = store_json.Registry()             # simulate a restart
-        ids = {e.id for e in fresh.all()}
-        assert "reg-self" in ids
-        assert "proc-1" not in ids                # only source='self' survives
+        r._persist()
+        # persistence is Postgres-only: with no DB, NOTHING is written to disk
+        assert list(tmp.rglob("*.json")) == []
+        # but the entry is live in memory
+        assert r.get("reg-self") is not None
 
-    def test_remove_persists(self, store_json):
-        r = store_json.REGISTRY
-        r.register(AgentEntry(id="reg-x", name="x", kind="agent", source="self"))
-        assert r.remove("reg-x") is True
-        fresh = store_json.Registry()
-        assert fresh.get("reg-x") is None
+    def test_no_persistence_across_restart_without_db(self, store_nodb):
+        store, _ = store_nodb
+        store.REGISTRY.register(AgentEntry(id="reg-self", name="s", kind="agent", source="self"))
+        fresh = store.Registry()                  # simulate a restart, still no DB
+        assert fresh.get("reg-self") is None      # nothing was persisted (no JSON)
 
 
 # ── Postgres backend (opt-in integration) ──────────────────────────────────────
