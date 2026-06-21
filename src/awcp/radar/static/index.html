@@ -92,6 +92,19 @@
   .lkbtn.sec:hover{color:var(--text)}
   .lk-ok{color:#34d399;font-size:12px}
   .lk-hint{color:var(--muted);font-size:11px}
+  /* Agent Hooks panel */
+  .hsum{margin-bottom:14px}
+  .hk-h{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:16px 0 8px;font-weight:600}
+  .hkn{font-family:var(--mono);font-size:12px}
+  .cat{font-family:var(--mono);font-size:10.5px;padding:1px 8px;border-radius:6px;border:1px solid var(--border2)}
+  .cat-observer{color:var(--accent)} .cat-guard{color:var(--quar)}
+  .hktog{cursor:pointer;border:1px solid var(--border2);border-radius:6px;padding:1px 9px;font-size:11px;font-family:var(--sans)}
+  .hktog.on{color:var(--active);border-color:rgba(16,185,129,.4)}
+  .hktog.off{color:var(--dead)}
+  .hktog:hover{border-color:var(--accent)}
+  .ev-hk{background:rgba(56,189,248,.10);color:var(--accent)}
+  .ev-deny{background:var(--red-bg);color:var(--red)}
+  .dec-deny{color:var(--red);font-family:var(--mono);font-size:11px}
 </style>
 </head>
 <body>
@@ -132,6 +145,7 @@
   <div class="tabs">
     <div class="tab sel" id="tab-inv" onclick="showTab('inv')">Inventory</div>
     <div class="tab" id="tab-ev" onclick="showTab('ev')">Recent decisions</div>
+    <div class="tab" id="tab-hooks" onclick="showTab('hooks')">Agent Hooks</div>
   </div>
 
   <!-- ===== Inventory tab ===== -->
@@ -164,6 +178,21 @@
     <div class="empty" id="ev-empty" style="display:none">No governance events yet. Gate an action, signal a failure, or (de)register an agent.</div>
   </div>
 
+  <!-- ===== Agent Hooks tab ===== -->
+  <div id="view-hooks" class="hidden">
+    <div class="stats hsum" id="hooks-summary"></div>
+    <div class="hk-h">Registered hooks <span style="text-transform:none;color:var(--muted);font-weight:400">· click the toggle to enable/disable live</span></div>
+    <table>
+      <thead><tr>
+        <th>Hook</th><th>Category</th><th>Priority</th><th>Subscriptions</th><th>Calls</th><th>Errors</th><th>Denies</th><th>Toggle</th>
+      </tr></thead>
+      <tbody id="hook-rows"></tbody>
+    </table>
+    <div class="hk-h">Recent hook events <span style="text-transform:none;color:var(--muted);font-weight:400">· newest first · which hooks fired on each lifecycle event</span></div>
+    <div id="hook-events"></div>
+    <div class="empty" id="hooks-empty" style="display:none">Agent-hooks package not mounted (src/awcp/agent_hooks absent or AWCP_HOOKS_ENABLED=false).</div>
+  </div>
+
   <div class="foot">Polling every 3s · scanner + onboarding run in the background · "Recent decisions" is a live audit view (not the durable evidence ledger).</div>
 </div>
 
@@ -183,10 +212,10 @@ function tokCell(id){
 function ago(ts){ if(!ts) return ''; const s=Math.max(0,Math.floor(Date.now()/1000-ts)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); }
 function esc(s){ return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 function showTab(t){ TAB=t;
-  document.getElementById('tab-inv').classList.toggle('sel',t==='inv');
-  document.getElementById('tab-ev').classList.toggle('sel',t==='ev');
-  document.getElementById('view-inv').classList.toggle('hidden',t!=='inv');
-  document.getElementById('view-ev').classList.toggle('hidden',t!=='ev');
+  ['inv','ev','hooks'].forEach(x=>{
+    document.getElementById('tab-'+x).classList.toggle('sel',t===x);
+    document.getElementById('view-'+x).classList.toggle('hidden',t!==x);
+  });
   tick();
 }
 async function removeAgent(id){
@@ -259,6 +288,56 @@ async function renderEvents(){
     </div>`).join('');
 }
 
+async function renderHooks(){
+  const summary=document.getElementById('hooks-summary'),
+        rows=document.getElementById('hook-rows'),
+        evbox=document.getElementById('hook-events'),
+        empty=document.getElementById('hooks-empty');
+  let data=null, recent=[];
+  try{ data=await (await fetch('/hooks')).json(); }catch(e){}
+  if(!data || !data.status){           // package not mounted → graceful message
+    empty.style.display='block';
+    summary.innerHTML=''; rows.innerHTML=''; evbox.innerHTML='';
+    return;
+  }
+  empty.style.display='none';
+  try{ recent=await (await fetch('/hooks/recent?limit=60')).json(); }catch(e){}
+  const st=data.status, subs=Object.keys(st.subscriptions||{}).length;
+  summary.innerHTML=
+    `<div class="stat"><div class="n"><span class="tflag ${st.enabled?'on':'off'}">${st.enabled?'on':'off'}</span></div><div class="l">system</div></div>`+
+    `<div class="stat"><div class="n">${st.hook_count}</div><div class="l">hooks</div></div>`+
+    `<div class="stat"><div class="n">${subs}</div><div class="l">event types</div></div>`+
+    `<div class="stat"><div class="n">${recent.length}</div><div class="l">recent events</div></div>`;
+  rows.innerHTML=(data.hooks||[]).map(h=>{
+    const s=h.stats||{}, subList=(h.subscriptions||[]).join(', ');
+    return `<tr>
+      <td class="hkn">${esc(h.name)}</td>
+      <td><span class="cat cat-${h.category}">${h.category}</span></td>
+      <td class="mono">${h.priority}</td>
+      <td class="mono" title="${esc(subList)}">${(h.subscriptions||[]).length}</td>
+      <td class="mono">${s.calls||0}</td>
+      <td class="mono" style="color:${(s.errors||0)?'var(--red)':'var(--muted)'}">${s.errors||0}</td>
+      <td class="mono" style="color:${(s.denies||0)?'var(--red)':'var(--muted)'}">${s.denies||0}</td>
+      <td><span class="hktog ${h.enabled?'on':'off'}" onclick="toggleHook('${esc(h.name)}',${h.enabled})">${h.enabled?'enabled':'disabled'}</span></td>
+    </tr>`;
+  }).join('');
+  evbox.innerHTML=recent.map(e=>{
+    const fired=(e.hooks||[]).map(x=>x.hook).join(', ');
+    const deny=e.decision==='deny';
+    return `<div class="ev">
+      <span class="t">${ago(e.ts)}</span>
+      <span class="k ev-${deny?'deny':'hk'}" style="min-width:118px">${esc(e.type)}</span>
+      <span class="a">${esc(e.agent_id||'')}</span>
+      ${deny?'<span class="dec-deny">⛔ DENY</span>':''}
+      <span style="color:var(--muted)">${esc(fired)}</span>
+    </div>`;
+  }).join('') || '<div class="empty">No hook events yet — send a task or gate an action.</div>';
+}
+async function toggleHook(name,enabled){
+  try{ await fetch('/hooks/'+encodeURIComponent(name)+'/'+(enabled?'disable':'enable'),{method:'POST'}); }catch(e){}
+  renderHooks();
+}
+
 async function tick(){
   let health={};
   try{ AGENTS=await (await fetch('/agents')).json(); }catch(e){ return; }
@@ -281,7 +360,9 @@ async function tick(){
       (await (await fetch('/laminar/usage')).json()).forEach(u=>{ TOKENS[u.agent_id]=u; });
     }catch(e){ TOKENS={}; }
   }
-  if(TAB==='inv') renderInventory(); else renderEvents();
+  if(TAB==='inv') renderInventory();
+  else if(TAB==='ev') renderEvents();
+  else renderHooks();
 }
 ['f-status','f-kind','f-auton','f-live','f-text'].forEach(id=>
   document.getElementById(id).addEventListener('input',renderInventory));
