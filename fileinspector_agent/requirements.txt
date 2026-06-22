@@ -1,0 +1,20 @@
+# File Inspector agent (LangGraph) — free, local Ollama. Reads any file type. Python >= 3.10.
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-ollama>=0.2.0
+pillow>=10.0.0            # image validation + preprocessing
+pypdf>=4.0.0             # PDF text extraction
+python-docx>=1.1.0       # Word (.docx) text extraction
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.9  # multipart parsing for the /upload file intake
+pydantic>=2.2.0
+psutil>=5.9.0            # to self-register under the radar's own process id
+ddgs>=6.0.0             # free web search (no API key) — shared helper in awcp_kit
+# --- Observability: embedded OpenTelemetry (traces+metrics+logs) → OTel Collector ---
+# Pinned for Python 3.14 compatibility (matches the AWCP control plane). Optional:
+# set AWCP_AGENT_OTEL=0 to run without telemetry; awcp_kit no-ops if absent.
+opentelemetry-api>=1.42.1
+opentelemetry-sdk>=1.42.1
+opentelemetry-exporter-otlp-proto-grpc>=1.42.1
+protobuf>=6.33.6

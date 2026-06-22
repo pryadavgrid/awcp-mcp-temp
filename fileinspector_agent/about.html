@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>File Inspector Worker — About</title>
+<style>
+  :root{--ink:#15202b;--mut:#5b6b7a;--line:#e1e6ea;--bg:#fff;--accent:#d97706;
+        --read:#0a7d33;--readbg:#eafaf0;--med:#b45309;--medbg:#fdf3e7;--high:#b91c1c;--highbg:#fdecea;
+        --code:#0e1426;--codefg:#e7e9ee;--cm:#7fd18b;--str:#ecc48d;--kw:#c792ea;--mono:Consolas,"SFMono-Regular",monospace}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif;color:var(--ink);background:var(--bg);line-height:1.6}
+  .page{max-width:920px;margin:0 auto;padding:42px 34px 80px}
+  h1{font-size:28px;margin:0 0 4px} h2{font-size:21px;margin:38px 0 8px;border-bottom:1px solid var(--line);padding-bottom:6px}
+  h3{font-size:16px;margin:20px 0 4px}
+  .badges{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 4px}
+  .b{font-family:var(--mono);font-size:12px;background:#fdf3e7;color:var(--accent);border:1px solid #f5d8ab;padding:3px 10px;border-radius:100px}
+  .sub{color:var(--mut);margin-top:2px}
+  p,li{font-size:15.5px} code{font-family:var(--mono);background:#f2f4f6;padding:1px 5px;border-radius:4px;font-size:13.5px}
+  table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#f7f8fa}
+  pre{background:var(--code);color:var(--codefg);border-radius:9px;padding:15px 17px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.5}
+  pre .cm{color:var(--cm)} pre .str{color:var(--str)} pre .kw{color:var(--kw)}
+  .tag{font-family:var(--mono);font-size:11px;padding:1px 7px;border-radius:6px}
+  .t-read{background:var(--readbg);color:var(--read)} .t-med{background:var(--medbg);color:var(--med)} .t-high{background:var(--highbg);color:var(--high)}
+  .lead{background:#fff8ec;border-left:4px solid var(--accent);padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .note{background:#fff8ec;border-left:4px solid var(--med);padding:10px 15px;border-radius:0 8px 8px 0;margin:14px 0;font-size:14.5px}
+  figure{margin:18px 0;text-align:center} figcaption{color:var(--mut);font-size:13px;margin-top:6px;font-style:italic}
+  ol li{margin:5px 0}
+  .small{color:var(--mut);font-size:13px}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>🗂 File Inspector Worker</h1>
+<p class="sub">A universal file-inspection worker runtime — give it any file and it reports what it is and what's inside. Autonomously detected by the AWCP radar (it sends nothing to AWCP).</p>
+<div class="badges">
+  <span class="b">framework: LangGraph</span>
+  <span class="b">model: Ollama · qwen2.5:7b + qwen2.5vl:7b</span>
+  <span class="b">port: 8104</span>
+  <span class="b">folder: agents/fileinspector_agent</span>
+</div>
+
+<h2>What it is</h2>
+<p>This is <b>not a chatbot</b> — it is an <b>autonomous worker</b> in the AWCP sense: an "agent on a runtime" that the control plane <em>observes</em>. You hand it a <b>file</b> (drag-and-drop, or a typed path); it queues a goal, then executes it in <b>multiple steps</b> — <b>classify</b> the file, <b>extract</b> its contents (or <b>caption</b> it, for images), and <b>summarise</b> what it found — then routes the report through its own <b>governed-write path</b> (risk-tiered, with operator approval for high-risk external writes). It is a <b>LangGraph runtime</b> driving a <b>local Ollama model</b> (free, no API keys): a deterministic classify/extract pipeline plus a single grounded LLM summary.</p>
+
+<div class="lead">It handles <b>text, images, PDFs, JSON, Word <code>.docx</code>, CSV, source code, and unknown binaries</b> (sniffed by magic bytes). The output is a <b>brief summary of the contents only</b> — no technical metadata. Image understanding uses a local Ollama <b>vision</b> model (<code>qwen2.5vl</code>); text and documents are summarised by a strong local text model (<code>qwen2.5</code>). If the summary model is unavailable, a <b>fallback</b> shows the extracted content directly.</div>
+
+<h2>Architecture — how a file flows</h2>
+<figure>
+<svg viewBox="0 0 880 210" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, sans-serif" font-size="12.5">
+  <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#666"/></marker></defs>
+  <rect x="10" y="30" width="120" height="46" rx="8" fill="#fdf3e7" stroke="#f3cf9c"/><text x="70" y="50" text-anchor="middle">POST /upload</text><text x="70" y="66" text-anchor="middle" fill="#777" font-size="11">a file → path</text>
+  <rect x="158" y="30" width="96" height="46" rx="8" fill="#fff" stroke="#ccc"/><text x="206" y="50" text-anchor="middle">queue</text><text x="206" y="66" text-anchor="middle" fill="#777" font-size="11">goal+path</text>
+  <rect x="282" y="18" width="160" height="70" rx="8" fill="#fff" stroke="#ccc"/><text x="362" y="40" text-anchor="middle" font-weight="bold">worker</text><text x="362" y="58" text-anchor="middle" fill="#777" font-size="11">classify → extract</text><text x="362" y="72" text-anchor="middle" fill="#777" font-size="11">/ describe → summarise</text>
+  <rect x="470" y="14" width="180" height="80" rx="8" fill="#eafaf0" stroke="#5cba7d"/><text x="560" y="34" text-anchor="middle" font-weight="bold">governed write</text><text x="560" y="52" text-anchor="middle" fill="#0a7d33" font-size="11">approval (if high-risk)</text><text x="560" y="68" text-anchor="middle" fill="#0a7d33" font-size="11">execute → record</text><text x="560" y="84" text-anchor="middle" fill="#777" font-size="11">save_artifact / external_post</text>
+  <rect x="685" y="30" width="120" height="46" rx="8" fill="#fff" stroke="#ccc"/><text x="745" y="50" text-anchor="middle">report</text><text x="745" y="66" text-anchor="middle" fill="#777" font-size="11">+ artifact</text>
+  <line x1="130" y1="53" x2="156" y2="53" stroke="#666" marker-end="url(#ar)"/>
+  <line x1="254" y1="53" x2="280" y2="53" stroke="#666" marker-end="url(#ar)"/>
+  <line x1="442" y1="53" x2="468" y2="53" stroke="#666" marker-end="url(#ar)"/>
+  <line x1="650" y1="53" x2="683" y2="53" stroke="#666" marker-end="url(#ar)"/>
+  <text x="362" y="118" text-anchor="middle" fill="#b45309" font-size="11">if the model doesn't write, a deterministic "finalize" routes the report through its self-governed write path anyway</text>
+  <line x1="362" y1="88" x2="530" y2="96" stroke="#b45309" stroke-dasharray="3 3" marker-end="url(#ar)"/>
+</svg>
+<figcaption>The shared AWCP worker pipeline, specialised for files. Read/inspect tools run freely; writes are self-governed (risk + approval); the worker always finalizes through its own governed-write path.</figcaption>
+</figure>
+
+<h2>Features</h2>
+<ul>
+<li><b>Any file in</b> — drag-and-drop upload (<code>POST /upload</code>) or a typed path; the agent classifies images, PDFs, <code>.docx</code>, text/JSON/CSV/code, and unknown binaries.</li>
+<li><b>Multimodal</b> — images are described by a local Ollama vision model (Qwen2.5-VL by default).</li>
+<li><b>Task queue + background worker</b> — submit files; the worker processes them one at a time, autonomously.</li>
+<li><b>Multi-step pipeline</b> — <code>classify_file</code>, then <code>read_document</code> / <code>describe_image</code>, then a single grounded LLM summary of what the file is and contains.</li>
+<li><b>Graceful fallback</b> — if the summary model is unavailable, the file's extracted content is shown directly so you still see what's inside.</li>
+<li><b>Self-governed writes</b> — risk-tiered; high-risk external writes pause for operator approval. Enforced by the agent itself — no control plane required.</li>
+<li><b>Decoupled &amp; autonomously detected</b> — sends nothing to AWCP; the radar discovers it by scanning the process (observe-only).</li>
+<li><b>Free &amp; local</b> — runs on local Ollama models and local libraries; no API keys, no accounts.</li>
+</ul>
+
+<h2>Tools</h2>
+<table>
+<tr><th>Tool</th><th>Type</th><th>What it does</th></tr>
+<tr><td><code>classify_file</code></td><td><span class="tag t-read">read</span></td><td>detect file type (used internally to choose the right reader; not shown to the user)</td></tr>
+<tr><td><code>read_document</code></td><td><span class="tag t-read">read</span></td><td>extract text from PDF / <code>.docx</code> / text / JSON / CSV / code</td></tr>
+<tr><td><code>describe_image</code></td><td><span class="tag t-read">read</span></td><td>briefly describe an image with a local Ollama vision model</td></tr>
+<tr><td><code>save_artifact</code></td><td><span class="tag t-med">write · medium</span></td><td>persist the inspection report to disk (approval-free)</td></tr>
+<tr><td><code>external_post</code></td><td><span class="tag t-high">write · high</span></td><td>POST the report to an external system (needs operator approval)</td></tr>
+</table>
+
+<h2>HTTP API</h2>
+<table>
+<tr><th>Endpoint</th><th>Purpose</th></tr>
+<tr><td><code>GET /</code></td><td>the file-inspection console (drag-and-drop upload)</td></tr>
+<tr><td><code>POST /upload</code> <span class="small">multipart "file"</span></td><td>store an uploaded file, return its local path</td></tr>
+<tr><td><code>POST /tasks</code> <span class="small">{"goal": "...FILE_PATH: ..."}</span></td><td>submit an inspection goal (returns the task)</td></tr>
+<tr><td><code>GET /tasks</code> · <code>GET /tasks/{id}</code></td><td>list tasks / one task's status, steps, result</td></tr>
+<tr><td><code>POST /tasks/{id}/approve</code> <span class="small">{"decision":"approve|deny"}</span></td><td>approve/deny a parked high-risk write</td></tr>
+<tr><td><code>GET /info</code>, <code>GET /health</code></td><td>identity / liveness</td></tr>
+</table>
+
+<h2>Configuration (all env-driven — nothing hardcoded)</h2>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+<tr><td><code>FILE_MODEL</code></td><td>qwen2.5:7b</td><td>Ollama model for reading / summarising text &amp; documents</td></tr>
+<tr><td><code>VISION_MODEL</code></td><td>qwen2.5vl:7b</td><td>Ollama model for image captioning</td></tr>
+<tr><td><code>FILE_PORT</code></td><td>8104</td><td>port to serve on</td></tr>
+<tr><td><code>FILE_MAX_CHARS</code></td><td>40000</td><td>extracted-text cap sent to the model</td></tr>
+<tr><td><code>OLLAMA_BASE</code></td><td>http://localhost:11434</td><td>Ollama endpoint</td></tr>
+<tr><td><code>AGENT_EXTERNAL_WRITE_URL</code></td><td>https://httpbin.org/post</td><td>external write target (point at your webhook)</td></tr>
+<tr><td><code>AGENT_APPROVAL_REQUIRED</code></td><td>true</td><td>pause high-risk writes for approval</td></tr>
+<tr><td><code>AGENT_FINALIZE_EXTERNAL</code></td><td>false</td><td>also post the report externally at the end of every task</td></tr>
+</table>
+
+<h2>How to run</h2>
+<ol>
+<li><b>Start the model backend</b> (free, local):
+<pre>ollama serve
+ollama pull qwen2.5:7b         <span class="cm"># reading / summarising text &amp; documents</span>
+ollama pull qwen2.5vl:7b       <span class="cm"># image captioning</span></pre></li>
+<li><b>Start this worker</b> (self-bootstraps its venv on first run):
+<pre>bash agents/fileinspector_agent/run.sh</pre></li>
+<li><b>Open the console</b> → <code>http://localhost:8104</code>, drop a file, and watch it run.</li>
+</ol>
+<p>Or manage all agents from one place: <code>python3 agents/control_panel.py</code> → <code>http://localhost:8099</code>.</p>
+
+<h3>Example goals (pair with an attached file)</h3>
+<pre>Identify this file and summarise its contents.
+What type of file is this and what does it contain?
+Extract the key facts from this document.
+What is shown in this image?</pre>
+
+<h2>Governance &amp; its relationship to AWCP</h2>
+<p>This agent is <b>decoupled</b> from the AWCP control plane — it sends <b>nothing</b> to AWCP. Governance is split in two:</p>
+<ul>
+<li><b>Agent-local (enforced here):</b> risk tiers + an <b>operator approval</b> step that pauses high-risk <code>external_post</code> writes in <code>awaiting_approval</code> until approved on this agent's own <code>POST /tasks/{id}/approve</code> endpoint.</li>
+<li><b>AWCP-side (observe-only):</b> the radar <b>detects this process autonomously</b> by scanning it and lists it (as <code>quarantined</code>, since the agent declares no control hooks).</li>
+</ul>
+
+<div class="note"><b>Model note.</b> Reading/extraction is deterministic Python (Pillow / pypdf / python-docx), so it never depends on the model — the model only writes the short summary of the contents. If the text model is unavailable, a fallback shows the extracted content directly. Image descriptions need a vision model (<code>qwen2.5vl</code> by default; <code>llama3.2-vision</code>, <code>minicpm-v</code>, or <code>llava</code> also work) — without one, images can't be described.</div>
+
+<p class="small" style="margin-top:30px;border-top:1px solid var(--line);padding-top:12px">Part of the AWCP agent runtimes. The queue, worker, governance, approval flow and UI are shared in <code>agents/fileinspector_agent/awcp_kit.py</code> (plus one additive <code>/upload</code> + drag-drop feature, gated by <code>accepts_files</code>); this agent supplies the LangGraph framework agent and its file-inspection tools.</p>
+</div>
+</body>
+</html>

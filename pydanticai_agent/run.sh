@@ -3,6 +3,7 @@
 # read this file and detect the `pydantic_ai` import).
 set -e
 cd "$(dirname "$0")"
+export AGENT_RADAR_URL="${AGENT_RADAR_URL:-http://localhost:8000}"  # register with the gateway-mounted radar
 
 # auto-setup: create venv on first run, always sync requirements
 if [ ! -x ".venv/bin/python" ]; then
