@@ -986,6 +986,13 @@ try:
                       trigger="token_budget")
         log.warning("radar.token.degraded agent_id=%s -> %s (%s)",
                     agent_id, new_profile, why)
+        # Agent-hooks: a token-budget breach both exhausts the budget and degrades
+        # autonomy — surface both so token-aware / alerting hooks can react.
+        if _HOOKS:
+            _hook(_HT.BUDGET_EXHAUSTED, agent_id=agent_id,
+                  used=evaluation.get("used_tokens"), budget=evaluation.get("budget_tokens"))
+            _hook(_HT.AUTONOMY_DEGRADED, agent_id=agent_id, to=new_profile,
+                  reason=why, trigger="token_budget")
         # NB: the forceful hard stop (SIGSTOP / remote suspend) is deliberately
         # NOT done here. This callback runs synchronously inside an async request
         # handler, so blocking psutil/HTTP work would stall the single event loop
@@ -1003,6 +1010,41 @@ try:
 except Exception as _exc:                       # radar runs fine without the package
     _LAMINAR = False
     log.warning("radar.laminar.unavailable error=%r", _exc)
+
+
+# ----------------------------------------------------------------------
+# Agent hooks (awcp.agent_hooks — OPTIONAL, self-contained, like laminar).
+# Fires user-pluggable callbacks at every agent lifecycle point the radar
+# observes: register/deregister, task start/step/complete, gate decision,
+# action blocked, approval required, autonomy degraded, and token
+# usage/warn/exhausted. A GUARD hook at the gate can TIGHTEN an allow into a
+# deny (never the reverse). Deleting src/awcp/agent_hooks turns it all off and
+# the radar runs unchanged.
+# ----------------------------------------------------------------------
+try:
+    from awcp import agent_hooks as _hooks
+    from awcp.agent_hooks import HookType as _HT
+    _hooks.init_hooks()
+    router.include_router(_hooks.router)
+    _HOOKS = True
+    log.info("radar.agent_hooks.mounted api=/hooks")
+except Exception as _exc:                        # radar runs fine without the package
+    _HOOKS = False
+    _HT = None
+    log.warning("radar.agent_hooks.unavailable error=%r", _exc)
+
+
+def _hook(hook_type, **data):
+    """Dispatch one lifecycle event to the hook system (no-op if unavailable).
+    Returns the aggregate HookOutcome, or None when hooks are off / errored.
+    A hook can never break a radar request — failures are swallowed here too."""
+    if not _HOOKS:
+        return None
+    try:
+        return _hooks.dispatch(hook_type, **data)
+    except Exception as exc:  # noqa: BLE001 — hooks must never break a request
+        log.debug("radar.hook.dispatch_failed type=%r error=%r", hook_type, exc)
+        return None
 
 
 def _slug(name: str) -> str:
@@ -1153,6 +1195,9 @@ def register(req: RegisterRequest) -> dict:
         "radar.register agent_id=%s name=%r kind=%s framework=%s risk=%s telemetry=%s",
         saved.id, saved.name, saved.kind, saved.framework, saved.risk, saved.telemetry_enabled,
     )
+    if _HOOKS:
+        _hook(_HT.AGENT_REGISTERED, agent_id=saved.id, name=saved.name,
+              kind=saved.kind, framework=saved.framework, risk=saved.risk)
     return _to_dict(saved)
 
 
@@ -1298,6 +1343,9 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     if blocked is not None:
         METRICS.record_gate(decision="deny", mode="token_hard_stop", duration=0.0, risk=e.risk)
         _record_event("gate", agent_id, "deny (token_hard_stop)", action=req.action)
+        if _HOOKS:
+            _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=req.action,
+                  reason="token budget exhausted — hard stop", mode="token_hard_stop", risk=e.risk)
         return {"agent_id": agent_id, "action": req.action, "mode": "token_hard_stop",
                 "decision": "deny",
                 "reason": "token budget exhausted — hard stop by control plane",
@@ -1313,6 +1361,20 @@ def gate(agent_id: str, req: GateRequest) -> dict:
                                    scope=req.scope, action_class=req.action_class)
     # Resolve any approval-token requirement (issue/verify) — magazine Scenario B.
     decision = _resolve_approval(e, req, decision)
+    # Agent-hooks GUARD: a custom/operator policy hook may TIGHTEN an allow into a
+    # deny (it can never loosen a deny — see GUARD_POINTS). Composed ON TOP of the
+    # OPA/policy decision so both apply. Run BEFORE metrics + the durable record so
+    # those reflect the FINAL decision.
+    if _HOOKS:
+        _outcome = _hook(_HT.GATE_EVALUATED, agent_id=agent_id, action=req.action,
+                         scope=req.scope, write=req.write,
+                         decision=decision["decision"], mode=decision["mode"], risk=e.risk)
+        if _outcome is not None and _outcome.is_deny and decision["decision"] == "allow":
+            # Tighten to a deny and align the gate kind so the durable
+            # policy_decisions.decision stays CHECK-legal ("denied").
+            decision = {**decision, "decision": "deny", "gate": "denied",
+                        "mode": "hook_guard", "reason": _outcome.reason}
+
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
         decision=decision["decision"],
@@ -1332,6 +1394,10 @@ def gate(agent_id: str, req: GateRequest) -> dict:
                   action=req.action, decision=decision.get("gate"),
                   scope=req.scope or None, reason=decision.get("reason"),
                   token_id=decision.get("token_id"), workflow_id=req.workflow_id or None)
+    # Notify hooks of a final block (after OPA/policy + guard + token resolution).
+    if _HOOKS and decision["decision"] == "deny":
+        _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=req.action,
+              reason=str(decision.get("reason") or decision.get("mode", "")), risk=e.risk)
     return {"agent_id": agent_id, **decision,
             "status": e.status, "autonomy_profile": e.autonomy_profile}
 
@@ -1416,6 +1482,13 @@ def signal(agent_id: str, req: SignalRequest) -> dict:
                       reason=req.reason)
     else:
         log.debug("radar.signal.ok agent_id=%s", agent_id)
+    if _HOOKS:
+        _hook(_HT.SIGNAL_RECEIVED, agent_id=agent_id, ok=req.ok, reason=req.reason,
+              failure_count=updated.failure_count)
+        if result["degraded"]:
+            _hook(_HT.AUTONOMY_DEGRADED, agent_id=agent_id,
+                  to=updated.autonomy_profile, reason=updated.autonomy_reason or "",
+                  trigger="failure_budget")
     return {
         "agent_id": agent_id,
         "degraded": result["degraded"],
@@ -1559,6 +1632,8 @@ def deregister(agent_id: str) -> dict:
     if not REGISTRY.remove(agent_id):
         raise HTTPException(status_code=404, detail="agent not found")
     _record_event("removed", agent_id, "operator removed entry (hard stop released)")
+    if _HOOKS:
+        _hook(_HT.AGENT_DEREGISTERED, agent_id=agent_id, reason="operator removed")
     return {"ok": True, "removed": agent_id}
 
 
@@ -1604,6 +1679,9 @@ async def execution_start(req: TaskExecStartRequest) -> dict:
     # governed execution reported to the control plane is itself telemetry).
     STATE["exec_agents"][req.task_id] = req.agent_id
     _observe_telemetry(req.agent_id, "execution started")
+    if _HOOKS:
+        _hook(_HT.TASK_STARTED, agent_id=req.agent_id, task_id=req.task_id,
+              goal=req.goal, framework=req.framework)
 
     # Token HARD STOP: the control plane refuses to launch a governed execution
     # for an agent already over its token budget.
@@ -1662,6 +1740,38 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         # observed in execution (the magazine's third onboarding hook).
         if _event_has_flags(event):
             _observe_flags(agent_id)
+
+    # Agent-hooks: surface this step. STEP fires for every event; the specific
+    # kind (LLM_CALL / TOOL_CALL / WEB_SEARCH / SYNTHESIZE) fires too so hooks can
+    # subscribe narrowly. A high-risk tool call is where a human approval is needed,
+    # and any token usage / budget transition is surfaced for the token-aware hooks.
+    if _HOOKS and agent_id:
+        _etype = event.get("type", "")
+        _hook(_HT.STEP, agent_id=agent_id, task_id=task_id, step=_etype,
+              tool_name=event.get("tool_name", ""), model=event.get("model", ""))
+        _specific = {"llm_called": _HT.LLM_CALL, "tool_called": _HT.TOOL_CALL,
+                     "web_search": _HT.WEB_SEARCH, "synthesize": _HT.SYNTHESIZE}.get(_etype)
+        if _specific is not None:
+            _hook(_specific, agent_id=agent_id, task_id=task_id,
+                  tool_name=event.get("tool_name", ""), model=event.get("model", ""),
+                  query=event.get("query", ""), risk=event.get("risk", ""),
+                  gate=event.get("gate", ""))
+        if _etype == "tool_called" and event.get("risk") == "high":
+            _hook(_HT.APPROVAL_REQUIRED, agent_id=agent_id, task_id=task_id,
+                  action=event.get("tool_name", ""), risk="high")
+        _extra = event.get("extra") or {}
+        _tok = int(_extra.get("input_tokens", 0) or 0) + int(_extra.get("output_tokens", 0) or 0)
+        if _tok:
+            _hook(_HT.TOKEN_USAGE, agent_id=agent_id, task_id=task_id,
+                  tokens=_tok, model=event.get("model", ""))
+        if isinstance(token_budget, dict):
+            _st = token_budget.get("state")
+            if _st == "warn":
+                _hook(_HT.BUDGET_WARN, agent_id=agent_id, task_id=task_id,
+                      used=token_budget.get("used_tokens"), budget=token_budget.get("budget_tokens"))
+            elif _st == "exhausted":
+                _hook(_HT.BUDGET_EXHAUSTED, agent_id=agent_id, task_id=task_id,
+                      used=token_budget.get("used_tokens"), budget=token_budget.get("budget_tokens"))
 
     # Degradation directives (magazine Step 04, the half the control plane owns):
     #  • hand the runtime its CURRENT stage directives every step so it applies
@@ -1726,8 +1836,16 @@ async def execution_complete_ep(task_id: str, req: TaskExecCompleteRequest) -> d
     """Signal the AgentExecutionWorkflow that the task is done."""
     if _LAMINAR:
         _laminar.on_execution_complete(task_id, req.model_dump())
+    _agent_id = STATE["exec_agents"].get(task_id, "")
     STATE["exec_agents"].pop(task_id, None)
     wf_id = STATE["exec_workflows"].pop(task_id, None)
+    # Fire the terminal task hook regardless of Temporal availability — the task
+    # genuinely finished even when no workflow was tracking it.
+    if _HOOKS:
+        _hook(_HT.TASK_COMPLETED if req.status == "done" else _HT.TASK_FAILED,
+              agent_id=_agent_id, task_id=task_id, status=req.status,
+              tools_used=req.tools_used, error=req.error,
+              result_len=len(req.result or ""))
     if not wf_id or not (STATE["temporal"] and STATE["client"]):
         return {"ok": False, "reason": "no_active_workflow"}
 

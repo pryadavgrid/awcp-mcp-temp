@@ -38,6 +38,12 @@
 #          SKIP_INSTALL=1     skip pip install on an existing venv
 #          DEMO=1             seed a synthetic agent + token-control walkthrough
 #          GATEWAY_PORT=8000  gateway port
+#          --- toggleable-guard demo (defaults below; see the block further down) ---
+#          AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY=true   restore strict onboarding
+#          AGENT_RADAR_REQUIRE_OBSERVED_POLICY=true       (agents quarantined until
+#                                                          telemetry+policy observed)
+#          AGENT_RADAR_RISK_BUDGET=low:5,medium:3,high:1  restore tight failure budgets
+#          LMNR_RISK_TOKEN_BUDGET=low:100000,medium:50000,high:20000  tight token budgets
 #          UI_PORT=5173       React UI (Vite) port
 #          AWCP_AGENTS_DIR=…  external agent bundle (default: Downloads bundle)
 #          LMNR_PROJECT_API_KEY=…   also dual-export spans to Laminar
@@ -86,7 +92,7 @@ TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO1/Agents/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
@@ -130,6 +136,31 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 # stealing each other's workflows.
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
+
+# ── Toggleable-guard demo defaults ────────────────────────────────────────────
+# Make the dashboard's Policy Guard (Agent Hooks → Policy Guard) the SINGLE on/off
+# lever for blocking a tool call: deny-list a tool → blocked; remove it → works.
+# To do that we relax the OTHER governance layers that would otherwise deny writes
+# on a fresh start (quarantine, autonomy degradation, token hard-stop). Every knob
+# below is overridable — set them back to restore strict AWCP behaviour.
+#
+#  1) Trust DECLARED control hooks so bundle agents come up ACTIVE, not quarantined
+#     (a quarantined agent has ALL writes blocked, masking the guard). Restore the
+#     strict "telemetry/policy observed in execution" onboarding by setting these
+#     back to true.
+export AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY="${AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY:-false}"
+export AGENT_RADAR_REQUIRE_OBSERVED_POLICY="${AGENT_RADAR_REQUIRE_OBSERVED_POLICY:-false}"
+#  2) Generous FAILURE budget so a guard-blocked task — which the agent reports as
+#     a failure — doesn't walk the autonomy ladder down (which would block writes
+#     even with the guard off). Default is 3 / per-risk low:5,medium:3,high:1.
+export AGENT_RADAR_FAILURE_BUDGET="${AGENT_RADAR_FAILURE_BUDGET:-1000}"
+export AGENT_RADAR_RISK_BUDGET="${AGENT_RADAR_RISK_BUDGET:-low:1000,medium:1000,high:1000}"
+#  3) Generous TOKEN budget so a few multi-step tasks don't trip the token
+#     hard-stop (which also degrades autonomy). To DEMO token control instead,
+#     lower a single agent's budget from the Token Monitor UI (per-agent override).
+export LMNR_TOKEN_BUDGET="${LMNR_TOKEN_BUDGET:-5000000}"
+export LMNR_RISK_TOKEN_BUDGET="${LMNR_RISK_TOKEN_BUDGET:-low:5000000,medium:5000000,high:5000000}"
+export LMNR_ENFORCE_AT_WARN="${LMNR_ENFORCE_AT_WARN:-false}"
 
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
