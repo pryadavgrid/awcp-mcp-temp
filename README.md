@@ -364,6 +364,70 @@ with auth; this sharing path is for collaboration/demos, not production.
 | `AWCP_DEFAULT_OWNER` | registry | OS username |
 | `AWCP_TELEMETRY_ENABLED` | registry (quarantine gate) | `true` |
 | `AWCP_TUNNEL_BASE_URL` | registry (endpoint URLs) | `http://localhost:8001` |
+| `AWCP_OPA_URL` | write-action gate (PDP) | unset → policy.py decides (no OPA) |
+| `AWCP_OPA_SHADOW` | write-action gate | `false` (call OPA but enforce policy.py) |
+| `AWCP_OPA_TOKEN_RISK_TIERS` | write-action gate | unset → no approval tokens (parity); set `high` to require them |
+| `AWCP_OPA_OPERATOR_ACTION_CLASSES` | write-action gate | unset (e.g. `cross_system` → operator approval) |
+
+---
+
+## Policy engine (OPA) — the write-action gate
+
+The magazine names **OPA (Open Policy Agent)** as the engine behind *“Gate Write
+Actions”* (Step 03) and the *Approval Gate Controller* (*“Temporal + OPA”*). The
+gate decision is externalised to OPA while `src/awcp/radar/policy.py` stays the
+source of truth for the **facts** a decision needs (authoritative risk, the
+resolved autonomy ladder) and the **fail-secure fallback**.
+
+```
+agent ─▶ POST /agents/{id}/gate ─▶ radar/opa.py ──HTTP──▶ OPA  (data.awcp.gate)
+   (PEP)                              │  on any OPA error → policy.evaluate_action (fallback)
+                                      ▼
+   decision ∈ { auto_authorized | awaiting_token | awaiting_operator | denied }
+```
+
+- **Policy** lives in [`policies/awcp/gate.rego`](policies/awcp/gate.rego); unit
+  tests in `gate_test.rego` (`opa test policies/`). The Rego is a faithful mirror
+  of `evaluate_action`, verified against the Python fallback.
+- **OPA runs as a Docker sidecar** in the observability stack (port `:8181`,
+  mounting `./policies`). It comes up with `bash scripts/run_everything.sh`.
+- **Nothing changes until you opt in.** With `AWCP_OPA_URL` unset the gate behaves
+  exactly as before (pure `policy.py`).
+
+### Rollout (recommended: shadow first)
+
+```bash
+# 1) Shadow — call OPA AND policy.py, ENFORCE policy.py, log any disagreement:
+AWCP_OPA_URL=http://localhost:8181 AWCP_OPA_SHADOW=true bash scripts/run_everything.sh
+#    Watch logs for `radar.opa.shadow.disagreement` — none ⇒ the Rego is faithful.
+
+# 2) Enforce OPA (policy.py stays the fallback if OPA is unreachable):
+AWCP_OPA_URL=http://localhost:8181 bash scripts/run_everything.sh
+
+# 3) Turn on the magazine's expiring approval tokens for high-risk writes:
+AWCP_OPA_URL=http://localhost:8181 AWCP_OPA_TOKEN_RISK_TIERS=high bash scripts/run_everything.sh
+```
+
+### Expiring approval tokens (magazine Scenario B)
+
+With `AWCP_OPA_TOKEN_RISK_TIERS=high`, a high-risk **write** returns
+`awaiting_token`: the gate issues a pending, **branch-scoped, single-use,
+expiring** token in `governance.approval_tokens` and holds the action. An operator
+approves it, then the agent re-calls the gate **with the token** and it is verified
++ consumed exactly once.
+
+```bash
+POST /agents/{id}/gate            {"action":"deploy","write":true}        → awaiting_token (+token_id)
+GET  /agents/{id}/tokens                                                  → list tokens
+POST /agents/{id}/tokens/{tid}/approve   {"decided_by":"alice"}           → approved
+POST /agents/{id}/gate            {"action":"deploy","write":true,"token_id":"<tid>"}  → allow (consumed)
+```
+
+> Approval tokens require the canonical Postgres (`AGENT_RADAR_DATABASE_URL`); when
+> it is unavailable the gate **fails secure** (denies the gated write rather than
+> granting one it can't audit). An `action_class` in
+> `AWCP_OPA_OPERATOR_ACTION_CLASSES` (e.g. `cross_system`) returns
+> `awaiting_operator` instead — human approval regardless of risk.
 
 ---
 

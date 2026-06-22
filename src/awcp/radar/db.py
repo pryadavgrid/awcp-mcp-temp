@@ -55,6 +55,10 @@ DURABLE_EVENT_TYPES: frozenset[str] = frozenset({
     "hook_stale",                    # a hook went silent
     "telemetry_observed", "policy_observed", "flags_observed",
     "gate_denied",
+    # expiring approval tokens (magazine Scenario B): the grant moment + operator
+    # decisions are evidence (the awaiting_token/operator hold itself is already
+    # captured as a gate_denied policy decision).
+    "token_consumed", "token_approved", "token_denied",
     "token_hard_stop", "token_remote_stop", "token_recover",
     "gateway_bypass",
 })
@@ -362,8 +366,10 @@ def decide_approval(agent_id: str, decision: str = "approved",
             res = c.execute(_text(
                 "UPDATE governance.approval_tokens "
                 "SET status=:decision, decided_by=:decided_by, decided_at=now() "
-                "WHERE agent_id=:agent_id AND status='pending'"
-            ), {"decision": decision, "decided_by": decided_by, "agent_id": agent_id})
+                "WHERE agent_id=:agent_id AND status='pending' "
+                "  AND action_class=:scope_class"
+            ), {"decision": decision, "decided_by": decided_by, "agent_id": agent_id,
+                "scope_class": APPROVAL_ACTION_CLASS})
             return (res.rowcount or 0) > 0
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.db.decide_approval failed agent=%s error=%r", agent_id, exc)
@@ -379,12 +385,193 @@ def open_approval_agent_ids() -> set[str]:
         with _engine.connect() as c:
             rows = c.execute(_text(
                 "SELECT DISTINCT agent_id FROM governance.approval_tokens "
-                "WHERE status='pending' AND expires_at > now() AND agent_id IS NOT NULL"
-            )).scalars().all()
+                "WHERE status='pending' AND expires_at > now() AND agent_id IS NOT NULL "
+                "  AND action_class=:scope_class"
+            ), {"scope_class": APPROVAL_ACTION_CLASS}).scalars().all()
         return {r for r in rows if r}
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.db.open_approvals failed error=%r", exc)
         return set()
+
+
+# ── Per-action approval tokens (magazine Scenario B) ──────────────────────────
+# The scope-expansion helpers above gate an AGENT (one pending row holds it in
+# quarantine). These helpers gate a single high-risk WRITE: the gate issues a
+# narrow, branch-scoped, EXPIRING, single-use token; an operator approves it; the
+# agent presents it back at the gate and it is verified + consumed exactly once.
+# Distinct action_class values keep the two flows from colliding (the agent-gate
+# queries above filter on APPROVAL_ACTION_CLASS). Fail-secure: when the DB is
+# unavailable every call here returns "unavailable" so the gate denies rather
+# than granting an un-auditable write.
+GATE_TOKEN_TTL_SECONDS = float(os.getenv("AGENT_RADAR_GATE_TOKEN_TTL", str(15 * 60)))
+
+_SQL_GATE_TOKEN_INSERT = (
+    "INSERT INTO governance.approval_tokens "
+    "(workflow_id, branch_id, agent_id, action_class, write_scopes, risk, status, "
+    " requested_by, context_diff, max_uses, expires_at) "
+    "VALUES (:workflow_id, :branch_id, :agent_id, :action_class, :write_scopes, :risk, "
+    " 'pending', :requested_by, CAST(:context_diff AS jsonb), :max_uses, "
+    " now() + (:ttl * interval '1 second')) "
+    "RETURNING id"
+)
+
+_GATE_TOKEN_COLS = (
+    "id, agent_id, action_class, write_scopes, risk, status, max_uses, uses, "
+    "branch_id, workflow_id, EXTRACT(EPOCH FROM requested_at) AS requested_at, "
+    "EXTRACT(EPOCH FROM expires_at) AS expires_at, (expires_at <= now()) AS expired"
+)
+
+
+def _token_row(r) -> dict:
+    return {
+        "id": str(r["id"]),
+        "agent_id": r["agent_id"],
+        "action_class": r["action_class"],
+        "write_scopes": list(r["write_scopes"] or []),
+        "risk": float(r["risk"]) if r["risk"] is not None else None,
+        "status": r["status"],
+        "max_uses": r["max_uses"],
+        "uses": r["uses"],
+        "branch_id": r["branch_id"],
+        "workflow_id": r["workflow_id"],
+        "requested_at": float(r["requested_at"]) if r["requested_at"] is not None else None,
+        "expires_at": float(r["expires_at"]) if r["expires_at"] is not None else None,
+        "expired": bool(r["expired"]) if "expired" in r else None,
+    }
+
+
+def issue_gate_token(agent_id: str, action_class: str, write_scopes: list[str],
+                     risk: float | None = None, workflow_id: str | None = None,
+                     branch_id: str | None = None, context_diff: dict | None = None,
+                     requested_by: str | None = None, max_uses: int = 1,
+                     ttl: float | None = None) -> str | None:
+    """Create a pending, branch-scoped, expiring token for a single gated write.
+    Returns the token id, or None when the DB is unavailable (gate fails secure)."""
+    if not _enabled or _engine is None or not agent_id:
+        return None
+    try:
+        with _engine.begin() as c:
+            tid = c.execute(_text(_SQL_GATE_TOKEN_INSERT), {
+                "workflow_id": workflow_id or agent_id or "radar",
+                "branch_id": branch_id,
+                "agent_id": agent_id,
+                "action_class": action_class or "gated_write",
+                "write_scopes": list(write_scopes or []),
+                "risk": risk,
+                "requested_by": requested_by,
+                "context_diff": json.dumps(context_diff or {}, default=str),
+                "max_uses": max(1, int(max_uses)),
+                "ttl": ttl if ttl is not None else GATE_TOKEN_TTL_SECONDS,
+            }).scalar()
+        return str(tid) if tid else None
+    except Exception as exc:  # noqa: BLE001 — durability is best-effort
+        log.warning("radar.db.issue_gate_token failed agent=%s error=%r", agent_id, exc)
+        return None
+
+
+def get_gate_token(token_id: str) -> dict | None:
+    """Fetch a single token by id, or None if absent / DB unavailable."""
+    if not _enabled or _engine is None or not token_id:
+        return None
+    try:
+        with _engine.connect() as c:
+            row = c.execute(_text(
+                f"SELECT {_GATE_TOKEN_COLS} FROM governance.approval_tokens "
+                "WHERE id = CAST(:id AS uuid)"
+            ), {"id": token_id}).mappings().first()
+        return _token_row(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.get_gate_token failed id=%s error=%r", token_id, exc)
+        return None
+
+
+def decide_gate_token(token_id: str, decision: str = "approved",
+                      decided_by: str | None = None) -> bool:
+    """Operator approves/denies ONE pending token by id. decision ∈ approved|denied
+    (canonical CHECK). Returns True if the token was pending and updated."""
+    if not _enabled or _engine is None or not token_id:
+        return False
+    if decision not in ("approved", "denied"):
+        decision = "approved"
+    try:
+        with _engine.begin() as c:
+            res = c.execute(_text(
+                "UPDATE governance.approval_tokens "
+                "SET status=:decision, decided_by=:decided_by, decided_at=now() "
+                "WHERE id = CAST(:id AS uuid) AND status='pending'"
+            ), {"decision": decision, "decided_by": decided_by, "id": token_id})
+            return (res.rowcount or 0) > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.decide_gate_token failed id=%s error=%r", token_id, exc)
+        return False
+
+
+def verify_and_consume_gate_token(token_id: str, agent_id: str,
+                                  scope: str = "") -> tuple[bool, str]:
+    """Atomically verify and consume a token for THIS agent. A consume succeeds
+    only when the token is approved, unexpired, belongs to the agent, still has a
+    use left, and (when a scope is given) carries that scope. Increments uses and
+    flips status to 'consumed' on the last use. Returns (ok, reason).
+
+    Fail-secure: returns (False, ...) whenever the DB is unavailable — the gate
+    must never grant a write on an un-auditable token."""
+    if not _enabled or _engine is None:
+        return False, "approval tokens unavailable (no governance DB)"
+    if not token_id:
+        return False, "no token presented"
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "UPDATE governance.approval_tokens "
+                "SET uses = uses + 1, "
+                "    status = CASE WHEN uses + 1 >= max_uses THEN 'consumed' ELSE status END "
+                "WHERE id = CAST(:id AS uuid) "
+                "  AND status = 'approved' "
+                "  AND expires_at > now() "
+                "  AND uses < max_uses "
+                "  AND agent_id = :agent_id "
+                "  AND (:scope = '' OR :scope = ANY(write_scopes)) "
+                "RETURNING id, uses, max_uses, status"
+            ), {"id": token_id, "agent_id": agent_id, "scope": scope or ""}).mappings().first()
+            if row:
+                return True, f"consumed ({row['uses']}/{row['max_uses']})"
+        # No row updated — explain why (best effort; never raises).
+        cur = get_gate_token(token_id)
+        if cur is None:
+            return False, "token not found"
+        if cur["agent_id"] != agent_id:
+            return False, "token belongs to a different agent"
+        if cur["status"] == "pending":
+            return False, "token not yet approved by an operator"
+        if cur["status"] in ("denied", "expired"):
+            return False, f"token {cur['status']}"
+        if cur["status"] == "consumed" or cur["uses"] >= cur["max_uses"]:
+            return False, "token already used"
+        if cur.get("expired"):
+            return False, "token expired"
+        if scope and scope not in (cur["write_scopes"] or []):
+            return False, f"token scope {cur['write_scopes']} does not cover '{scope}'"
+        return False, "token not usable"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.consume_gate_token failed id=%s error=%r", token_id, exc)
+        return False, "token verification error"
+
+
+def list_gate_tokens(agent_id: str, limit: int = 50) -> list[dict]:
+    """All approval tokens for an agent, newest first. [] when DB unavailable."""
+    if not _enabled or _engine is None or not agent_id:
+        return []
+    limit = max(1, min(int(limit or 50), 500))
+    try:
+        with _engine.connect() as c:
+            rows = c.execute(_text(
+                f"SELECT {_GATE_TOKEN_COLS} FROM governance.approval_tokens "
+                "WHERE agent_id = :agent_id ORDER BY requested_at DESC LIMIT :limit"
+            ), {"agent_id": agent_id, "limit": limit}).mappings().all()
+        return [_token_row(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.list_gate_tokens failed agent=%s error=%r", agent_id, exc)
+        return []
 
 
 # ── Token ledger (evidence.token_ledger) ──────────────────────────────────────

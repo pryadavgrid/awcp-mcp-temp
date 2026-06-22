@@ -98,6 +98,22 @@ class TestFailOpen:
         assert db_nodb.record_onboarding_run("wf", "a", "done") is None
         assert db_nodb.query() == []
 
+    def test_gate_token_helpers_fail_secure(self, db_nodb):
+        """Per-action approval tokens must FAIL SECURE without a DB: no token can
+        be issued, and a verify reports unavailable (so the gate denies the write
+        rather than granting one it cannot audit)."""
+        db_nodb.init()
+        assert db_nodb.issue_gate_token("a", "gated_write", ["s"]) is None
+        assert db_nodb.get_gate_token("00000000-0000-0000-0000-000000000000") is None
+        assert db_nodb.decide_gate_token("tid", "approved") is False
+        assert db_nodb.list_gate_tokens("a") == []
+        ok, reason = db_nodb.verify_and_consume_gate_token("tid", "a", "s")
+        assert ok is False and "unavailable" in reason
+
+    def test_token_event_kinds_are_durable(self, db_nodb):
+        for kind in ("token_consumed", "token_approved", "token_denied"):
+            assert kind in db_nodb.DURABLE_EVENT_TYPES
+
     def test_guards_reject_invalid_enums(self, db_nodb):
         db_nodb.init()
         # invalid kind / state are rejected even before reaching the DB

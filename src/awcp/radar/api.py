@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from awcp.radar import onboarding, policy
+from awcp.radar import onboarding, policy, opa, tokens
 from awcp.radar import db as _events_db
 from awcp.radar.models import AgentEntry, RegisterRequest
 from awcp.radar.store import REGISTRY
@@ -1259,6 +1259,10 @@ class GateRequest(BaseModel):
     action: str = ""
     write: bool = True            # the magazine gates WRITE-capable actions
     scope: str = ""               # the action's write scope (checked vs declared write_scopes)
+    action_class: str = ""        # optional class label (e.g. "cross_system" → operator approval)
+    token_id: str = ""            # an approval token the caller presents for a gated write
+    workflow_id: str = ""         # branch context recorded on an issued approval token
+    branch_id: str = ""
 
 
 class SignalRequest(BaseModel):
@@ -1301,7 +1305,14 @@ def gate(agent_id: str, req: GateRequest) -> dict:
                 "autonomy_profile": e.autonomy_profile}
 
     t0 = time.monotonic()
-    decision = policy.evaluate_action(e, action=req.action, is_write=req.write, scope=req.scope)
+    # Policy Decision Point: OPA when AWCP_OPA_URL is set, else policy.evaluate_action
+    # (opa.evaluate_action falls back to it on any OPA error — fail-secure). The
+    # decision carries the magazine's 4-value gate kind (auto_authorized /
+    # awaiting_token / awaiting_operator / denied) alongside the allow|deny verdict.
+    decision = opa.evaluate_action(e, action=req.action, is_write=req.write,
+                                   scope=req.scope, action_class=req.action_class)
+    # Resolve any approval-token requirement (issue/verify) — magazine Scenario B.
+    decision = _resolve_approval(e, req, decision)
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
         decision=decision["decision"],
@@ -1310,14 +1321,64 @@ def gate(agent_id: str, req: GateRequest) -> dict:
         risk=e.risk,
     )
     log.info(
-        "radar.gate agent_id=%s action=%r decision=%s mode=%s risk=%s dur_ms=%.2f",
-        agent_id, (req.action or "")[:64], decision["decision"],
-        decision["mode"], e.risk, elapsed * 1000,
+        "radar.gate agent_id=%s action=%r decision=%s gate=%s mode=%s engine=%s risk=%s dur_ms=%.2f",
+        agent_id, (req.action or "")[:64], decision["decision"], decision.get("gate"),
+        decision["mode"], decision.get("engine"), e.risk, elapsed * 1000,
     )
+    # Durable mirror: the gate kind drives governance.policy_decisions.decision
+    # (auto_authorized | awaiting_token | awaiting_operator | denied). Allows stay
+    # in the live ring only; denies/holds are persisted (see _record_event).
     _record_event("gate", agent_id, f"{decision['decision']} ({decision['mode']})",
-                  action=req.action)
+                  action=req.action, decision=decision.get("gate"),
+                  scope=req.scope or None, reason=decision.get("reason"),
+                  token_id=decision.get("token_id"), workflow_id=req.workflow_id or None)
     return {"agent_id": agent_id, **decision,
             "status": e.status, "autonomy_profile": e.autonomy_profile}
+
+
+def _resolve_approval(e: AgentEntry, req: GateRequest, decision: dict) -> dict:
+    """Turn an `awaiting_token` / `awaiting_operator` PDP decision into an
+    enforceable one by issuing or verifying an expiring approval token.
+
+      * awaiting_token + a presented token  -> verify + single-use consume -> allow
+      * awaiting_token + no token           -> issue a pending token, hold (deny)
+      * awaiting_operator                   -> issue a pending operator token, hold
+
+    Fail-secure: if the governance DB is unavailable no token can be issued or
+    verified, so the action stays denied rather than being granted un-auditably."""
+    gate_kind = decision.get("gate")
+    if gate_kind not in ("awaiting_token", "awaiting_operator"):
+        return decision
+
+    risk_tier = policy.authoritative_risk(e)
+
+    # A caller presenting a token for a token-gated write: verify and consume it.
+    if gate_kind == "awaiting_token" and req.token_id:
+        ok, why = tokens.verify_and_consume(req.token_id, agent_id=e.id, scope=req.scope)
+        if ok:
+            _record_event("token_consumed", e.id,
+                          f"approval token consumed for {req.action!r} ({why})",
+                          action=req.action, token_id=req.token_id, decision="auto_authorized")
+            return {**decision, "decision": "allow", "gate": "auto_authorized",
+                    "mode": "token_consumed",
+                    "reason": f"approved — single-use approval token consumed ({why})",
+                    "token_id": req.token_id}
+        return {**decision, "reason": f"approval token rejected: {why}", "token_id": req.token_id}
+
+    # No (valid) token: issue a pending, branch-scoped, expiring token and hold.
+    action_class = req.action_class or ("operator_review" if gate_kind == "awaiting_operator"
+                                        else "gated_write")
+    tid = tokens.issue(e, action=req.action, action_class=action_class, scope=req.scope,
+                       risk_tier=risk_tier, workflow_id=req.workflow_id, branch_id=req.branch_id)
+    if not tid:
+        return {**decision,
+                "reason": (decision.get("reason", "") +
+                           " — approval tokens unavailable (no governance DB); action denied")}
+    _record_event("token_requested", e.id,
+                  f"approval token issued for {req.action!r} ({gate_kind})",
+                  action=req.action, token_id=tid, decision=gate_kind, scope=req.scope or None)
+    return {**decision, "token_id": tid,
+            "reason": decision.get("reason", "") + " — pending approval token issued"}
 
 
 @router.post("/agents/{agent_id}/signal")
@@ -1407,6 +1468,55 @@ def approve(agent_id: str) -> dict:
              agent_id, status, list(updated.write_scopes or []))
     return {"agent_id": agent_id, "approval_state": "approved",
             "status": updated.status, "write_scopes": list(updated.write_scopes or [])}
+
+
+# ── Per-action approval tokens (magazine Scenario B) ──────────────────────────
+# These govern a single high-risk WRITE (distinct from /approve above, which gates
+# an AGENT after a scope expansion). The gate issues a pending token when a
+# token-gated write arrives without one; the operator approves/denies it here; the
+# agent presents it back at the gate where it is verified + single-use consumed.
+class TokenDecisionRequest(BaseModel):
+    decided_by: str = ""          # operator identity recorded on the token
+
+
+@router.get("/agents/{agent_id}/tokens")
+def list_tokens(agent_id: str, limit: int = 50) -> list[dict]:
+    """All approval tokens for an agent, newest first (durable governance store)."""
+    _require(agent_id)
+    return tokens.list_for_agent(agent_id, limit=limit)
+
+
+@router.post("/agents/{agent_id}/tokens/{token_id}/approve")
+def approve_token(agent_id: str, token_id: str, req: TokenDecisionRequest) -> dict:
+    """Operator approves one pending approval token; the agent may then present it
+    at the gate to perform the single gated write within its expiry window."""
+    _require(agent_id)
+    tok = tokens.get(token_id)
+    if not tok or tok.get("agent_id") != agent_id:
+        raise HTTPException(status_code=404, detail="token not found for this agent")
+    if not tokens.decide(token_id, "approved", req.decided_by or None):
+        raise HTTPException(status_code=409,
+                            detail=f"token not pending (status={tok.get('status')})")
+    _record_event("token_approved", agent_id, f"operator approved token {token_id}",
+                  token_id=token_id, decided_by=req.decided_by or None)
+    log.info("radar.token.approved agent_id=%s token_id=%s", agent_id, token_id)
+    return {"agent_id": agent_id, "token_id": token_id, "status": "approved"}
+
+
+@router.post("/agents/{agent_id}/tokens/{token_id}/deny")
+def deny_token(agent_id: str, token_id: str, req: TokenDecisionRequest) -> dict:
+    """Operator denies one pending approval token; the gated write stays blocked."""
+    _require(agent_id)
+    tok = tokens.get(token_id)
+    if not tok or tok.get("agent_id") != agent_id:
+        raise HTTPException(status_code=404, detail="token not found for this agent")
+    if not tokens.decide(token_id, "denied", req.decided_by or None):
+        raise HTTPException(status_code=409,
+                            detail=f"token not pending (status={tok.get('status')})")
+    _record_event("token_denied", agent_id, f"operator denied token {token_id}",
+                  token_id=token_id, decided_by=req.decided_by or None)
+    log.info("radar.token.denied agent_id=%s token_id=%s", agent_id, token_id)
+    return {"agent_id": agent_id, "token_id": token_id, "status": "denied"}
 
 
 class RiskRequest(BaseModel):

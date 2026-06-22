@@ -341,6 +341,11 @@ echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
+if [ -n "${AWCP_OPA_URL:-}" ]; then
+echo "     OPA policy engine      : ${AWCP_OPA_URL}   (gate PDP — ${AWCP_OPA_SHADOW:-false} shadow)"
+else
+echo "     OPA policy engine      : http://localhost:8181   (running; gate uses policy.py until AWCP_OPA_URL is set — see README)"
+fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
 echo "     Ollama                 : http://localhost:11434"
 echo "     agents bundle          : $AWCP_AGENTS_DIR"
