@@ -88,6 +88,30 @@ GATE_FAIL_OPEN = os.getenv("AWCP_GATE_FAIL_OPEN", "true").lower() == "true"
 # agents their scopes, to turn on strict per-scope authorization.
 GATE_SEND_SCOPE = os.getenv("AWCP_GATE_SEND_SCOPE", "false").lower() == "true"
 
+# Meter every governed tool call's REAL token footprint (its input + output) into
+# Laminar via the gateway, so each tool call shows in the Token Monitor / Laminar
+# with meaningful numbers — not only the LLM calls. The MCP server is the ONE place
+# tools actually run, so it is the only place the real I/O exists. Env-toggle;
+# best-effort (a metering hiccup never affects the tool result).
+METER_TOOL_TOKENS = os.getenv("AWCP_METER_TOOL_TOKENS", "true").lower() == "true"
+
+
+def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
+                       tool_input: dict, output: Any) -> None:
+    """Log this tool call's real input+output token usage to Laminar (gateway
+    /laminar/record, which estimates with the shared tiktoken estimator)."""
+    if not (METER_TOOL_TOKENS and agent_id and RADAR_URL):
+        return
+    try:
+        text = (json.dumps(tool_input or {}, ensure_ascii=False) + " " + str(output))[:20000]
+        httpx.post(f"{RADAR_URL}/laminar/record", json={
+            "agent_id": agent_id, "task_id": task_id or "tool",
+            "tool_name": tool_name, "model": f"tool:{tool_name}",
+            "step": "tool_called", "text": text,
+        }, timeout=GATE_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 — metering must never break a tool call
+        logger.debug("mcp.meter.failed tool=%s error=%r", tool_name, exc)
+
 
 def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
     """Ask the radar's write-action gate. Returns the radar's decision dict.
@@ -409,6 +433,8 @@ def execute_tool(
         # 2) Execute the registered tool (this is the ONLY place tools run).
         try:
             result = run_tool(tool_name, tool_input or {})
+            # Meter the call's real input+output tokens into Laminar (best-effort).
+            _meter_tool_tokens(agent_id, task_id, tool_name, tool_input or {}, result)
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
