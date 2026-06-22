@@ -58,6 +58,8 @@ export const setGuard = (denyTools, enabled = true) =>
   call('POST', '/hooks/guard', { deny_tools: denyTools, enabled })
 export const testGuard = (agentId, action) =>
   call('POST', '/hooks/guard/test', { agent_id: agentId, action })
+// The governed-tool catalog (from the radar registry, survives agents stopping).
+export const getGuardTools = () => call('GET', '/hooks/guard/tools')
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>

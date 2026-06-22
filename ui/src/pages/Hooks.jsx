@@ -9,6 +9,7 @@ import {
   setGuard,
   testGuard,
   getUserAgents,
+  getGuardTools,
 } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { Badge, StatusBadge } from '../components/Badge.jsx'
@@ -20,13 +21,14 @@ import { timeAgo, prettyKind, fmtInt } from '../lib/format.js'
 // package isn't mounted) so the page can show a "not mounted" notice; the rest
 // are best-effort.
 const load = async () => {
-  const [hooks, recent, guard, userAgents] = await Promise.all([
+  const [hooks, recent, guard, userAgents, catalog] = await Promise.all([
     getHooks(),
     getHooksRecent(60).catch(() => []),
     getGuard().catch(() => null),
     getUserAgents().catch(() => []),
+    getGuardTools().catch(() => ({ tools: [], agents: [] })),
   ])
-  return { hooks, recent, guard, userAgents }
+  return { hooks, recent, guard, userAgents, catalog }
 }
 
 const CAT_TONE = { observer: 'slate', guard: 'amber' }
@@ -53,8 +55,17 @@ export default function Hooks() {
   const recent = data?.recent || []
   const subsCount = Object.keys(status.subscriptions || {}).length
   // Real agents + the real union of their tool catalogs — nothing hardcoded.
+  // The tool catalog comes from the radar registry (the MCP server's persisted
+  // capabilities) so it stays populated even when no task-worker agent is live;
+  // union in any extra tools a running bundle agent advertises.
   const userAgents = data?.userAgents || []
-  const allTools = Array.from(new Set(userAgents.flatMap((a) => a.tools || []))).sort()
+  const catalog = data?.catalog || { tools: [], agents: [] }
+  const allTools = Array.from(
+    new Set([...(catalog.tools || []), ...userAgents.flatMap((a) => a.tools || [])]),
+  ).sort()
+  // Agents to exercise the gate against: prefer the friendly bundle agents; fall
+  // back to the registry agents so the test gate is usable when none are running.
+  const gateAgents = userAgents.length ? userAgents : catalog.agents || []
 
   return (
     <div className="space-y-6">
@@ -73,7 +84,7 @@ export default function Hooks() {
       {/* ── Policy-guard demo controls (enable + test, no terminal) ──────── */}
       <div className="grid gap-4 lg:grid-cols-2">
         <GuardControl guard={data?.guard} tools={allTools} onDone={refresh} />
-        <TestGate agents={userAgents} tools={allTools} onDone={refresh} />
+        <TestGate agents={gateAgents} tools={allTools} onDone={refresh} />
       </div>
 
       {/* ── Registered hooks ─────────────────────────────────────────────── */}
