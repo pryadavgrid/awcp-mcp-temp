@@ -353,6 +353,8 @@ def _classify_block(reason: str) -> tuple[str, str]:
     """Map a block reason to (blocked_by, title) so the UI labels it correctly —
     a token-budget stop must NOT read as an agent-hooks veto, and vice-versa."""
     r = (reason or "").lower()
+    if "opa tool policy" in r or "opa agent" in r or "tool policy" in r:
+        return "opa_tool_policy", "⛔ Blocked — Tool Risk Policy"
     if "policy-guard" in r or "hook" in r:
         return "agent_hooks", "⛔ Blocked by Agent Hooks"
     if "token" in r or "budget" in r:

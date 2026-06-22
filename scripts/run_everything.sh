@@ -33,6 +33,7 @@
 # Usage:   bash scripts/run_everything.sh
 # Env:     SKIP_TELEMETRY=1   don't start the Docker stack
 #          SKIP_MCP=1         don't start the MCP server
+#          SKIP_OPA=1         don't start the OPA agent (per-tool tier blocking off)
 #          SKIP_OLLAMA=1      don't start Ollama
 #          SKIP_UI=1          don't start the React UI (Vite)
 #          SKIP_INSTALL=1     skip pip install on an existing venv
@@ -87,12 +88,12 @@ export LMNR_OTLP_ENDPOINT="${LMNR_OTLP_ENDPOINT:-http://localhost:8881}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 UI_PORT="${UI_PORT:-5173}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-everything-run"; mkdir -p "$LOGDIR"
-TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""
+TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""
 
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO2/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
@@ -137,6 +138,18 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 
+# ── OPA agent (hidden tool-call PDP) ──────────────────────────────────────────
+# The OPA agent tiers EVERY tool call the worker agents make and blocks the answer
+# for high/severe tools (operator-set on Agent Hooks → Tool Risk Policy). The radar
+# + gateway consult it at AWCP_OPA_AGENT_URL; it stays INVISIBLE to the control
+# plane — it never self-registers and we add its script to AGENT_RADAR_EXCLUDE so
+# the process scanner skips it. All env-driven; set SKIP_OPA=1 to leave it off.
+OPA_AGENT_PORT="${OPA_AGENT_PORT:-8105}"
+export AWCP_OPA_AGENT_URL="${AWCP_OPA_AGENT_URL:-http://localhost:${OPA_AGENT_PORT}}"
+export AWCP_OPA_AGENT_FAIL_OPEN="${AWCP_OPA_AGENT_FAIL_OPEN:-true}"
+# Hide the OPA agent from the radar scanner (append, don't clobber any existing list).
+export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent"
+
 # ── Toggleable-guard demo defaults ────────────────────────────────────────────
 # Make the dashboard's Policy Guard (Agent Hooks → Policy Guard) the SINGLE on/off
 # lever for blocking a tool call: deny-list a tool → blocked; remove it → works.
@@ -179,6 +192,7 @@ cleanup(){
   echo
   say "Shutting down…"
   [ -n "$UI_PID" ]       && kill "$UI_PID"       2>/dev/null || true
+  [ -n "$OPA_PID" ]      && kill "$OPA_PID"      2>/dev/null || true
   [ -n "$MCP_PID" ]      && kill "$MCP_PID"      2>/dev/null || true
   [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
   [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
@@ -315,6 +329,30 @@ else
   MCP_PID=$!
 fi
 
+# ── 5b. OPA agent (:OPA_AGENT_PORT) — hidden tool-call PDP, background ─────────
+# Has its OWN venv (next to the other agents). Launched here so the radar/gateway
+# can consult it at AWCP_OPA_AGENT_URL; it stays hidden (no self-register + the
+# AGENT_RADAR_EXCLUDE export above). AWCP_OPA_URL (Rego) is inherited if set.
+OPA_DIR="$AWCP_AGENTS_DIR/opa_agent"
+if [ "${SKIP_OPA:-0}" = "1" ]; then
+  warn "SKIP_OPA=1 — not starting the OPA agent (tool-tier blocking disabled)."
+elif [ -n "$(port_open "$OPA_AGENT_PORT")" ]; then
+  say "OPA agent already on :${OPA_AGENT_PORT} — reusing it."
+elif [ -f "$OPA_DIR/opa_agent.py" ]; then
+  if [ ! -x "$OPA_DIR/.venv/bin/python" ]; then
+    say "Bootstrapping the OPA agent venv (first run only)…"
+    python3 -m venv "$OPA_DIR/.venv"
+    "$OPA_DIR/.venv/bin/pip" install --quiet --upgrade pip
+    "$OPA_DIR/.venv/bin/pip" install --quiet -r "$OPA_DIR/requirements.txt"
+  fi
+  say "Starting OPA agent (hidden tool-call PDP) on :${OPA_AGENT_PORT}…"
+  OPA_PORT="$OPA_AGENT_PORT" AWCP_GATEWAY_URL="http://localhost:${GATEWAY_PORT}" \
+    nohup "$OPA_DIR/.venv/bin/python" "$OPA_DIR/opa_agent.py" > "$LOGDIR/opa-agent.log" 2>&1 &
+  OPA_PID=$!
+else
+  warn "OPA agent not found at $OPA_DIR — tool-tier blocking off (set AWCP_AGENTS_DIR)."
+fi
+
 # ── 6. OPTIONAL canned demonstration (DEMO=1) ─────────────────────────
 # Posts straight to the gateway ROOT paths (/agents, /laminar, /tasks) — the same
 # URLs the real bundle agents use — so the registry + token bar light up at once.
@@ -386,6 +424,9 @@ else
 echo "     OPA policy engine      : http://localhost:8181   (running; gate uses policy.py until AWCP_OPA_URL is set — see README)"
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
+if [ "${SKIP_OPA:-0}" != "1" ]; then
+echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden PDP; set tiers on Agent Hooks → Tool Risk Policy)"
+fi
 echo "     Ollama                 : http://localhost:11434"
 echo "     agents bundle          : $AWCP_AGENTS_DIR"
 [ "${DEMO:-0}" = "1" ] && \

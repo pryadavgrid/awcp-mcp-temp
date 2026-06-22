@@ -59,6 +59,13 @@ export const setGuard = (denyTools, enabled = true) =>
 export const testGuard = (agentId, action) =>
   call('POST', '/hooks/guard/test', { agent_id: agentId, action })
 
+// ── tool risk policy (the hidden OPA agent, via the gateway proxy) ─────────────
+// Tier vocabulary + block set + per-tool tier map for the sliders. Returns an
+// inert { enabled:false } shape when no OPA agent is wired, so the panel degrades.
+export const getToolPolicy = () => call('GET', '/tools/policy')
+export const setToolRisk = (name, tier) =>
+  call('POST', `/tools/policy/${encodeURIComponent(name)}`, { tier })
+
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>
   `${TEMPORAL_BASE}/namespaces/default/workflows/${encodeURIComponent(wfId)}`

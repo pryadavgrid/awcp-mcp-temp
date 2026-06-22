@@ -75,6 +75,42 @@ STATE: dict = {
 # Env-driven task queue for execution workflows (separate from onboarding)
 EXEC_TASK_QUEUE = os.getenv("AGENT_EXEC_TASK_QUEUE", "agent-task-execution")
 
+# ── OPA agent (hidden tool-call PDP) — env-gated, off by default ───────────────
+# When AWCP_OPA_AGENT_URL is set, every tool_called/web_search execution event is
+# evaluated by the OPA agent for its operator-set risk tier; a high/severe tier
+# finishes the task BLOCKED (surfaced in the user UI like the policy-guard). The
+# OPA agent also records the per-question tool-risk JSON + logs the call to
+# Laminar. Unset ⇒ this whole hook is a no-op (behaviour unchanged).
+OPA_AGENT_URL = os.getenv("AWCP_OPA_AGENT_URL", "").strip().rstrip("/")
+OPA_AGENT_TIMEOUT = float(os.getenv("AWCP_OPA_AGENT_TIMEOUT", "3"))
+# Fail-open: if the OPA agent is unreachable, allow the tool (default). Set false
+# to fail CLOSED (treat an unreachable PDP as a block) for stricter governance.
+OPA_AGENT_FAIL_OPEN = os.getenv("AWCP_OPA_AGENT_FAIL_OPEN", "true").strip().lower() == "true"
+
+
+async def _opa_tool_evaluate(agent_id: str, task_id: str, tool: str, event: dict) -> dict:
+    """Ask the OPA agent to tier + decide ONE tool call (it also records the JSON
+    + logs Laminar). Returns its decision dict; fail-open/closed per config when the
+    OPA agent is unset or unreachable — the PDP never crashes a task."""
+    if not OPA_AGENT_URL:
+        return {"decision": "allow", "risk_tier": None, "engine": "disabled"}
+    try:
+        async with httpx.AsyncClient(timeout=OPA_AGENT_TIMEOUT) as c:
+            r = await c.post(f"{OPA_AGENT_URL}/evaluate", json={
+                "agent_id": agent_id, "task_id": task_id, "tool_name": tool,
+                "tool_input": event.get("extra") or {},
+                "question": event.get("query", ""),
+            })
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001 — the PDP must never break a task
+        if OPA_AGENT_FAIL_OPEN:
+            log.warning("radar.opa_agent.unreachable tool=%s error=%r — fail-open allow", tool, exc)
+            return {"decision": "allow", "risk_tier": None, "engine": "opa_agent_error"}
+        log.warning("radar.opa_agent.unreachable tool=%s error=%r — fail-CLOSED block", tool, exc)
+        return {"decision": "block", "risk_tier": None, "engine": "opa_agent_error",
+                "reason": f"tool '{tool}' blocked — OPA agent unreachable (fail-closed)"}
+
 # ----------------------------------------------------------------------
 # Closed-loop telemetry: the quarantine decision reflects telemetry the radar
 # has actually OBSERVED in execution, not a flag the agent declared.
@@ -1840,6 +1876,39 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
                 return {"ok": False, "reason": "blocked_by_policy_guard",
                         "tool": _tool, "decision": "deny", "mode": _gd.get("mode"),
                         "gate_reason": _gd.get("reason")}
+
+    # OPA tool-tier gate (the hidden OPA agent): tier EVERY tool/web_search call by
+    # its operator-set risk tier, record the per-question JSON + log it to Laminar,
+    # and BLOCK the answer when the tier is high/severe — reusing the same
+    # finish-blocked path as the policy-guard so the user UI surfaces the severity.
+    if OPA_AGENT_URL and agent_id and event.get("type") in ("web_search", "tool_called"):
+        _tool = event.get("tool_name") or event.get("type")
+        if _tool:
+            _opa = await _opa_tool_evaluate(agent_id, task_id, _tool, event)
+            if _opa.get("decision") == "block":
+                _why = _opa.get("reason") or (
+                    f"tool '{_tool}' is {_opa.get('risk_tier')} risk — blocked by OPA tool policy")
+                _record_event("gate", agent_id, f"deny (opa_tool_tier:{_opa.get('risk_tier')})",
+                              action=_tool, decision="denied", reason=_why, task_id=task_id)
+                _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=_tool,
+                      reason=_why, task_id=task_id)
+                wf_id = STATE["exec_workflows"].pop(task_id, None)
+                STATE["exec_agents"].pop(task_id, None)
+                if wf_id and STATE["temporal"] and STATE["client"]:
+                    try:
+                        handle = STATE["client"].get_workflow_handle(wf_id)
+                        await handle.signal(
+                            AgentExecutionWorkflow.finish,
+                            {"status": "blocked", "error": _why},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("radar.opa.block.finish_failed task_id=%s error=%r",
+                                    task_id, exc)
+                log.warning("radar.exec.event.blocked agent_id=%s task_id=%s tool=%s tier=%s reason=opa_tool_tier",
+                            agent_id, task_id, _tool, _opa.get("risk_tier"))
+                return {"ok": False, "reason": "blocked_by_opa_tool_tier",
+                        "tool": _tool, "decision": "deny",
+                        "risk_tier": _opa.get("risk_tier"), "gate_reason": _why}
 
     # Degradation directives (magazine Step 04, the half the control plane owns):
     #  • hand the runtime its CURRENT stage directives every step so it applies
