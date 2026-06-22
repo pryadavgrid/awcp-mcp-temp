@@ -16,7 +16,7 @@
 set -e
 cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/src"
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO1/Agents/awcp-agents}"
 echo "🌐 AWCP Gateway -> http://localhost:8000   (docs: /docs)"
 echo "   USER : GET /user/agents | POST /user/ask"
 echo "   AWCP : /awcp/registry (radar UI + API)"

@@ -419,9 +419,15 @@ def execute_tool(
                 except Exception:  # noqa: BLE001
                     pass
 
-        # 1) Write-action gate (reads pass straight through). The scope is only
-        #    forwarded when strict magazine-scope authorization is enabled;
-        #    otherwise the gate still enforces quarantine / autonomy / token.
+        # 1) Governance gate — consulted for EVERY tool, read or write. We still
+        #    pass is_write, so the radar's BASE policy keeps its semantics (reads
+        #    are allowed; writes are gated by quarantine / autonomy / token). The
+        #    reason we always call it (instead of short-circuiting reads) is so an
+        #    operator's deny-list (the policy-guard) can veto ANY tool by name —
+        #    the guard runs inside the gate and can tighten a read's "allow" into a
+        #    "deny". Nothing tool-specific is hardcoded; the gate decides.
+        #    The scope is only forwarded when strict magazine-scope authorization
+        #    is enabled.
         gate = _radar_gate(
             agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write,
             tool_name=tool_name, workflow_id=workflow_id, task_id=task_id,
@@ -465,7 +471,7 @@ def execute_tool(
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
-                           f"write-action gate ({gate.get('reason', '')})."),
+                           f"governance gate ({gate.get('reason', '')})."),
                 "decision": "deny",
                 "mode": gate.get("mode", ""),
                 "reason": gate.get("reason", ""),

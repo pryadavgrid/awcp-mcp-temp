@@ -29,7 +29,7 @@ import subprocess
 
 # The bundle of standalone agents. Override with AWCP_AGENTS_DIR.
 AGENTS_DIR = os.getenv(
-    "AWCP_AGENTS_DIR", "/Users/pryadav/Downloads/awcp-mcp-temp-agents"
+    "AWCP_AGENTS_DIR", "/Users/pchandra/CAPSTONE/DEMO1/Agents/awcp-agents"
 )
 
 # Where launched agents should send governance + execution events. Points at

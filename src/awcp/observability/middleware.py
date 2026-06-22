@@ -26,6 +26,41 @@ logger = logging.getLogger(__name__)
 # FastAPI Auto-Instrumentation
 
 
+def _patch_otel_route_details() -> None:
+    """Work around an incompatibility between opentelemetry-instrumentation-fastapi
+    (0.63b1) and Starlette >= 1.3.
+
+    Starlette 1.3 changed ``include_router()`` so included routers are represented
+    by ``_IncludedRouter`` objects that have no ``.path`` attribute. OTel's
+    ``_get_route_details`` guards the FULL-match branch against the resulting
+    ``AttributeError`` (falling back to the raw scope path) but NOT the
+    PARTIAL-match branch. Any request that only partially matches such a route —
+    notably the CORS *preflight* ``OPTIONS`` the browser sends before a JSON POST —
+    therefore raises ``AttributeError`` inside the (outermost) OTel ASGI middleware
+    and is returned to the browser as HTTP 500 with no CORS headers, surfacing as
+    "Failed to fetch" in the UI.
+
+    We wrap ``_get_route_details`` so a missing ``.path`` from either branch falls
+    back to the scope path, matching the FULL-match branch's existing behaviour.
+    """
+    import opentelemetry.instrumentation.fastapi as _otel_fastapi
+
+    if getattr(_otel_fastapi, "_awcp_route_details_patched", False):
+        return
+
+    _original = _otel_fastapi._get_route_details
+
+    def _safe_get_route_details(scope):
+        try:
+            return _original(scope)
+        except AttributeError:
+            # Route object (e.g. Starlette 1.3 _IncludedRouter) has no `.path`.
+            return scope.get("path")
+
+    _otel_fastapi._get_route_details = _safe_get_route_details
+    _otel_fastapi._awcp_route_details_patched = True
+
+
 def instrument_fastapi(app) -> None:
     """
     Call this after creating your FastAPI app.
@@ -33,6 +68,7 @@ def instrument_fastapi(app) -> None:
       - http.method, http.route, http.status_code
       - Duration histogram
     """
+    _patch_otel_route_details()  # must run before any request is served
     FastAPIInstrumentor.instrument_app(
         app,
         excluded_urls="health,metrics",  # Don't trace health checks

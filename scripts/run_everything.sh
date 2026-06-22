@@ -38,6 +38,12 @@
 #          SKIP_INSTALL=1     skip pip install on an existing venv
 #          DEMO=1             seed a synthetic agent + token-control walkthrough
 #          GATEWAY_PORT=8000  gateway port
+#          --- toggleable-guard demo (defaults below; see the block further down) ---
+#          AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY=true   restore strict onboarding
+#          AGENT_RADAR_REQUIRE_OBSERVED_POLICY=true       (agents quarantined until
+#                                                          telemetry+policy observed)
+#          AGENT_RADAR_RISK_BUDGET=low:5,medium:3,high:1  restore tight failure budgets
+#          LMNR_RISK_TOKEN_BUDGET=low:100000,medium:50000,high:20000  tight token budgets
 #          UI_PORT=5173       React UI (Vite) port
 #          AWCP_AGENTS_DIR=…  external agent bundle (default: Downloads bundle)
 #          LMNR_PROJECT_API_KEY=…   also dual-export spans to Laminar
@@ -86,7 +92,7 @@ TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO1/Agents/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
@@ -130,14 +136,6 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 # stealing each other's workflows.
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
-
-# Governance policy engine (magazine Step 03 — OPA policy-as-code + approval
-# tokens). Default SHADOW: OPA runs alongside the Python gate and logs any
-# differences WITHOUT changing enforcement — flip to `opa` once /policy/status
-# shows parity (shadow_mismatches stable at 0). The OPA server is the `opa`
-# service in the telemetry compose (host :8181). All env-driven, nothing baked in.
-export AWCP_POLICY_ENGINE="${AWCP_POLICY_ENGINE:-shadow}"
-export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
 
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
