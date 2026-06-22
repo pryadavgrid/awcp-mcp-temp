@@ -1002,6 +1002,7 @@ try:
         # and the gate / gateway already deny this agent immediately and live.
 
     _laminar.init_laminar(get_agent=REGISTRY.get,
+                          list_agents=REGISTRY.all,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
     router.include_router(_laminar.router)

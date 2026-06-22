@@ -55,6 +55,7 @@ log = logging.getLogger("awcp.laminar")
 
 # ── injected radar hooks (no-op defaults keep the package standalone-safe) ────
 _get_agent = lambda agent_id: None                     # noqa: E731
+_list_agents = lambda: []                              # noqa: E731  (registry roster)
 _on_breach = lambda agent_id, evaluation: None         # noqa: E731
 _record_event = lambda kind, agent_id="", detail="", **extra: None   # noqa: E731
 
@@ -80,15 +81,18 @@ _m_calls = None         # counter: awcp.laminar.llm.calls.total {agent, model}
 _m_breaches = None      # counter: awcp.laminar.budget.breaches.total {agent, level}
 
 
-def init_laminar(*, get_agent=None, on_breach=None, record_event=None) -> dict:
+def init_laminar(*, get_agent=None, list_agents=None, on_breach=None,
+                 record_event=None) -> dict:
     """One-time wiring, called by the radar AFTER setup_otel(). Attaches the
     Laminar exporter (if a key is set) and creates this module's OTel
     instruments on the already-configured global providers."""
-    global _get_agent, _on_breach, _record_event, _initialized
+    global _get_agent, _list_agents, _on_breach, _record_event, _initialized
     global _tracer, _m_tokens, _m_calls, _m_breaches
 
     if get_agent is not None:
         _get_agent = get_agent
+    if list_agents is not None:
+        _list_agents = list_agents
     if on_breach is not None:
         _on_breach = on_breach
     if record_event is not None:
@@ -477,7 +481,23 @@ def record_usage(agent_id: str, model: str, input_tokens: int, output_tokens: in
 
 
 def all_usage() -> list[dict]:
-    return [usage_summary(a) for a in LEDGER.agents()]
+    """Every agent with recorded token usage, PLUS every self-registered (running)
+    agent that hasn't spent yet — so an agent appears in the monitor, with a
+    settable budget, the moment it is registered, not only after its first metered
+    LLM call. Scanner-detected processes (source='scan': ollama/temporal/duplicate
+    rows) are excluded; their tokens attribute to the agent's own self-registered
+    id anyway. Falls back to ledger-only if the registry roster is unavailable."""
+    ids = list(LEDGER.agents())
+    seen = set(ids)
+    try:
+        for e in _list_agents() or []:
+            aid = getattr(e, "id", None)
+            if aid and aid not in seen and getattr(e, "source", "") == "self":
+                ids.append(aid)
+                seen.add(aid)
+    except Exception:                       # noqa: BLE001 — never break the feed
+        pass
+    return [usage_summary(a) for a in ids]
 
 
 def reset_agent(agent_id: str) -> dict:
