@@ -18,6 +18,11 @@ dist/
 *.egg-info/
 .eggs/
 
+# --- Node / JS (the React dashboard under ui/) ---
+node_modules/
+dist-ssr/
+.vite/
+
 # --- Virtual environments ---
 .venv/
 venv/
