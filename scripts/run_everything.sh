@@ -142,63 +142,13 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 
-# ── OPA agent (hidden tool-call PDP) ──────────────────────────────────────────
-# The OPA agent tiers EVERY tool call the worker agents make and blocks the answer
-# for high/severe tools. The tier is REASONED by a small language model (a local
-# Ollama SLM); the Radar shows the tier bar for each call. The radar + gateway
-# consult it at AWCP_OPA_AGENT_URL; it stays INVISIBLE to the control plane — it
-# never self-registers and we add its script to AGENT_RADAR_EXCLUDE so the process
-# scanner skips it. All env-driven; set SKIP_OPA=1 to leave it off.
-OPA_AGENT_PORT="${OPA_AGENT_PORT:-8105}"
-export AWCP_OPA_AGENT_URL="${AWCP_OPA_AGENT_URL:-http://localhost:${OPA_AGENT_PORT}}"
-export AWCP_OPA_AGENT_FAIL_OPEN="${AWCP_OPA_AGENT_FAIL_OPEN:-true}"
-# Show the OPA agent ON the radar as a running agent (it self-registers + heartbeats
-# like the worker agents). It still stays out of the process SCANNER (excluded below)
-# so there's no duplicate proc-row, and out of the user-UI picker. Set false to hide.
-export OPA_RADAR_REGISTER="${OPA_RADAR_REGISTER:-true}"
-export OPA_RADAR_AGENT_ID="${OPA_RADAR_AGENT_ID:-agent-opa}"
-# …but keep it OUT of the Token Monitor (it spends no metered tokens — radar only).
-# Kept in sync with the OPA agent's radar id so the right row is hidden.
-export LMNR_USAGE_EXCLUDE="${LMNR_USAGE_EXCLUDE:-${OPA_RADAR_AGENT_ID}}"
-# The radar/gateway give the OPA agent time to reason a COLD tool's tier with the
-# SLM on the first call (results are cached per tool, so later calls are instant).
-export AWCP_OPA_AGENT_TIMEOUT="${AWCP_OPA_AGENT_TIMEOUT:-30}"
-# The small model that reasons each tool's tier. Point it at the REAL model runtime
-# (AWCP_GATEWAY_UPSTREAM), not the budget-gated /llm proxy — the OPA agent is hidden
-# infra, not a metered worker. Both are env-overridable; nothing is hardcoded.
-export OPA_SLM_BASE="${OPA_SLM_BASE:-${AWCP_GATEWAY_UPSTREAM:-http://localhost:11434}}"
-export OPA_SLM_MODEL="${OPA_SLM_MODEL:-gemma2:2b}"
-# Hide infra/noise processes from the radar SCANNER (append, don't clobber any
-# existing list): the OPA agent, the Temporal dev server, and the bare Python
-# interpreter. Matched against the process name + executable, so governed agents —
-# which self-register (source=self) and are never filtered by the scanner — are
-# unaffected. Override AGENT_RADAR_EXCLUDE to change the set.
-export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent,temporal,python"
-
-# ── Toggleable-guard demo defaults ────────────────────────────────────────────
-# Make the dashboard's Policy Guard (Agent Hooks → Policy Guard) the SINGLE on/off
-# lever for blocking a tool call: deny-list a tool → blocked; remove it → works.
-# To do that we relax the OTHER governance layers that would otherwise deny writes
-# on a fresh start (quarantine, autonomy degradation, token hard-stop). Every knob
-# below is overridable — set them back to restore strict AWCP behaviour.
-#
-#  1) Trust DECLARED control hooks so bundle agents come up ACTIVE, not quarantined
-#     (a quarantined agent has ALL writes blocked, masking the guard). Restore the
-#     strict "telemetry/policy observed in execution" onboarding by setting these
-#     back to true.
-export AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY="${AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY:-false}"
-export AGENT_RADAR_REQUIRE_OBSERVED_POLICY="${AGENT_RADAR_REQUIRE_OBSERVED_POLICY:-false}"
-#  2) Generous FAILURE budget so a guard-blocked task — which the agent reports as
-#     a failure — doesn't walk the autonomy ladder down (which would block writes
-#     even with the guard off). Default is 3 / per-risk low:5,medium:3,high:1.
-export AGENT_RADAR_FAILURE_BUDGET="${AGENT_RADAR_FAILURE_BUDGET:-1000}"
-export AGENT_RADAR_RISK_BUDGET="${AGENT_RADAR_RISK_BUDGET:-low:1000,medium:1000,high:1000}"
-#  3) Generous TOKEN budget so a few multi-step tasks don't trip the token
-#     hard-stop (which also degrades autonomy). To DEMO token control instead,
-#     lower a single agent's budget from the Token Monitor UI (per-agent override).
-export LMNR_TOKEN_BUDGET="${LMNR_TOKEN_BUDGET:-5000000}"
-export LMNR_RISK_TOKEN_BUDGET="${LMNR_RISK_TOKEN_BUDGET:-low:5000000,medium:5000000,high:5000000}"
-export LMNR_ENFORCE_AT_WARN="${LMNR_ENFORCE_AT_WARN:-false}"
+# Governance policy engine (magazine Step 03 — OPA policy-as-code + approval
+# tokens). Default SHADOW: OPA runs alongside the Python gate and logs any
+# differences WITHOUT changing enforcement — flip to `opa` once /policy/status
+# shows parity (shadow_mismatches stable at 0). The OPA server is the `opa`
+# service in the telemetry compose (host :8181). All env-driven, nothing baked in.
+export AWCP_POLICY_ENGINE="${AWCP_POLICY_ENGINE:-shadow}"
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
 
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
@@ -573,6 +523,7 @@ echo "     Token monitor          : http://localhost:${GATEWAY_PORT}/laminar/ui 
 echo "     User API               : http://localhost:${GATEWAY_PORT}/user/agents · POST /user/submit"
 echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Policy engine (OPA)    : ${AWCP_POLICY_ENGINE} → ${AWCP_OPA_URL}   (gate at /policy/status)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
 if [ -n "${OPA_SERVER_PID:-}" ] || [ -n "$(port_open "${OPA_SERVER_PORT:-8181}")" ]; then

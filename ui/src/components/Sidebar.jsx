@@ -16,8 +16,7 @@ export function Sidebar({ active, onSelect, health, approvalsCount = 0 }) {
   const temporal = health?.temporal_connected
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
-  const opa = health?.opa?.connected
-  const sandboxStatus = health?.sandbox?.status
+  const policyMode = health?.policy?.mode
 
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
@@ -61,21 +60,32 @@ export function Sidebar({ active, onSelect, health, approvalsCount = 0 }) {
         <ConnRow label="Temporal" ok={temporal} />
         <ConnRow label="OTel" ok={otel} />
         <ConnRow label="Laminar" ok={laminar} />
-        <ConnRow label="OPA" ok={opa} />
-        <ConnRow
-          label="Sandbox"
-          ok={sandboxStatus === 'running' || sandboxStatus === 'not_started'}
-          text={sandboxStatus ? sandboxStatus.replace('_', ' ') : 'offline'}
-          title={health?.sandbox?.reason || health?.sandbox?.workspace_dir}
-        />
+        <PolicyRow mode={policyMode} />
       </div>
     </aside>
   )
 }
 
-function ConnRow({ label, ok, text, title }) {
+function PolicyRow({ mode }) {
+  // The active governance engine (magazine Step 03): local | opa | shadow.
+  // Anything but local is "engaged"; local means the legacy Python gate only.
+  const engaged = mode && mode !== 'local'
   return (
-    <div className="flex items-center justify-between" title={title}>
+    <div className="flex items-center justify-between">
+      <span>Policy</span>
+      <span className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${engaged ? 'bg-brand-300' : 'bg-white/25'}`} />
+        <span className={engaged ? 'text-brand-100' : 'text-brand-200/70'}>
+          {mode || 'unknown'}
+        </span>
+      </span>
+    </div>
+  )
+}
+
+function ConnRow({ label, ok }) {
+  return (
+    <div className="flex items-center justify-between">
       <span>{label}</span>
       <span className="flex items-center gap-1.5">
         <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-brand-300' : 'bg-white/25'}`} />

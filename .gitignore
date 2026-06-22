@@ -79,9 +79,5 @@ temp_uploads/
 .mypy_cache/
 .ruff_cache/
 
-# --- Runtime agent outputs (save_artifact) ---
-artifacts/
+# runtime registry state (now persisted to Postgres)
 agent_radar_registry.json
-
-# --- Sandboxed agent workspace (volume-mounted into OpenSandbox) ---
-workspace/
