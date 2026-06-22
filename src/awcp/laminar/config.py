@@ -137,6 +137,11 @@ DEFAULT_TOKEN_BUDGET: int = _env_int("LMNR_TOKEN_BUDGET", "50000")
 RISK_TOKEN_BUDGET: dict[str, int] = _parse_risk_budget()
 BUDGET_WINDOW_S: float = _env_float("LMNR_BUDGET_WINDOW_S", "3600")
 WARN_RATIO: float = _env_float("LMNR_WARN_RATIO", "0.8")
+# Tolerated overshoot above the budget before an agent counts as "exhausted".
+# 0.10 = a 10% grace band, so control acts at 110% of budget rather than exactly
+# 100% — applied identically at the pre-check (projection) and the reactive
+# (post-call) evaluation. Set 0 for a hard 100% limit.
+OVERSHOOT_RATIO: float = _env_float("LMNR_OVERSHOOT_RATIO", "0.10")
 # When true, on_breach fires at the warn threshold (WARN_RATIO * budget) in
 # addition to exhausted.  This steps the autonomy ladder down one rung earlier
 # so enforcement fires before the hard limit, reducing overshoot for agents

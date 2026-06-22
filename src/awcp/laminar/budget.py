@@ -105,8 +105,11 @@ def evaluate(agent_id: str, window_total_tokens: int, risk: str | None = None, a
     owns the transition detection and side effects."""
     budget = budget_for(agent_id, risk, agent_budget)
     warn_ratio = get_policy()["warn_ratio"]
+    # 10% (configurable) grace band: an agent is only "exhausted" past
+    # (1 + OVERSHOOT_RATIO) * budget, so control tolerates a small overshoot.
+    exhaust_ratio = 1.0 + config.OVERSHOOT_RATIO
     ratio = (window_total_tokens / budget) if budget > 0 else 0.0
-    if ratio >= 1.0:
+    if ratio >= exhaust_ratio:
         state = "exhausted"
     elif ratio >= warn_ratio:
         state = "warn"
@@ -133,9 +136,10 @@ def project(window_total_tokens: int, estimated_tokens: int,
     function stays a pure computation. Never raises — used in the hot request path.
     """
     wr = warn_ratio if warn_ratio is not None else get_policy()["warn_ratio"]
+    exhaust_ratio = 1.0 + config.OVERSHOOT_RATIO   # same 10% grace band as evaluate()
     projected = window_total_tokens + estimated_tokens
     ratio = (projected / budget_tokens) if budget_tokens > 0 else 0.0
-    if ratio >= 1.0:
+    if ratio >= exhaust_ratio:
         state = "exhausted"
     elif ratio >= wr:
         state = "warn"
