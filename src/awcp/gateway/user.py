@@ -287,6 +287,118 @@ async def _extract_timeline(workflow_id: str | None) -> list[dict]:
         return []
 
 
+async def _workflow_outcome(workflow_id: str | None) -> dict:
+    """The AgentExecutionWorkflow's final result dict, or {} if it hasn't
+    completed / is unavailable.
+
+    This is the CONTROL-PLANE outcome and is AUTHORITATIVE over the agent's own
+    task record. When the radar's policy-guard denies a tool the workflow finishes
+    with e.g. {"status": "blocked", "error": "tool 'web_search' blocked by
+    policy-guard"} — even though the bundle agent may have run the tool and
+    produced an answer in its own record. The gateway uses this to suppress the
+    answer and show the block in the user UI."""
+    if not workflow_id:
+        return {}
+    try:
+        client = await _temporal_client()
+        handle = client.get_workflow_handle(workflow_id)
+        async for e in handle.fetch_history_events():
+            attrs = e.workflow_execution_completed_event_attributes
+            if attrs and attrs.result and attrs.result.payloads:
+                decoded = await client.data_converter.decode(list(attrs.result.payloads))
+                if decoded and isinstance(decoded[0], dict):
+                    return decoded[0]
+        return {}
+    except Exception:
+        # Workflow still running / not found / Temporal down — no outcome yet.
+        return {}
+
+
+def _agent_id_from_workflow(workflow_id: str | None, task_id: str) -> str:
+    """Recover the radar agent id from `task-{agent_id}-{task_id}`. task_id is known
+    exactly, so this is unambiguous even though agent_id itself contains hyphens."""
+    if workflow_id and workflow_id.startswith("task-") and workflow_id.endswith(f"-{task_id}"):
+        return workflow_id[len("task-"):-(len(task_id) + 1)]
+    return ""
+
+
+def _token_exhausted(agent_id: str) -> dict | None:
+    """Live token-budget state when the agent is over budget, else None. Covers the
+    block that happens at execution START (which creates no workflow, so the reason
+    would otherwise be lost). laminar runs in this same process (the radar inits
+    it), so this is a cheap in-process read; safe no-op if laminar is absent."""
+    if not agent_id:
+        return None
+    try:
+        from awcp import laminar
+        if laminar.is_exhausted(agent_id):
+            return laminar.budget_state(agent_id)
+    except Exception:
+        pass
+    return None
+
+
+def _classify_block(reason: str) -> tuple[str, str]:
+    """Map a block reason to (blocked_by, title) so the UI labels it correctly —
+    a token-budget stop must NOT read as an agent-hooks veto, and vice-versa."""
+    r = (reason or "").lower()
+    if "policy-guard" in r or "hook" in r:
+        return "agent_hooks", "⛔ Blocked by Agent Hooks"
+    if "token" in r or "budget" in r:
+        return "token_budget", "⛔ Blocked — Token Budget Exhausted"
+    return "control_plane", "⛔ Blocked by the Control Plane"
+
+
+def _apply_block(payload: dict, outcome: dict, agent_id: str = "") -> dict:
+    """If the task was blocked by the control plane, override the user-facing
+    payload: force status=blocked, SUPPRESS the answer, and surface the ACCURATE
+    block reason + source (token budget vs agent-hooks vs other). A no-op when the
+    task wasn't blocked, so normal results pass through unchanged.
+
+    Sources, in priority order:
+      1. the Temporal workflow outcome (policy-guard tool deny, mid-flight token
+         hard stop) — authoritative;
+      2. live token exhaustion (the execution-START hard stop makes no workflow);
+      3. an already-blocked status on the agent's own record.
+    """
+    reason = ""
+    blocked = False
+
+    if str(outcome.get("status", "")).lower() == "blocked":
+        blocked, reason = True, (outcome.get("error") or "")
+
+    if not blocked:
+        tok = _token_exhausted(agent_id)
+        if tok is not None:
+            blocked = True
+            reason = (f"token budget exhausted "
+                      f"({tok.get('used_tokens')}/{tok.get('budget_tokens')} per window)")
+
+    if not blocked and str(payload.get("status", "")).lower() == "blocked":
+        blocked, reason = True, (payload.get("error") or "")
+        if not reason:
+            tok = _token_exhausted(agent_id)
+            if tok is not None:
+                reason = (f"token budget exhausted "
+                          f"({tok.get('used_tokens')}/{tok.get('budget_tokens')} per window)")
+
+    if not blocked:
+        return payload
+
+    blocked_by, title = _classify_block(reason)
+    reason = reason or "An action this task needed was denied by the control plane."
+    payload.update({
+        "status": "blocked",
+        "result": "",            # never show an answer the control plane blocked
+        "error": reason,
+        "blocked": True,
+        "blocked_by": blocked_by,
+        "blocked_title": title,
+        "blocked_reason": reason,
+    })
+    return payload
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/agents")
@@ -347,7 +459,7 @@ async def status(agent: str, task_id: str, workflow_id: str | None = None) -> di
         else:
             status_val = "pending"
 
-    return {
+    payload = {
         "agent": agent,
         "task_id": task_id,
         "status": status_val,
@@ -360,6 +472,10 @@ async def status(agent: str, task_id: str, workflow_id: str | None = None) -> di
         "temporal_url": _temporal_url(workflow_id),
         "timeline": timeline,
     }
+    # Control-plane block (policy-guard tool deny OR token budget) is authoritative
+    # over the agent's own record — suppress the answer and surface the real reason.
+    return _apply_block(payload, await _workflow_outcome(workflow_id),
+                        _agent_id_from_workflow(workflow_id, task_id))
 
 
 @router.post("/approve/{agent}/{task_id}")
@@ -404,8 +520,12 @@ async def ask(req: AskRequest) -> dict:
     while task.get("status") not in TERMINAL and time.monotonic() < deadline:
         await asyncio.sleep(POLL_INTERVAL)
         task = await _fetch_task(state["port"], task_id) or task
+        # Stop early if the control plane blocked the task — the agent's own record
+        # may never settle (it honoured the block) or may even keep going.
+        if str((await _workflow_outcome(workflow_id)).get("status", "")).lower() == "blocked":
+            break
 
-    return {
+    payload = {
         "agent": req.agent,
         "agent_url": base,
         "task_id": task_id,
@@ -419,3 +539,6 @@ async def ask(req: AskRequest) -> dict:
         "temporal_url": _temporal_url(workflow_id),
         "timeline": await _extract_timeline(workflow_id),
     }
+    # Control-plane block is authoritative over the agent's own record.
+    return _apply_block(payload, await _workflow_outcome(workflow_id),
+                        agent_id or _agent_id_from_workflow(workflow_id, task_id))
