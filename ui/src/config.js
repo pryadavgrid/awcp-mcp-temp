@@ -10,7 +10,7 @@ export const API_BASE = strip(import.meta.env.VITE_API_BASE || 'http://localhost
 
 // Temporal Web UI — used to build deep links for task-execution workflows.
 // (Onboarding workflows already carry a full `temporal_url` from the gateway.)
-export const TEMPORAL_BASE = strip(import.meta.env.VITE_TEMPORAL_BASE || 'http://localhost:8233')
+export const TEMPORAL_BASE = strip(import.meta.env.VITE_TEMPORAL_BASE || 'http://localhost:8080')
 
 // The official Laminar dashboard (separate process). Linked from Token Monitor.
 export const LAMINAR_URL = import.meta.env.VITE_LAMINAR_URL || 'http://localhost:5667/'

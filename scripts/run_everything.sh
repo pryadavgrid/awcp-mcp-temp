@@ -131,6 +131,14 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 
+# Governance policy engine (magazine Step 03 — OPA policy-as-code + approval
+# tokens). Default SHADOW: OPA runs alongside the Python gate and logs any
+# differences WITHOUT changing enforcement — flip to `opa` once /policy/status
+# shows parity (shadow_mismatches stable at 0). The OPA server is the `opa`
+# service in the telemetry compose (host :8181). All env-driven, nothing baked in.
+export AWCP_POLICY_ENGINE="${AWCP_POLICY_ENGINE:-shadow}"
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
+
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
 
@@ -347,6 +355,7 @@ echo "     Token monitor          : http://localhost:${GATEWAY_PORT}/laminar/ui 
 echo "     User API               : http://localhost:${GATEWAY_PORT}/user/agents · POST /user/submit"
 echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Policy engine (OPA)    : ${AWCP_POLICY_ENGINE} → ${AWCP_OPA_URL}   (gate at /policy/status)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
 echo "     MCP server             : http://localhost:8002   (SSE)"
