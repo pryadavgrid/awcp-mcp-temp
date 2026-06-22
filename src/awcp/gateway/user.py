@@ -25,16 +25,27 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import tempfile
 import time
+import uuid
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
 from awcp.gateway import agents_fs as fs
 
 router = APIRouter(prefix="/user", tags=["user"])
+
+# Where attached files land. The bundle agents run on THIS host, so a gateway-
+# local path is readable by the agent process — a file-aware agent (e.g. File
+# Inspector) opens the real bytes via the `FILE_PATH:` token the UI appends to
+# the goal. Override the dir with AWCP_UPLOAD_DIR. Cap uploads to keep a stray
+# huge file from filling the disk.
+UPLOAD_DIR = os.getenv("AWCP_UPLOAD_DIR", os.path.join(tempfile.gettempdir(), "awcp-uploads"))
+MAX_UPLOAD_BYTES = int(os.getenv("AWCP_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 # Temporal Web UI base — used only to build deep links to the task's workflow.
 TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
@@ -407,6 +418,28 @@ async def list_agents() -> list[dict]:
     folder shows up here with no code change."""
     agents = fs.discover()
     return list(await asyncio.gather(*(_describe(a) for a in agents)))
+
+
+@router.post("/upload")
+async def upload(file: UploadFile = File(...)) -> dict:
+    """Save an attached file to a gateway-local path and return that path.
+
+    The UI appends `FILE_PATH: <path>` to the goal so file-aware agents (e.g. File
+    Inspector) can open the real bytes instead of only seeing the filename. Agents
+    classify by extension, so the original suffix is preserved; the stem is
+    sanitised and prefixed with a random token to avoid collisions/traversal."""
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    name = os.path.basename(file.filename or "upload")
+    stem, ext = os.path.splitext(name)
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem) or "file"
+    dest = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:8]}-{safe_stem}{ext}")
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    return {"path": dest, "name": name, "size": len(data)}
 
 
 @router.post("/submit")
