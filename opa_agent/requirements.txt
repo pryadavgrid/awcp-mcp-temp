@@ -1,7 +1,0 @@
-# OPA Agent — hidden tool-call policy decision point. Python >= 3.10.
-# No LLM / no framework: it only resolves tool risk tiers and decides allow/block,
-# optionally via an OPA (Rego) server. Deliberately minimal.
-fastapi>=0.95.0
-uvicorn[standard]>=0.22.0
-httpx>=0.24.0            # OPA query + Laminar tool-token logging to the gateway
-pydantic>=2.2.0
