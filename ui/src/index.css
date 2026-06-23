@@ -26,3 +26,47 @@ body {
 ::-webkit-scrollbar-track {
   @apply bg-transparent;
 }
+
+/* ── Risk-tier threshold slider ──────────────────────────────────────────────
+   The track is split by the thumb: RED before the set tier, WHITE after it. The
+   red/white split is set inline per thumb position; here we set the chrome (border
+   so the white half is visible, rounded ends) and a SQUARE thumb. */
+.risk-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  border-radius: 9999px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff; /* fallback; the live red→white split is applied inline */
+  outline: none;
+  cursor: pointer;
+}
+.risk-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: transparent; /* let the inline element background (red/white) show */
+}
+.risk-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px; /* square thumb */
+  background: var(--thumb-color, #ffffff); /* filled with the current tier's colour */
+  border: 2px solid #334155;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.35);
+  cursor: pointer;
+}
+.risk-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px; /* square thumb */
+  background: var(--thumb-color, #ffffff); /* filled with the current tier's colour */
+  border: 2px solid #334155;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.35);
+  cursor: pointer;
+}
+.risk-slider:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

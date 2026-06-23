@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { usePoll } from '../hooks/usePoll.js'
-import { getAgents, getToolTiers } from '../api.js'
+import { getAgents, getToolTiers, setBlockThreshold } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { StatusBadge } from '../components/Badge.jsx'
 import { timeAgo } from '../lib/format.js'
@@ -19,6 +20,16 @@ const RAMP = [
   { text: 'text-orange-600', fill: 'bg-orange-500' },
   { text: 'text-rose-600', fill: 'bg-rose-500' },
 ]
+// Tier → solid fill colour (hex), mirroring TIER_STYLE's fills, for things that need
+// a real colour value rather than a Tailwind class (the slider thumb's inline var).
+// low=green, medium=yellow, high=orange, severe=red. Unknown tiers fall back to slate.
+const TIER_HEX = {
+  low: '#22c55e',
+  medium: '#f59e0b',
+  high: '#f97316',
+  severe: '#f43f5e',
+}
+const tierHex = (tier) => TIER_HEX[tier] || '#64748b'
 
 function tierStyle(tier, tiers) {
   if (TIER_STYLE[tier]) return TIER_STYLE[tier]
@@ -47,11 +58,11 @@ function TierBar({ tier, tiers }) {
 export default function Radar() {
   const { data, loading } = usePoll(getAgents, [])
   const agents = data || []
-  const { data: tierData } = usePoll(getToolTiers, [])
+  const { data: tierData, refresh: refreshTiers } = usePoll(getToolTiers, [])
 
   return (
     <div className="space-y-6">
-      <ToolTiers tierData={tierData} />
+      <ToolTiers tierData={tierData} onRefresh={refreshTiers} />
 
       <Panel
         title="Radar — Detected & Registered Agents"
@@ -118,30 +129,106 @@ export default function Radar() {
 // A risk-tier bar for EVERY tool call the worker agents make. The hidden OPA agent
 // reasons each call's tier with a small language model (low/medium/high/severe); we
 // render it as a level-meter bar so operators see, per call, how risky each tool is.
-// Read-only and live — the SLM owns the tier, there are no controls. Radar-only.
-function ToolTiers({ tierData }) {
+// The SLM owns each tier; the operator owns ONE control — a block-threshold slider:
+// any call at or above the chosen tier blocks the question in the user UI. Radar-only.
+function ToolTiers({ tierData, onRefresh }) {
   const enabled = !!tierData?.enabled
   const tiers = tierData?.tiers || []
-  const blockTiers = tierData?.block_tiers || []
   const recent = tierData?.recent || []
   const slm = tierData?.slm || {}
+  const serverThreshold = tierData?.block_threshold || ''
+
+  // The slider's tier. Mirrors the server, but is driven locally while dragging so
+  // the meter feels responsive; the next poll (or our refresh) reconciles it.
+  const [threshold, setThreshold] = useState(serverThreshold)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    if (serverThreshold) setThreshold(serverThreshold)
+  }, [serverThreshold])
+
+  const idx = Math.max(0, tiers.indexOf(threshold))
+
+  async function commitThreshold(next) {
+    if (!next || next === serverThreshold) return
+    const prev = serverThreshold || threshold
+    setThreshold(next) // optimistic
+    setSaving(true)
+    setErr('')
+    try {
+      await setBlockThreshold(next)
+      onRefresh && onRefresh() // pull the server's truth back so the bars reconcile
+    } catch (e) {
+      // Surface the failure instead of swallowing it (e.g. OPA agent not restarted
+      // with the /threshold route) and revert so the UI never lies about the cutoff.
+      setThreshold(prev)
+      setErr(e?.message || 'failed to set threshold')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <Panel
       title="Tool Risk Tiers"
-      subtitle="Every tool call the agents make, risk-tiered by a small language model — high/severe calls are blocked"
+      subtitle="Every tool call the agents make, risk-tiered by a small language model — calls at or above the block threshold are blocked"
       right={
         enabled ? (
-          <span className="flex items-center gap-3 text-xs text-slate-500">
-            {slm.model && (
-              <span className="font-mono text-slate-400" title={`SLM @ ${slm.base || ''}`}>
-                {slm.model}
+          // The block-threshold slider lives INLINE in the header — it fills the gap
+          // between the title and the gemma label on the right.
+          <div className="flex flex-1 items-center gap-4 pl-8">
+            {/* caption + slider + the tier names labelled beneath it, aligned to each stop */}
+            <div className="flex flex-1 flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                allowed risk level
               </span>
-            )}
-            <span>
-              blocks <span className="font-mono text-rose-600">{blockTiers.join(', ') || '—'}</span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(0, tiers.length - 1)}
+                step={1}
+                value={idx}
+                disabled={saving || tiers.length === 0}
+                title={`block at or above ${threshold || '—'}`}
+                aria-label="Block threshold"
+                onChange={(e) => setThreshold(tiers[Number(e.target.value)] || threshold)}
+                onPointerUp={(e) => commitThreshold(tiers[Number(e.currentTarget.value)])}
+                onKeyUp={(e) => commitThreshold(tiers[Number(e.currentTarget.value)])}
+                className="risk-slider w-full"
+                style={{
+                  // track filled with the current tier's colour BEFORE the thumb, white AFTER
+                  background: `linear-gradient(90deg, ${tierHex(threshold)} 0%, ${tierHex(threshold)} ${
+                    (idx / Math.max(1, tiers.length - 1)) * 100
+                  }%, #ffffff ${(idx / Math.max(1, tiers.length - 1)) * 100}%, #ffffff 100%)`,
+                  // square thumb filled with the currently-selected tier's colour
+                  '--thumb-color': tierHex(threshold),
+                }}
+              />
+              <div className="flex justify-between text-[10px]">
+                {tiers.map((t, i) => {
+                  const s = tierStyle(t, tiers)
+                  // each name carries its tier's colour; the selected one is bolded
+                  return (
+                    <span key={t} className={`${s.text} ${i === idx ? 'font-bold' : 'font-medium'}`}>
+                      {t}
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+            <span className="flex shrink-0 items-center gap-3 whitespace-nowrap text-xs text-slate-500">
+              {slm.model && (
+                <span className="font-mono text-slate-400" title={`SLM @ ${slm.base || ''}`}>
+                  {slm.model}
+                </span>
+              )}
+              {err ? (
+                <span className="text-rose-600" title={err}>⚠ not saved</span>
+              ) : saving ? (
+                <span className="text-slate-400">saving…</span>
+              ) : null}
             </span>
-          </span>
+          </div>
         ) : (
           <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-500">OPA agent off</span>
         )
@@ -154,22 +241,6 @@ function ToolTiers({ tierData }) {
         </div>
       ) : (
         <>
-          {/* legend: the tier scale */}
-          <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-5 py-2.5 text-xs">
-            <span className="text-slate-400">tiers:</span>
-            {tiers.map((t) => {
-              const s = tierStyle(t, tiers)
-              const blocks = blockTiers.includes(t)
-              return (
-                <span key={t} className="flex items-center gap-1.5">
-                  <span className={`h-2 w-4 rounded-sm ${s.fill}`} />
-                  <span className={`font-medium ${s.text}`}>{t}</span>
-                  {blocks && <span className="text-[10px] text-rose-500">⛔</span>}
-                </span>
-              )
-            })}
-          </div>
-
           <Table columns={['When', 'Agent', 'Tool', 'Risk tier', 'Decision']}>
             {recent.length === 0 ? (
               <EmptyRow colSpan={5}>
