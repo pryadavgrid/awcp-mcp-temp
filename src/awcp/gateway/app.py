@@ -81,7 +81,7 @@ instrument_requests()          # outbound HTTP calls are auto-traced
 # ── USER routes ───────────────────────────────────────────────────────────────
 app.include_router(user_router)
 
-# ── Tool Risk Policy proxy → the hidden OPA agent (per-tool tiers + decisions) ──
+# ── Tool Risk Tiers proxy → the hidden SLM OPA agent (per-call tiers + decisions) ─
 app.include_router(opa_proxy_router)
 
 # ── AWCP control-plane routes (mounted at ROOT for a single-port surface) ────

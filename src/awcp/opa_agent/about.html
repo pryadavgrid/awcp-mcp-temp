@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AWCP OPA Agent</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 15px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+           background: #0b1220; color: #e2e8f0; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: #94a3b8; margin: 0 0 28px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 12px;
+             background: #1e293b; color: #93c5fd; margin-left: 8px; vertical-align: middle; }
+    .card { background: #111a2e; border: 1px solid #1e293b; border-radius: 12px;
+            padding: 18px 20px; margin: 14px 0; }
+    code { background: #1e293b; padding: 1px 6px; border-radius: 5px; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td { padding: 6px 8px; border-bottom: 1px solid #1e293b; }
+    td:first-child { color: #93c5fd; font-family: ui-monospace, monospace; white-space: nowrap; }
+    .tier { font-family: ui-monospace, monospace; }
+    .low { color:#4ade80 } .medium { color:#fbbf24 } .high { color:#fb923c } .severe { color:#f87171 }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🛡️ OPA Agent <span class="badge">hidden · background · SLM</span></h1>
+    <p class="sub">SLM-reasoned tool-call policy decision point for the AWCP control plane.</p>
+
+    <div class="card">
+      A <strong>small language model</strong> reasons about each tool call and assigns its
+      <strong>risk tier</strong> —
+      <span class="tier low">low</span> · <span class="tier medium">medium</span> ·
+      <span class="tier high">high</span> · <span class="tier severe">severe</span>.
+      The agent then decides <strong>allow / block</strong>
+      (block when <span class="tier high">high</span>/<span class="tier severe">severe</span>)
+      and records a structured JSON per question, so the Radar can draw a tier bar for
+      every tool call the five worker agents make. The block decision runs through
+      <strong>OPA / Rego</strong> when configured, with a fail-secure fallback.
+    </div>
+
+    <div class="card">
+      <table>
+        <tr><td>GET /health</td><td>service status + tier vocabulary + SLM info</td></tr>
+        <tr><td>GET /tiers</td><td>tiers, block set, per-tool SLM tiers, recent calls (Radar feed)</td></tr>
+        <tr><td>GET /tools</td><td>tiers, block set, per-tool tier map (read-only)</td></tr>
+        <tr><td>POST /evaluate</td><td>reason a tool call's tier · decide · record JSON</td></tr>
+        <tr><td>GET /decisions/{task_id}</td><td>the per-question tool-risk JSON</td></tr>
+      </table>
+    </div>
+
+    <p class="sub">Not a worker agent — it never appears in <code>/agents</code> or the radar's agent table.</p>
+  </div>
+</body>
+</html>

@@ -9,8 +9,6 @@ import {
   setGuard,
   testGuard,
   getUserAgents,
-  getToolPolicy,
-  setToolRisk,
 } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { Badge, StatusBadge } from '../components/Badge.jsx'
@@ -22,26 +20,16 @@ import { timeAgo, prettyKind, fmtInt } from '../lib/format.js'
 // package isn't mounted) so the page can show a "not mounted" notice; the rest
 // are best-effort.
 const load = async () => {
-  const [hooks, recent, guard, userAgents, toolPolicy] = await Promise.all([
+  const [hooks, recent, guard, userAgents] = await Promise.all([
     getHooks(),
     getHooksRecent(60).catch(() => []),
     getGuard().catch(() => null),
     getUserAgents().catch(() => []),
-    getToolPolicy().catch(() => null),
   ])
-  return { hooks, recent, guard, userAgents, toolPolicy }
+  return { hooks, recent, guard, userAgents }
 }
 
 const CAT_TONE = { observer: 'slate', guard: 'amber' }
-
-// Tier → colour, used by the Tool Risk Policy sliders. Tiers come from the OPA
-// agent (env-driven) so this only styles the known names; unknown tiers fall to slate.
-const TIER_COLOR = {
-  low: 'text-emerald-600',
-  medium: 'text-amber-600',
-  high: 'text-orange-600',
-  severe: 'text-rose-600',
-}
 
 export default function Hooks() {
   const { data, error, loading, refresh } = usePoll(load, [])
@@ -87,9 +75,6 @@ export default function Hooks() {
         <GuardControl guard={data?.guard} tools={allTools} onDone={refresh} />
         <TestGate agents={userAgents} tools={allTools} onDone={refresh} />
       </div>
-
-      {/* ── Tool Risk Policy: per-tool tier sliders (the OPA agent) ───────── */}
-      <ToolRiskPolicy policy={data?.toolPolicy} tools={allTools} onDone={refresh} />
 
       {/* ── Registered hooks ─────────────────────────────────────────────── */}
       <Panel
@@ -439,119 +424,5 @@ function TestGate({ agents = [], tools = [], onDone }) {
         )}
       </div>
     </Panel>
-  )
-}
-
-// ── Tool Risk Policy: a per-tool tier slider, enforced by the OPA agent ────────
-// Every tool the real agents expose gets a slider across the OPA agent's tier
-// vocabulary (low → severe, env-driven). Tiers in the block set (high/severe)
-// block the answer in the user UI. Reads /tools/policy, writes /tools/policy/{name}.
-function ToolRiskPolicy({ policy, tools = [], onDone }) {
-  const enabled = !!policy?.enabled
-  const tiers = policy?.tiers || []
-  const blockTiers = policy?.block_tiers || []
-  const defaultTier = policy?.default_tier || tiers[0] || 'low'
-  const map = policy?.policy || {}
-
-  return (
-    <Panel
-      title="Tool Risk Policy"
-      subtitle="Set each tool's risk tier — high/severe tools are blocked by the OPA agent and the answer is stopped in the user UI"
-      right={
-        enabled ? (
-          <span className="text-xs text-slate-500">
-            blocks <span className="font-mono text-rose-600">{blockTiers.join(', ') || '—'}</span>
-          </span>
-        ) : (
-          <Badge tone="slate">OPA agent off</Badge>
-        )
-      }
-    >
-      <div className="space-y-3 px-5 py-4">
-        {!enabled ? (
-          <p className="text-sm text-slate-400">
-            The OPA agent isn’t wired to the gateway — start it and set{' '}
-            <span className="font-mono text-xs">AWCP_OPA_AGENT_URL</span> so per-tool tiers can be
-            enforced.
-          </p>
-        ) : tools.length === 0 ? (
-          <p className="text-sm text-slate-400">
-            No tools discovered yet — start an agent so its tool catalog appears here.
-          </p>
-        ) : (
-          <div className="space-y-3">
-            {tools.map((t) => (
-              <ToolRiskSlider
-                key={t}
-                tool={t}
-                tiers={tiers}
-                blockTiers={blockTiers}
-                current={map[t] || defaultTier}
-                onCommit={async (tier) => {
-                  await setToolRisk(t, tier)
-                  await onDone?.()
-                }}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </Panel>
-  )
-}
-
-// One tool's tier slider: a range input across the tier vocabulary. Commits on
-// release (POST /tools/policy/{name}); the label colours by tier and flags blocks.
-function ToolRiskSlider({ tool, tiers, blockTiers, current, onCommit }) {
-  const idxOf = (tier) => Math.max(0, tiers.indexOf(tier))
-  const [idx, setIdx] = useState(idxOf(current))
-  const [busy, setBusy] = useState(false)
-
-  // Re-sync when the server's value changes (e.g. after a refresh).
-  useEffect(() => {
-    setIdx(idxOf(current))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, tiers.join(',')])
-
-  const tier = tiers[idx] || current
-  const blocks = blockTiers.includes(tier)
-
-  const commit = async () => {
-    if (busy) return
-    setBusy(true)
-    try {
-      await onCommit(tier)
-    } catch (e) {
-      // eslint-disable-next-line no-alert
-      alert(`Set tier failed: ${e.message || e}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="flex items-center gap-3">
-      <span className="w-40 shrink-0 truncate font-mono text-xs text-slate-700" title={tool}>
-        {tool}
-      </span>
-      <input
-        type="range"
-        min={0}
-        max={Math.max(0, tiers.length - 1)}
-        step={1}
-        value={idx}
-        disabled={busy}
-        onChange={(e) => setIdx(Number(e.target.value))}
-        onMouseUp={commit}
-        onTouchEnd={commit}
-        onKeyUp={commit}
-        className="h-1.5 flex-1 cursor-pointer accent-brand-600 disabled:opacity-50"
-        title={`${tool}: ${tier}`}
-      />
-      <span className={`w-24 shrink-0 text-right text-xs font-semibold ${TIER_COLOR[tier] || 'text-slate-600'}`}>
-        {tier}
-        {blocks && <span className="ml-1 text-[10px] uppercase tracking-wide text-rose-500">⛔</span>}
-      </span>
-    </div>
   )
 }

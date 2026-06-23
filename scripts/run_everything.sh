@@ -140,13 +140,22 @@ export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 
 # ── OPA agent (hidden tool-call PDP) ──────────────────────────────────────────
 # The OPA agent tiers EVERY tool call the worker agents make and blocks the answer
-# for high/severe tools (operator-set on Agent Hooks → Tool Risk Policy). The radar
-# + gateway consult it at AWCP_OPA_AGENT_URL; it stays INVISIBLE to the control
-# plane — it never self-registers and we add its script to AGENT_RADAR_EXCLUDE so
-# the process scanner skips it. All env-driven; set SKIP_OPA=1 to leave it off.
+# for high/severe tools. The tier is REASONED by a small language model (a local
+# Ollama SLM); the Radar shows the tier bar for each call. The radar + gateway
+# consult it at AWCP_OPA_AGENT_URL; it stays INVISIBLE to the control plane — it
+# never self-registers and we add its script to AGENT_RADAR_EXCLUDE so the process
+# scanner skips it. All env-driven; set SKIP_OPA=1 to leave it off.
 OPA_AGENT_PORT="${OPA_AGENT_PORT:-8105}"
 export AWCP_OPA_AGENT_URL="${AWCP_OPA_AGENT_URL:-http://localhost:${OPA_AGENT_PORT}}"
 export AWCP_OPA_AGENT_FAIL_OPEN="${AWCP_OPA_AGENT_FAIL_OPEN:-true}"
+# The radar/gateway give the OPA agent time to reason a COLD tool's tier with the
+# SLM on the first call (results are cached per tool, so later calls are instant).
+export AWCP_OPA_AGENT_TIMEOUT="${AWCP_OPA_AGENT_TIMEOUT:-30}"
+# The small model that reasons each tool's tier. Point it at the REAL model runtime
+# (AWCP_GATEWAY_UPSTREAM), not the budget-gated /llm proxy — the OPA agent is hidden
+# infra, not a metered worker. Both are env-overridable; nothing is hardcoded.
+export OPA_SLM_BASE="${OPA_SLM_BASE:-${AWCP_GATEWAY_UPSTREAM:-http://localhost:11434}}"
+export OPA_SLM_MODEL="${OPA_SLM_MODEL:-gemma2:2b}"
 # Hide the OPA agent from the radar scanner (append, don't clobber any existing list).
 export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent"
 
@@ -329,28 +338,25 @@ else
   MCP_PID=$!
 fi
 
-# ── 5b. OPA agent (:OPA_AGENT_PORT) — hidden tool-call PDP, background ─────────
-# Has its OWN venv (next to the other agents). Launched here so the radar/gateway
-# can consult it at AWCP_OPA_AGENT_URL; it stays hidden (no self-register + the
-# AGENT_RADAR_EXCLUDE export above). AWCP_OPA_URL (Rego) is inherited if set.
-OPA_DIR="$AWCP_AGENTS_DIR/opa_agent"
+# ── 5b. OPA agent (:OPA_AGENT_PORT) — hidden SLM tool-call PDP, background ─────
+# Lives INSIDE this repo (src/awcp/opa_agent) and runs on the repo's venv (which
+# already has fastapi/uvicorn/httpx). Launched here so the radar/gateway can consult
+# it at AWCP_OPA_AGENT_URL; it stays hidden (no self-register + the
+# AGENT_RADAR_EXCLUDE export above). A small model reasons each tool's tier
+# (OPA_SLM_*); AWCP_OPA_URL (Rego) is inherited if set.
+OPA_DIR="$ROOT/src/awcp/opa_agent"
 if [ "${SKIP_OPA:-0}" = "1" ]; then
   warn "SKIP_OPA=1 — not starting the OPA agent (tool-tier blocking disabled)."
 elif [ -n "$(port_open "$OPA_AGENT_PORT")" ]; then
   say "OPA agent already on :${OPA_AGENT_PORT} — reusing it."
 elif [ -f "$OPA_DIR/opa_agent.py" ]; then
-  if [ ! -x "$OPA_DIR/.venv/bin/python" ]; then
-    say "Bootstrapping the OPA agent venv (first run only)…"
-    python3 -m venv "$OPA_DIR/.venv"
-    "$OPA_DIR/.venv/bin/pip" install --quiet --upgrade pip
-    "$OPA_DIR/.venv/bin/pip" install --quiet -r "$OPA_DIR/requirements.txt"
-  fi
-  say "Starting OPA agent (hidden tool-call PDP) on :${OPA_AGENT_PORT}…"
+  OPA_PY="$ROOT/.venv/bin/python"; [ -x "$OPA_PY" ] || OPA_PY="$(command -v python3)"
+  say "Starting OPA agent (hidden SLM tool-call PDP) on :${OPA_AGENT_PORT} — tier model: ${OPA_SLM_MODEL}…"
   OPA_PORT="$OPA_AGENT_PORT" AWCP_GATEWAY_URL="http://localhost:${GATEWAY_PORT}" \
-    nohup "$OPA_DIR/.venv/bin/python" "$OPA_DIR/opa_agent.py" > "$LOGDIR/opa-agent.log" 2>&1 &
+    nohup "$OPA_PY" "$OPA_DIR/opa_agent.py" > "$LOGDIR/opa-agent.log" 2>&1 &
   OPA_PID=$!
 else
-  warn "OPA agent not found at $OPA_DIR — tool-tier blocking off (set AWCP_AGENTS_DIR)."
+  warn "OPA agent not found at $OPA_DIR — tool-tier blocking off."
 fi
 
 # ── 6. OPTIONAL canned demonstration (DEMO=1) ─────────────────────────
@@ -425,7 +431,7 @@ echo "     OPA policy engine      : http://localhost:8181   (running; gate uses 
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
 if [ "${SKIP_OPA:-0}" != "1" ]; then
-echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden PDP; set tiers on Agent Hooks → Tool Risk Policy)"
+echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden SLM PDP, model ${OPA_SLM_MODEL}; tier bars on Radar)"
 fi
 echo "     Ollama                 : http://localhost:11434"
 echo "     agents bundle          : $AWCP_AGENTS_DIR"
