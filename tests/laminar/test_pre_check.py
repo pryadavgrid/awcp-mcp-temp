@@ -44,10 +44,12 @@ class TestBudgetProject:
         # 410/500 = 0.82 → warn
         assert result["projected_state"] == "warn"
 
-    def test_exactly_at_budget_is_exhausted(self):
-        # Hard limit, no grace band: at/above 100% of budget is exhausted.
-        assert budget_module.project(499, 0, 500, warn_ratio=0.8)["projected_state"] == "warn"
-        assert budget_module.project(500, 0, 500, warn_ratio=0.8)["projected_state"] == "exhausted"
+    def test_grace_band_tolerates_10pct_overshoot(self):
+        # With the 10% overshoot grace, exactly-at-budget is NOT yet exhausted
+        # (it's within the band); only at/above 110% does it become exhausted.
+        assert budget_module.project(500, 0, 500, warn_ratio=0.8)["projected_state"] == "warn"
+        assert budget_module.project(549, 0, 500, warn_ratio=0.8)["projected_state"] == "warn"
+        assert budget_module.project(550, 0, 500, warn_ratio=0.8)["projected_state"] == "exhausted"
 
     def test_zero_budget_treated_as_unlimited(self):
         # Mirrors existing evaluate() behaviour: budget=0 → ratio=0.0 → ok.

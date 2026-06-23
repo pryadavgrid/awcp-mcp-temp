@@ -137,6 +137,11 @@ DEFAULT_TOKEN_BUDGET: int = _env_int("LMNR_TOKEN_BUDGET", "50000")
 RISK_TOKEN_BUDGET: dict[str, int] = _parse_risk_budget()
 BUDGET_WINDOW_S: float = _env_float("LMNR_BUDGET_WINDOW_S", "3600")
 WARN_RATIO: float = _env_float("LMNR_WARN_RATIO", "0.8")
+# Tolerated overshoot above the budget before an agent counts as "exhausted".
+# 0.10 = a 10% grace band, so control acts at 110% of budget rather than exactly
+# 100% — applied identically at the pre-check (projection) and the reactive
+# (post-call) evaluation. Set 0 for a hard 100% limit.
+OVERSHOOT_RATIO: float = _env_float("LMNR_OVERSHOOT_RATIO", "0.10")
 # When true, on_breach fires at the warn threshold (WARN_RATIO * budget) in
 # addition to exhausted.  This steps the autonomy ladder down one rung earlier
 # so enforcement fires before the hard limit, reducing overshoot for agents
@@ -174,16 +179,9 @@ RECORDS_MAX: int = _env_int("LMNR_RECORDS_MAX", "500")
 # Separate high-capacity accounting deque (window budget scans this, not RECORDS_MAX).
 # Much larger so fast agents (>500 calls/hour) are never under-counted.
 ACCT_MAX: int = _env_int("LMNR_ACCT_MAX", "10000")
-# Output-token reserve added to every pre-check estimate when the request does
-# NOT declare max_tokens / num_predict. A model call's true cost is input + output,
-# but output is unknowable before generation — so the pre-check reserves this many
-# output tokens on top of the (input + tools + system) estimate, letting it deny a
-# call that would overshoot once its output is produced. This is a RESERVATION for
-# the allow/deny decision only — it never caps or truncates the model, so it does
-# not change agent behaviour. Residual (actual output beyond this reserve) is
-# caught reactively by the budget breach + SIGSTOP. Set 0 to reserve nothing
-# (input-only pre-check); raise it for agents with larger per-step outputs.
-OUTPUT_BUFFER: int = _env_int("LMNR_OUTPUT_BUFFER", "256")
+# Default output-token buffer added to every pre-check estimate when the request
+# does not declare max_tokens / num_predict.  0 = only use explicit caps.
+OUTPUT_BUFFER: int = _env_int("LMNR_OUTPUT_BUFFER", "0")
 TRACE_URL_TEMPLATE: str = os.getenv("LMNR_TRACE_URL_TEMPLATE", "")
 
 
