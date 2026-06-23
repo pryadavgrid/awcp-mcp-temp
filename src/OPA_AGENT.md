@@ -37,9 +37,10 @@ policy decision point** that, for every tool call:
 When a tool is `high`/`severe`, the **answer is blocked in the user UI** with a
 severity message — reusing the exact same path as the Agent-Hooks Policy Guard.
 
-It is **NOT a worker agent**: it answers no prompts, never self-registers, and is
-hidden from both the control-plane radar and the user-UI agent picker. (It does run
-a *small* model, but only to classify tool risk — it never serves a user answer.)
+It is **NOT a worker agent**: it answers no prompts and is hidden from the user-UI
+agent picker. (It does run a *small* model, but only to classify tool risk — it never
+serves a user answer.) It **does** self-register with the radar so operators can see
+it running like the other agents (§8), but stays out of the process scanner.
 
 ---
 
@@ -186,16 +187,24 @@ stays **off** (`OPA_LAMINAR_ENABLED=false`) to avoid double-counting.
 
 ---
 
-## 8. Hidden from the control plane AND the user UI
+## 8. Visible on the radar, hidden from the user UI
 
-Two independent surfaces, two env-driven exclusions (no hardcoding):
-
-- **Radar / `/agents`** — the OPA agent never self-registers (no `AGENT_RADAR_URL`),
-  and `run_everything.sh` appends `opa_agent` to `AGENT_RADAR_EXCLUDE`, so the
-  process scanner's `is_excluded()` skips it. (Its *tier output* shows on the Radar;
-  the agent itself never appears in the agent table.)
-- **User UI / `/user/agents`** — `agents_fs.discover()` skips
-  `AWCP_USER_AGENTS_EXCLUDE` (default `opa_agent`).
+- **Radar / `/agents`** — the OPA agent **self-registers and heartbeats** so it shows
+  up as a running agent, like the worker agents (`src/awcp/opa_agent/radar_register.py`,
+  `RadarPresence`): POST `/agents/register` once → onboards **active**, then POST
+  `/agents/{id}/signal {ok:true}` every `OPA_RADAR_HEARTBEAT`s to refresh liveness
+  (re-registers if the radar pruned/restarted). It appears as **name "OPA Agent", id
+  `agent-opa`, kind `agent_framework`, framework `opa`, active/done**. It is still kept
+  out of the process **scanner** (`AGENT_RADAR_EXCLUDE` appends `opa_agent`) so there is
+  no duplicate `proc-<pid>` row. Set `OPA_RADAR_REGISTER=false` to make it fully hidden
+  again. The agent table is shown by **both** UIs (static `:8000` Inventory + React
+  `:5173` Radar) from `GET /agents`.
+- **User UI / `/user/agents`** — still hidden: `agents_fs.discover()` skips
+  `AWCP_USER_AGENTS_EXCLUDE` (default `opa_agent`). It's infra, not a user-selectable
+  worker agent.
+- **Token Monitor / `/laminar/usage`** — still hidden: it spends no metered tokens, so
+  `laminar/bridge.all_usage()` skips ids in `LMNR_USAGE_EXCLUDE` (default `agent-opa`,
+  kept in sync with `OPA_RADAR_AGENT_ID`). The OPA agent shows on the **radar only**.
 
 ---
 
@@ -222,6 +231,11 @@ Two independent surfaces, two env-driven exclusions (no hardcoding):
 | `AWCP_OPA_TIMEOUT` | `2` | per-OPA-request timeout (s) |
 | `AWCP_GATEWAY_URL` | `http://localhost:8000` | for optional Laminar `/laminar/record` |
 | `OPA_LAMINAR_ENABLED` | `false` | OPA-side tool-token logging (off ⇒ MCP meters) |
+| `OPA_RADAR_REGISTER` | `true` | self-register on the radar so it shows as a running agent (`false` ⇒ hidden) |
+| `OPA_RADAR_URL` | `AWCP_GATEWAY_URL` | radar/gateway to register + heartbeat against |
+| `OPA_RADAR_AGENT_ID` / `OPA_RADAR_NAME` | `agent-opa` / `OPA Agent` | its radar identity |
+| `OPA_RADAR_FRAMEWORK` | `opa` | framework label in the radar table |
+| `OPA_RADAR_HEARTBEAT` | `30` | liveness heartbeat interval (s) |
 
 **Control plane** (this repo / launcher)
 

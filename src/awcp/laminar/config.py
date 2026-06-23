@@ -173,6 +173,16 @@ EXPORT_KEEP_SPAN_NAMES: list[str] = [
     if s.strip()
 ]
 
+# Agent ids to HIDE from the Token Monitor feed (GET /laminar/usage). Hidden infra
+# like the OPA agent self-registers on the radar (so it shows there) but should NOT
+# appear in the token monitor — it spends no metered tokens. Comma-separated, exact
+# agent ids; defaults to the OPA agent's radar id (kept in sync via run_everything).
+# Set LMNR_USAGE_EXCLUDE="" to show everything.
+USAGE_EXCLUDE: set[str] = {
+    s.strip() for s in os.getenv("LMNR_USAGE_EXCLUDE", "agent-opa").split(",")
+    if s.strip()
+}
+
 PRICE_TABLE: dict[str, dict[str, float]] = _parse_price_table()
 LEDGER_PATH: str = os.getenv("LMNR_LEDGER_PATH", "/tmp/awcp-token-ledger.jsonl")
 RECORDS_MAX: int = _env_int("LMNR_RECORDS_MAX", "500")

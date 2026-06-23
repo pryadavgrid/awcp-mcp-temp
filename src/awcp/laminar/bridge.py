@@ -487,8 +487,9 @@ def all_usage() -> list[dict]:
     LLM call. Scanner-detected processes (source='scan': ollama/temporal/duplicate
     rows) are excluded; their tokens attribute to the agent's own self-registered
     id anyway. Falls back to ledger-only if the registry roster is unavailable."""
-    ids = list(LEDGER.agents())
-    seen = set(ids)
+    exclude = config.USAGE_EXCLUDE
+    ids = [a for a in LEDGER.agents() if a not in exclude]
+    seen = set(ids) | exclude
     try:
         for e in _list_agents() or []:
             aid = getattr(e, "id", None)

@@ -57,7 +57,8 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from slm import SLM, SLMResult          # local module (run as a script from this dir)
+from slm import SLM, SLMResult          # local modules (run as a script from this dir)
+from radar_register import RadarPresence
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -94,6 +95,13 @@ LAMINAR_ENABLED = os.getenv("OPA_LAMINAR_ENABLED", "false").strip().lower() == "
 
 # The small language model that REASONS each tool's risk tier (env-driven).
 _SLM = SLM(tiers=RISK_TIERS, default_tier=DEFAULT_TIER)
+
+# Makes the OPA agent VISIBLE on the radar (self-register + heartbeat). Hidden infra
+# by nature, but operators want to see it running like the other agents. Env-gated
+# (OPA_RADAR_REGISTER=false ⇒ stays hidden). Started on app startup below.
+_PRESENCE = RadarPresence(port=PORT, framework="opa",
+                          tier_model=_SLM.info().get("model", ""),
+                          capabilities=["tool-call-pdp", "slm-risk-tiering"])
 
 _lock = threading.Lock()            # guards the tier cache + decision stores
 _slm_lock = threading.Lock()        # serialises SLM classification (dedupes a cold tool)
@@ -211,6 +219,13 @@ def _log_laminar(agent_id: str, task_id: str, tool_name: str, tool_input) -> Non
 
 # ── HTTP surface ──────────────────────────────────────────────────────────────
 app = FastAPI(title="AWCP OPA Agent (SLM tool-call PDP)")
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    # Self-register with the radar + heartbeat so the OPA agent shows up as a
+    # running agent on the control plane (no-op when OPA_RADAR_REGISTER=false).
+    _PRESENCE.start()
 
 
 class EvaluateRequest(BaseModel):

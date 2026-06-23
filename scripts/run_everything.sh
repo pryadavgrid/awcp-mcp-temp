@@ -148,6 +148,14 @@ export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 OPA_AGENT_PORT="${OPA_AGENT_PORT:-8105}"
 export AWCP_OPA_AGENT_URL="${AWCP_OPA_AGENT_URL:-http://localhost:${OPA_AGENT_PORT}}"
 export AWCP_OPA_AGENT_FAIL_OPEN="${AWCP_OPA_AGENT_FAIL_OPEN:-true}"
+# Show the OPA agent ON the radar as a running agent (it self-registers + heartbeats
+# like the worker agents). It still stays out of the process SCANNER (excluded below)
+# so there's no duplicate proc-row, and out of the user-UI picker. Set false to hide.
+export OPA_RADAR_REGISTER="${OPA_RADAR_REGISTER:-true}"
+export OPA_RADAR_AGENT_ID="${OPA_RADAR_AGENT_ID:-agent-opa}"
+# …but keep it OUT of the Token Monitor (it spends no metered tokens — radar only).
+# Kept in sync with the OPA agent's radar id so the right row is hidden.
+export LMNR_USAGE_EXCLUDE="${LMNR_USAGE_EXCLUDE:-${OPA_RADAR_AGENT_ID}}"
 # The radar/gateway give the OPA agent time to reason a COLD tool's tier with the
 # SLM on the first call (results are cached per tool, so later calls are instant).
 export AWCP_OPA_AGENT_TIMEOUT="${AWCP_OPA_AGENT_TIMEOUT:-30}"
