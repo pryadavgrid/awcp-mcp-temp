@@ -13,7 +13,6 @@
     },
     "__default__": {
         "risk": "high",
-        "token_budget": 500,
         "write_scopes": []
     }
 }

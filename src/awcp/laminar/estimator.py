@@ -165,6 +165,28 @@ def _max_output(payload: dict) -> int:
         return 0
 
 
+def _tools_text(payload: dict) -> str:
+    """Flatten the request's tool / function schemas to text.
+
+    For a tool-using or ReAct agent these schemas — every tool's name, description
+    and JSON parameter spec — are part of the INPUT the model reads on EVERY call,
+    and on the FIRST step they often dominate the token count (the framework sends
+    the full tool catalogue up front). They MUST be included or the pre-check badly
+    under-counts and lets an over-budget first call through. Covers the OpenAI/Ollama
+    'tools' field and the legacy 'functions' field.
+    """
+    parts: list[str] = []
+    for key in ("tools", "functions"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            for it in items:
+                try:
+                    parts.append(json.dumps(it, default=str))
+                except Exception:  # noqa: BLE001
+                    parts.append(str(it))
+    return "\n".join(parts)
+
+
 # ── public entry point ────────────────────────────────────────────────────────
 
 def estimate_request(body: bytes, model_hint: str = "") -> int:
@@ -206,12 +228,19 @@ def estimate_request(body: bytes, model_hint: str = "") -> int:
         system = payload.get("system")
         if isinstance(system, str) and system:
             text = system + "\n" + text
+        # Tool/function schemas are input the model reads on EVERY call — and the
+        # system prompt + tool catalogue are exactly why the first step is large.
+        tools = _tools_text(payload)
+        if tools:
+            text = text + "\n" + tools
         return est.estimate(text) + overhead + _max_output(payload)
 
     # ── Completion / generate format ────────────────────────────────────────
     prompt = payload.get("prompt")
     if isinstance(prompt, str):
-        return est.estimate(prompt) + _max_output(payload)
+        tools = _tools_text(payload)
+        text = (prompt + "\n" + tools) if tools else prompt
+        return est.estimate(text) + _max_output(payload)
 
     # ── Embedding / generic input format ───────────────────────────────────
     inp = payload.get("input")
