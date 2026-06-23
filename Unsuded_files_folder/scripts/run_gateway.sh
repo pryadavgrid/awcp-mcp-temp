@@ -5,7 +5,7 @@
 # Served on :8000.
 #
 # The bundle agents live OUTSIDE this repo. Point the gateway at them with
-# AWCP_AGENTS_DIR (default: /Users/pchandra/CAPSTONE/DEMO2/awcp-agents).
+# AWCP_AGENTS_DIR (default: /Users/pryadav/Downloads/awcp-mcp-temp-agents).
 # Agents launched by /user/ask are told to report to this gateway's radar via
 # AWCP_AGENT_RADAR_URL (default: http://localhost:8000/awcp/registry).
 #
@@ -16,7 +16,7 @@
 set -e
 cd "$(dirname "$0")/.."
 export PYTHONPATH="$PWD/src"
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO2/awcp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
 echo "🌐 AWCP Gateway -> http://localhost:8000   (docs: /docs)"
 echo "   USER : GET /user/agents | POST /user/ask"
 echo "   AWCP : /awcp/registry (radar UI + API)"

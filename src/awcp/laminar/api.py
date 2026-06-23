@@ -73,10 +73,17 @@ def usage_one(agent_id: str) -> dict:
     if agent_id not in LEDGER.agents():
         raise HTTPException(status_code=404, detail="no usage recorded for this agent")
     out = bridge.usage_summary(agent_id)
-    # attach a Tempo deep-link to each recent call (None when no template set)
+    # Per-call breakdown: every metered step (each LLM run + each tool call) with
+    # its own tokens — so the UI shows "this tool was called and took this many
+    # tokens", not just the rolled-up window total. kind/label come from the SAME
+    # data-driven step_identity the trace spans use (no hardcoded tool/model list).
     recent = LEDGER.recent(agent_id, limit=50)
     for r in recent:
         r["trace_url"] = config.trace_url(r.get("trace_id"))
+        _name, _type, _tool = bridge.step_identity(r.get("step", ""), r.get("model", ""))
+        r["kind"] = _type                       # "LLM" | "TOOL"
+        r["label"] = _tool or r.get("model", "") # tool name, or the model
+        r["total_tokens"] = int(r.get("input_tokens", 0)) + int(r.get("output_tokens", 0))
     out["recent"] = recent
     return out
 

@@ -162,6 +162,36 @@ CREATE TABLE governance.degradation_events (
 
 CREATE INDEX idx_degr_agent ON governance.degradation_events (agent_id, ts);
 
+-- OPA agent (hidden tool-call PDP) durable stores. Replaces the agent's former
+-- on-disk JSON tier cache + in-memory decision ring, so the SLM-reasoned tier per
+-- tool and every tool-call decision survive a restart and are queryable.
+CREATE TABLE governance.tool_tiers (
+    tool_name  text PRIMARY KEY,
+    tier       text NOT NULL,
+    reason     text,
+    engine     text,
+    model      text,
+    ts         double precision,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE governance.tool_call_evaluations (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts         timestamptz NOT NULL DEFAULT now(),
+    task_id    text,
+    agent_id   text,
+    tool_name  text NOT NULL,
+    risk_tier  text,
+    decision   text NOT NULL,
+    reason     text,
+    reasoning  text,
+    engine     text,
+    question   text
+);
+
+CREATE INDEX idx_tooleval_task ON governance.tool_call_evaluations (task_id, ts);
+CREATE INDEX idx_tooleval_ts   ON governance.tool_call_evaluations (ts DESC);
+
 CREATE TABLE evidence.token_ledger (
     id            bigint GENERATED ALWAYS AS IDENTITY,
     ts            timestamptz NOT NULL DEFAULT now(),

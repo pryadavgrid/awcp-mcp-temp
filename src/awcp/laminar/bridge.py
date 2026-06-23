@@ -34,9 +34,10 @@ Accepted token keys (first match wins, checked in event.extra then top level):
 
 Per record this module:
   1. appends to the ledger (sliding window + lifetime + optional JSONL);
-  2. emits ONE OTel span "laminar.token.usage" with gen_ai.* attributes — it
-     flows to the Collector (Tempo/Grafana) AND, via exporter.py fan-out, to
-     Laminar, which renders token/cost views from those same attributes;
+  2. emits ONE OTel span per call, NAMED + TYPED by step (step_identity):
+     "llm.call <model>" [LLM] or "tool.call <tool>" [TOOL], with gen_ai.*
+     attributes — it flows to the Collector (Tempo/Grafana) AND, via exporter.py
+     fan-out, to Laminar, which renders per-step token/cost from those attributes;
   3. updates OTel metrics (token counters by agent/direction, breach counter);
   4. re-evaluates the agent's budget and, on an UPWARD state transition
      (ok->warn, ->exhausted), records an event / fires on_breach exactly once.
@@ -130,18 +131,46 @@ def init_laminar(*, get_agent=None, list_agents=None, on_breach=None,
 # ── execution-event intake (called by the radar's /tasks/execution/* routes) ──
 
 def on_execution_start(payload: dict) -> None:
-    """Remember task -> agent so later events can be attributed."""
+    """Remember task -> agent so later events can be attributed, and (when
+    LMNR_GROUP_BY_TASK is on) open ONE task-root span that every later step span
+    nests under — so the task is a single trace in Laminar."""
     if not (config.ENABLED and _initialized):
         return
     task_id = str(payload.get("task_id") or "")
     if not task_id:
         return
-    with _lock:
-        _tasks[task_id] = {
-            "agent_id": str(payload.get("agent_id") or "unknown"),
-            "goal": str(payload.get("goal") or "")[:200],
+    agent_id = str(payload.get("agent_id") or "unknown")
+    goal = str(payload.get("goal") or "")[:200]
+    meta = {"agent_id": agent_id, "goal": goal,
             "framework": str(payload.get("framework") or ""),
-        }
+            "root": None, "tin": 0, "tout": 0, "steps": 0}
+
+    # Open the task-root span as its OWN root (empty parent context) so it anchors a
+    # fresh trace; we hold the Span object and parent every step to it, then end it
+    # on completion. Best-effort — any failure just falls back to per-request traces.
+    if config.GROUP_BY_TASK and _tracer is not None:
+        try:
+            from opentelemetry import context as _otel_context
+            name = goal or f"agent.task {agent_id}"
+            root = _tracer.start_span(name, context=_otel_context.Context())
+            root.set_attribute("lmnr.span.type", "DEFAULT")   # keeps it in the fan-out
+            root.set_attribute("awcp.task.id", task_id)
+            root.set_attribute("awcp.agent.id", agent_id)
+            if goal:
+                root.set_attribute("awcp.task.goal", goal)
+            meta["root"] = root
+        except Exception:                       # noqa: BLE001
+            meta["root"] = None
+
+    with _lock:
+        # If a stale task with the same id is still open, end its root first.
+        old = _tasks.get(task_id)
+        if old and old.get("root") is not None:
+            try:
+                old["root"].end()
+            except Exception:                   # noqa: BLE001
+                pass
+        _tasks[task_id] = meta
 
 
 def _gen_ai_system(model: str) -> str:
@@ -182,49 +211,96 @@ def _extract_tokens(event: dict) -> tuple[int, int]:
     return max(tin, 0), max(tout, 0)        # -1 (absent) normalizes to 0
 
 
+def step_identity(step: str, model: str) -> tuple[str, str, str]:
+    """Map a metered call's (step, model) -> (span_name, lmnr_span_type, tool_name).
+
+    PURELY data-driven — there is NO hardcoded tool or model list. The tool-metering
+    paths (the MCP server, the OPA agent, POST /laminar/record) tag a tool call by
+    prefixing its model with the 'tool:' sentinel (e.g. 'tool:web_search'); a step
+    string containing 'tool' is the secondary signal. Everything else is a model
+    (LLM) call. The returned name is what shows in the Laminar trace tree, so each
+    step renders as its own row with its own token count — 'tool.call web_search',
+    'llm.call gemma2:2b', … — instead of every call sharing one generic name."""
+    m = (model or "").strip()
+    s = (step or "").strip().lower()
+    if m.lower().startswith("tool:"):
+        tool = m.split(":", 1)[1].strip() or "tool"
+        return f"tool.call {tool}", "TOOL", tool
+    if "tool" in s and m:
+        return f"tool.call {m}", "TOOL", m
+    return f"llm.call {m or 'model'}", "LLM", ""
+
+
 def _emit_usage_span(agent_id: str, task_id: str, step: str, model: str,
                      tin: int, tout: int, rec: dict, window: dict,
                      evaluation: dict) -> None:
-    """Emit ONE 'laminar.token.usage' OTel span for a metered model call.
+    """Emit ONE OTel span per metered call, NAMED by step (step_identity):
+    'llm.call <model>' for a model call, 'tool.call <tool>' for a tool call. So a
+    task trace shows each step as its own row with its own tokens — when the agent
+    runs the model, and each time it calls a tool — rather than one rolled-up
+    aggregate. Every step is typed lmnr.span.type=LLM so Laminar actually renders its
+    token badge and counts it in the trace total (it only does so for LLM spans); the
+    real kind lives in the span name + awcp.step.kind.
 
-    Created on the GLOBAL tracer so it fans out to Laminar (via exporter.py's
-    added processor) AND the local Collector/Tempo. Carries BOTH the gen_ai.*
-    convention (so Laminar/Grafana render tokens, cost and model natively) and
+    Created on the GLOBAL tracer so it fans out to Laminar (via exporter.py's added
+    processor) AND the local Collector/Tempo, as a CHILD of the task-execution
+    request span so the steps nest under one task trace. Carries the gen_ai.*
+    convention (so Laminar/Grafana render tokens, cost and model natively) plus
     awcp.* governance context, and stamps the span's trace/span id back onto the
-    ledger record so the API + dashboard can deep-link each call to its trace.
+    ledger record for deep-linking.
 
     Shared by BOTH metering paths — execution events (on_execution_event) and the
-    LLM-gateway proxy (record_usage) — so a token call appears identically in
-    Laminar no matter how it was measured. Best-effort: any failure is swallowed
-    so token accounting never breaks on a telemetry hiccup."""
+    LLM-gateway / tool-metering path (record_usage). Best-effort: any failure is
+    swallowed so token accounting never breaks on a telemetry hiccup."""
     if _tracer is None:
         return
     try:
-        with _tracer.start_as_current_span("laminar.token.usage") as span:
+        span_name, span_kind, tool_name = step_identity(step, model)
+        # For a tool call the human-meaningful label is the tool name; for a model
+        # call it is the model. Used as the gen_ai model so Laminar's column reads
+        # right for both kinds.
+        label = tool_name or model or "model"
+        # Nest this step under the task-root span (when grouping is on and the task
+        # is open) so all of a task's steps share one trace; else fall back to the
+        # ambient context (per-request trace). Also tally the task's running totals.
+        parent_ctx = None
+        with _lock:
+            meta = _tasks.get(task_id)
+            if meta is not None:
+                meta["tin"] += tin
+                meta["tout"] += tout
+                meta["steps"] += 1
+        if meta is not None and meta.get("root") is not None:
+            from opentelemetry import trace as _trace
+            parent_ctx = _trace.set_span_in_context(meta["root"])
+        with _tracer.start_as_current_span(span_name, context=parent_ctx) as span:
             ctx = span.get_span_context()
             if getattr(ctx, "trace_id", 0):
                 rec["trace_id"] = format(ctx.trace_id, "032x")
                 rec["span_id"] = format(ctx.span_id, "016x")
             cost = rec.get("cost", 0.0)
-            for k, v in {
-                # lmnr.span.type = "LLM" tells Laminar's native dashboard to
-                # render this span in its LLM views (token counts, cost, model).
+            attrs = {
+                # Laminar renders the "input → output" token badge AND rolls a span's
+                # tokens up into the trace total ONLY for LLM-type spans. So EVERY
+                # metered step (model OR tool) is typed LLM here — otherwise a
+                # tool.call span stores its tokens but Laminar shows no count and
+                # leaves them out of the task total. The step's TRUE kind is preserved
+                # in the span NAME ("tool.call …" vs "llm.call …") and awcp.step.kind.
                 "lmnr.span.type": "LLM",
-                # ── Laminar's documented MINIMUM SET for a proper LLM span ──
-                # (lmnr/opentelemetry_lib/tracing/attributes.py:Attributes). The
-                # native UI only renders token usage when ALL of these are present
-                # — in particular llm.usage.total_tokens, without which the span
-                # shows as a bare trace with no token counts. gen_ai.response.model
-                # is required alongside gen_ai.request.model.
-                "gen_ai.system": _gen_ai_system(model),
-                "gen_ai.request.model": model,
-                "gen_ai.response.model": model,
+                "awcp.step.kind": span_kind,        # "LLM" | "TOOL" — the real kind
+                # ── Laminar's documented MINIMUM SET so token usage renders ──
+                # (in particular llm.usage.total_tokens; gen_ai.response.model is
+                # required alongside gen_ai.request.model). Present on BOTH kinds so
+                # each step shows its own input → output (total) token counts.
+                "gen_ai.system": _gen_ai_system(label),
+                "gen_ai.request.model": label,
+                "gen_ai.response.model": label,
                 "gen_ai.usage.input_tokens": tin,
                 "gen_ai.usage.output_tokens": tout,
                 "llm.usage.total_tokens": tin + tout,
-                # Cost under Laminar's own key (gen_ai.usage.cost). 0.0 is honest
-                # for local Ollama models (empty price table); the dollar figure
-                # appears when LMNR_PRICE_TABLE prices the model.
+                # Cost under Laminar's own key. 0.0 is honest for local Ollama
+                # (empty price table); a dollar figure appears once LMNR_PRICE_TABLE
+                # prices the model.
                 "gen_ai.usage.cost": cost,
                 # ── AWCP governance context (rendered as plain attributes) ──
                 "awcp.agent.id": agent_id,
@@ -234,7 +310,11 @@ def _emit_usage_span(agent_id: str, task_id: str, step: str, model: str,
                 "awcp.budget.window_used": window["total_tokens"],
                 "awcp.budget.limit": evaluation["budget_tokens"],
                 "awcp.budget.state": evaluation["state"],
-            }.items():
+            }
+            if tool_name:               # extra, tool-specific context for tool spans
+                attrs["awcp.tool.name"] = tool_name
+                attrs["gen_ai.operation.name"] = "tool"
+            for k, v in attrs.items():
                 span.set_attribute(k, v)
     except Exception:                       # noqa: BLE001
         pass
@@ -284,11 +364,50 @@ def on_execution_event(task_id: str, event: dict) -> dict | None:
 
 
 def on_execution_complete(task_id: str, outcome: dict) -> None:
-    """Forget the task mapping (window records keep their own timestamps)."""
+    """Forget the task mapping and, when grouping by task, stamp the task totals,
+    emit a final 'task.complete' summary span (so completion shows the rolled-up
+    tokens), and END the task-root span — which is what flushes the whole task as
+    one trace to Laminar."""
     if not config.ENABLED:
         return
     with _lock:
-        _tasks.pop(task_id, None)
+        meta = _tasks.pop(task_id, None)
+    if not meta:
+        return
+    root = meta.get("root")
+    if root is None:
+        return
+    tin, tout, steps = meta.get("tin", 0), meta.get("tout", 0), meta.get("steps", 0)
+    try:
+        from opentelemetry import trace as _trace
+        parent_ctx = _trace.set_span_in_context(root)
+        # Summary marker for the task. The per-task totals go under awcp.* (NOT the
+        # gen_ai.usage.* keys) on purpose: Laminar sums the gen_ai tokens of the real
+        # step spans (llm.call/tool.call) up to the trace total automatically, so
+        # putting them here too would double-count. The root's token column already
+        # shows the true rolled-up total of all steps.
+        with _tracer.start_as_current_span("task.complete", context=parent_ctx) as s:
+            for k, v in {
+                "lmnr.span.type": "DEFAULT",
+                "awcp.task.steps": steps,
+                "awcp.task.status": str(outcome.get("status", "")),
+                "awcp.task.total_input_tokens": tin,
+                "awcp.task.total_output_tokens": tout,
+                "awcp.task.total_tokens": tin + tout,
+            }.items():
+                s.set_attribute(k, v)
+        # Same totals on the root as plain (non-rolled-up) attributes, for at-a-glance
+        # reading without disturbing Laminar's automatic per-trace token rollup.
+        root.set_attribute("awcp.task.steps", steps)
+        root.set_attribute("awcp.task.total_tokens", tin + tout)
+        root.set_attribute("awcp.task.status", str(outcome.get("status", "")))
+    except Exception:                           # noqa: BLE001
+        pass
+    finally:
+        try:
+            root.end()                          # ends the trace → exported to Laminar
+        except Exception:                       # noqa: BLE001
+            pass
 
 
 # ── budget-state transitions: act ONCE per crossing, not per event ────────────

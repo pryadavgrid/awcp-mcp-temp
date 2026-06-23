@@ -36,29 +36,36 @@ _attached: bool = False
 
 
 def _is_llm_or_governance_span(span) -> bool:
-    """True for the spans Laminar actually renders value for: the LLM/token
-    usage spans, AWCP governance spans, and the task-lifecycle request spans
-    (config.EXPORT_KEEP_SPAN_NAMES) that PARENT the token spans — keeping the
-    latter is what lets `laminar.token.usage` nest inside its full
-    `POST /tasks/execution/...` trace instead of arriving as an orphan row.
-    Everything else (GET /agents and other high-frequency polling spans) is HTTP
-    noise that buries the token data, so it is dropped from the Laminar fan-out
-    only (it still reaches Tempo/Grafana)."""
-    name = getattr(span, "name", "") or ""
-    if name == "laminar.token.usage" or name.startswith("awcp"):
-        return True
-    # Keep the configured task-lifecycle request spans (and their ASGI
-    # http-receive/http-send children, which share the substring) so the token
-    # span's parent trace is present and it renders as a full tree.
-    if any(keep in name for keep in config.EXPORT_KEEP_SPAN_NAMES):
-        return True
+    """True ONLY for the spans Laminar should render: the per-step token spans
+    (the 'llm.call …' / 'tool.call …' spans bridge.py emits, identified by their
+    lmnr.span.type / gen_ai.* attributes — NOT by name, so renaming per step is
+    safe) and the task-lifecycle request spans (config.EXPORT_KEEP_SPAN_NAMES)
+    that PARENT them, so each task trace renders as one tree of per-step token
+    rows.
+
+    Everything else stays in Tempo/Grafana only and is kept OUT of Laminar:
+    onboarding (radar.onboard.*), the registry scanner (radar.scan.*), other
+    governance/awcp spans, and the high-frequency GET /agents polling spans —
+    none of which carry tokens, all of which otherwise bury the token data."""
     attrs = getattr(span, "attributes", None) or {}
+    # 1) The token-bearing spans — keep regardless of name.
     try:
         if attrs.get("lmnr.span.type"):
             return True
-        return any(str(k).startswith("gen_ai.") for k in attrs)
-    except Exception:  # noqa: BLE001 — attribute view edge cases must not drop spans
-        return True
+        if any(str(k).startswith("gen_ai.") for k in attrs):
+            return True
+    except Exception:  # noqa: BLE001 — attribute view edge cases: fall through to name
+        pass
+    # 2) When grouping by task, the task-root span (kept by rule 1 via its
+    #    lmnr.span.type) is the parent, so the per-request `POST /tasks/execution/*`
+    #    spans are just noise → drop them. When NOT grouping, keep those request
+    #    spans so the token spans still nest under a parent. Env-driven via
+    #    LMNR_EXPORT_KEEP_SPANS (default "tasks/execution") — nothing hardcoded;
+    #    onboarding/scan/poll names never match either way.
+    if config.GROUP_BY_TASK:
+        return False
+    name = getattr(span, "name", "") or ""
+    return any(keep in name for keep in config.EXPORT_KEEP_SPAN_NAMES)
 
 
 def _laminar_processor(exporter):

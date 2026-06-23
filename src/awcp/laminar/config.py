@@ -138,10 +138,9 @@ RISK_TOKEN_BUDGET: dict[str, int] = _parse_risk_budget()
 BUDGET_WINDOW_S: float = _env_float("LMNR_BUDGET_WINDOW_S", "3600")
 WARN_RATIO: float = _env_float("LMNR_WARN_RATIO", "0.8")
 # Tolerated overshoot above the budget before an agent counts as "exhausted".
-# 0.10 = a 10% grace band, so control acts at 110% of budget rather than exactly
-# 100% — applied identically at the pre-check (projection) and the reactive
-# (post-call) evaluation. Set 0 for a hard 100% limit.
-OVERSHOOT_RATIO: float = _env_float("LMNR_OVERSHOOT_RATIO", "0.10")
+# 0.0 = hard 100% limit; control acts the moment usage meets the budget.
+# Override with LMNR_OVERSHOOT_RATIO env var if a grace band is needed.
+OVERSHOOT_RATIO: float = _env_float("LMNR_OVERSHOOT_RATIO", "0.0")
 # When true, on_breach fires at the warn threshold (WARN_RATIO * budget) in
 # addition to exhausted.  This steps the autonomy ladder down one rung earlier
 # so enforcement fires before the hard limit, reducing overshoot for agents
@@ -172,6 +171,17 @@ EXPORT_KEEP_SPAN_NAMES: list[str] = [
     s.strip() for s in os.getenv("LMNR_EXPORT_KEEP_SPANS", "tasks/execution").split(",")
     if s.strip()
 ]
+
+# Group every step of ONE task under a SINGLE task-root span, so Laminar shows one
+# trace per task ("agent.task <goal>") containing each LLM run and tool call (with
+# its own tokens) plus a task.complete summary — instead of a separate trace per
+# HTTP request. Works because both metering paths (LLM via /event, tools via
+# /laminar/record) run in THIS process, so one in-memory root span parents both —
+# no agent or cross-process trace propagation needed. When on, the per-request
+# `POST /tasks/execution/*` spans are dropped from the Laminar fan-out (the task
+# root replaces them as the parent). Set LMNR_GROUP_BY_TASK=false for the old
+# one-trace-per-request behaviour.
+GROUP_BY_TASK: bool = _env_bool("LMNR_GROUP_BY_TASK", "true")
 
 # Agent ids to HIDE from the Token Monitor feed (GET /laminar/usage). Hidden infra
 # like the OPA agent self-registers on the radar (so it shows there) but should NOT

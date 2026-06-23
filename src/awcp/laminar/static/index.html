@@ -39,6 +39,18 @@
   .empty{color:var(--muted);text-align:center;padding:40px 0}
   h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:26px 0 10px}
   .cost{color:var(--violet)}
+  /* expandable per-step breakdown */
+  tr.agent{cursor:pointer} tr.agent:hover td{background:#16233b}
+  .tog{display:inline-block;width:14px;color:var(--muted);transition:transform .15s}
+  .tog.open{transform:rotate(90deg);color:var(--accent)}
+  .detail td{background:#0b1220;padding:0}
+  .detail .inner{padding:8px 14px 12px}
+  .steps{border:1px solid var(--border);border-radius:8px;margin:0}
+  .steps th,.steps td{padding:6px 10px;font-size:12px}
+  .steps th{background:#101b30}
+  .k-LLM{background:rgba(56,189,248,.14);color:var(--accent)}
+  .k-TOOL{background:rgba(167,139,250,.16);color:var(--violet)}
+  .dmuted{color:var(--muted);text-align:center;padding:14px 0}
   button{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;padding:3px 10px;font-size:11px;cursor:pointer}
   button:hover{color:var(--text);border-color:var(--accent)}
   button.save{border-color:var(--accent);color:var(--accent)}
@@ -80,12 +92,14 @@
   <h2>Per-agent usage (sliding window) — set each agent's risk tier &amp; budget here</h2>
   <table>
     <thead><tr>
-      <th>Agent</th><th>Risk</th><th>Window usage</th><th>Budget (set)</th>
+      <th></th><th>Agent</th><th>Risk</th><th>Window usage</th><th>Budget (set)</th>
       <th>State</th><th>Calls</th><th>Last model</th><th>Cost ($)</th><th>Trace</th><th></th>
     </tr></thead>
-    <tbody id="rows"><tr><td colspan="10" class="empty">No token usage recorded yet —
+    <tbody id="rows"><tr><td colspan="11" class="empty">No token usage recorded yet —
       start an agent (it auto-reports), or it appears here on its first LLM call.</td></tr></tbody>
   </table>
+  <p class="foot" style="margin-top:8px">▸ click an agent row to expand its per-step breakdown —
+    every LLM run and tool call with its own token count.</p>
 
   <div class="foot" id="foot"></div>
 </div>
@@ -176,20 +190,27 @@ async function refresh(){
   $('rows').innerHTML = us.map(u=>{
     const b=u.budget||{}, w=u.window||{};
     const pct=Math.min(100,Math.round((b.ratio||0)*100));
-    return `<tr>
-      <td><b>${esc(u.name)}</b><br><span class="mono" style="color:var(--muted)">${esc(u.agent_id)}</span></td>
-      <td>${riskSelect(u)}</td>
+    const id=esc(u.agent_id), open=EXPANDED.has(u.agent_id);
+    return `<tr class="agent" onclick="toggle('${id}')">
+      <td><span class="tog ${open?'open':''}">▸</span></td>
+      <td><b>${esc(u.name)}</b><br><span class="mono" style="color:var(--muted)">${id}</span></td>
+      <td onclick="event.stopPropagation()">${riskSelect(u)}</td>
       <td><div class="bar b-${b.state}"><i style="width:${pct}%"></i></div>
           <span class="mono">${(w.total_tokens||0).toLocaleString()} tok (${pct}%)</span></td>
-      <td>${budgetInput(u,b)}</td>
+      <td onclick="event.stopPropagation()">${budgetInput(u,b)}</td>
       <td><span class="pill s-${b.state}">${b.state}</span></td>
       <td class="mono">${w.calls||0}</td>
       <td class="mono">${esc(w.last_model||'—')}</td>
       <td class="mono cost">${(w.cost||0).toFixed(4)}</td>
       <td class="mono">${traceCell(u)}</td>
-      <td><button onclick="resetAgent('${esc(u.agent_id)}')">reset window</button></td>
-    </tr>`;
+      <td onclick="event.stopPropagation()"><button onclick="resetAgent('${id}')">reset window</button></td>
+    </tr>` + (open
+      ? `<tr class="detail"><td colspan="11"><div class="inner" id="brk-${id}">
+           <div class="dmuted">loading per-step breakdown…</div></div></td></tr>`
+      : '');
   }).join('');
+  // lazily (re)load the breakdown for any expanded agent
+  EXPANDED.forEach(loadBreakdown);
 
   $('foot').textContent = `budgets: risk defaults ${JSON.stringify(st.risk_budgets||{})} · `
     + `warn at ${(st.warn_ratio||0)*100}% · price table models: `
@@ -199,6 +220,38 @@ async function resetAgent(id){
   try{ await fetch('/laminar/reset/'+encodeURIComponent(id),{method:'POST'}); }catch(e){}
   refresh();
 }
+
+// ── per-step breakdown: each metered step (LLM run / tool call) with its tokens ──
+const EXPANDED=new Set();           // agent ids whose breakdown is open
+function toggle(id){ EXPANDED.has(id)?EXPANDED.delete(id):EXPANDED.add(id); refresh(); }
+
+async function loadBreakdown(id){
+  const host=$('brk-'+id); if(!host) return;
+  let d={}; try{ d=await (await fetch('/laminar/usage/'+encodeURIComponent(id))).json(); }catch(e){
+    host.innerHTML='<div class="dmuted">breakdown unavailable</div>'; return; }
+  const recent=d.recent||[];
+  if(!recent.length){ host.innerHTML='<div class="dmuted">no per-step calls recorded yet</div>'; return; }
+  const ts=t=>{ try{ return new Date(t*1000).toLocaleTimeString(); }catch(e){ return ''; } };
+  const trace=r=> r.trace_url ? `<a href="${esc(r.trace_url)}" target="_blank">${esc((r.trace_id||'').slice(0,8))}↗</a>`
+                  : (r.trace_id?`<span title="${esc(r.trace_id)}">${esc(r.trace_id.slice(0,8))}</span>`:'—');
+  // Each row = one step: kind (LLM/TOOL) + label (model or tool name) + tokens.
+  host.innerHTML = `<table class="steps">
+    <thead><tr><th>Time</th><th>Kind</th><th>Step / Tool</th><th>Task</th>
+      <th>Input</th><th>Output</th><th>Total</th><th>Cost ($)</th><th>Trace</th></tr></thead>
+    <tbody>${recent.map(r=>`<tr>
+      <td class="mono">${ts(r.ts)}</td>
+      <td><span class="pill k-${esc(r.kind||'LLM')}">${esc(r.kind||'LLM')}</span></td>
+      <td class="mono">${esc(r.label||r.model||'—')}<br>
+          <span style="color:var(--muted);font-size:11px">${esc(r.step||'')}</span></td>
+      <td class="mono" style="color:var(--muted)">${esc((r.task_id||'').slice(0,18))}</td>
+      <td class="mono">${(r.input_tokens||0).toLocaleString()}</td>
+      <td class="mono">${(r.output_tokens||0).toLocaleString()}</td>
+      <td class="mono"><b>${(r.total_tokens||((r.input_tokens||0)+(r.output_tokens||0))).toLocaleString()}</b></td>
+      <td class="mono cost">${(r.cost||0).toFixed(4)}</td>
+      <td class="mono">${trace(r)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
 refresh(); setInterval(refresh, 3000);
 </script>
 </body>

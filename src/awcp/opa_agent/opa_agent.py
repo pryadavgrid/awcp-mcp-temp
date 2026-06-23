@@ -34,7 +34,8 @@ hardcoded:
   OPA_SLM_TIMEOUT          30                       per-classification timeout (s)
   OPA_SLM_TEMPERATURE      0                        deterministic classification
   OPA_SLM_CACHE            true                     cache the tier per tool (persisted)
-  OPA_TOOL_POLICY_PATH     <tmp>/awcp-opa-tool-tiers.json   where the tier cache persists
+  AGENT_RADAR_DATABASE_URL ""                       Postgres: tiers + decisions persist here
+                                                    (unset ⇒ in-memory only, nothing on disk)
   OPA_RECENT_MAX           200                      tool-call ring shown on the Radar
   AWCP_OPA_URL             ""                       OPA server base (empty ⇒ Python fallback)
   AWCP_OPA_TOOLS_PACKAGE   awcp/tools               Rego package under /v1/data
@@ -49,7 +50,6 @@ import json
 import os
 import threading
 import time
-import tempfile
 from collections import deque
 
 import httpx
@@ -59,6 +59,7 @@ from pydantic import BaseModel
 
 from slm import SLM, SLMResult          # local modules (run as a script from this dir)
 from radar_register import RadarPresence
+import db                               # durable Postgres store (tiers + decisions)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -77,10 +78,6 @@ if DEFAULT_TIER not in RISK_TIERS:
     DEFAULT_TIER = RISK_TIERS[0]
 
 CACHE_ENABLED = os.getenv("OPA_SLM_CACHE", "true").strip().lower() == "true"
-CACHE_PATH = os.getenv(
-    "OPA_TOOL_POLICY_PATH",
-    os.path.join(tempfile.gettempdir(), "awcp-opa-tool-tiers.json"),
-)
 RECENT_MAX = int(os.getenv("OPA_RECENT_MAX", "200"))
 
 OPA_URL = os.getenv("AWCP_OPA_URL", "").strip().rstrip("/")
@@ -108,42 +105,37 @@ _slm_lock = threading.Lock()        # serialises SLM classification (dedupes a c
 
 
 def _seed_cache() -> dict[str, dict]:
-    """Re-load the SLM-decided tier cache from disk (so a restart doesn't re-pay the
-    SLM for tools it already classified). Invalid entries are dropped."""
-    try:
-        with open(CACHE_PATH, encoding="utf-8") as fh:
-            saved = json.load(fh)
-        if isinstance(saved, dict):
-            out: dict[str, dict] = {}
-            for tool, rec in saved.items():
-                if isinstance(rec, dict) and str(rec.get("tier", "")).lower() in RISK_TIERS:
-                    out[str(tool)] = {"tier": str(rec["tier"]).lower(),
-                                      "reason": str(rec.get("reason", "")),
-                                      "engine": str(rec.get("engine", "slm")),
-                                      "model": str(rec.get("model", "")),
-                                      "ts": float(rec.get("ts", 0) or 0)}
-            return out
-    except Exception:                       # noqa: BLE001 — no/invalid file ⇒ start empty
-        pass
-    return {}
+    """Re-load the SLM-decided tier cache from Postgres (so a restart doesn't re-pay
+    the SLM for tools it already classified). Invalid entries are dropped. Empty when
+    the DB is disabled/unavailable — nothing is read from disk."""
+    out: dict[str, dict] = {}
+    for tool, rec in (db.load_tiers() or {}).items():
+        if isinstance(rec, dict) and str(rec.get("tier", "")).lower() in RISK_TIERS:
+            out[str(tool)] = {"tier": str(rec["tier"]).lower(),
+                              "reason": str(rec.get("reason", "")),
+                              "engine": str(rec.get("engine", "slm")),
+                              "model": str(rec.get("model", "")),
+                              "ts": float(rec.get("ts", 0) or 0)}
+    return out
 
+
+# Bring the durable Postgres store up FIRST so the tier cache below seeds from it
+# (and every later write persists). Fail-open: no DB ⇒ in-memory only, no disk.
+db.init()
 
 # tool_name -> {tier, reason, engine, model, ts}  (the SLM's per-tool decision)
 _TIERS: dict[str, dict] = _seed_cache()
-# task_id -> {task_id, question, tools:[{...}], blocked}
+# task_id -> {task_id, question, tools:[{...}], blocked}  (fast in-memory mirror)
 _DECISIONS: dict[str, dict] = {}
 # flat ring of recent tool-call decisions across ALL agents (newest appended right)
 _RECENT: deque = deque(maxlen=RECENT_MAX)
 
 
-def _persist() -> None:
+def _persist_tier(tool_name: str, rec: dict) -> None:
+    """Durably persist one tool's resolved tier to Postgres (best-effort, no disk)."""
     if not CACHE_ENABLED:
         return
-    try:
-        with open(CACHE_PATH, "w", encoding="utf-8") as fh:
-            json.dump(_TIERS, fh)
-    except Exception:                       # noqa: BLE001 — persistence is best-effort
-        pass
+    db.upsert_tier(tool_name, rec)
 
 
 def tier_for(tool_name: str, tool_input: dict | None = None, question: str = "") -> dict:
@@ -166,7 +158,7 @@ def tier_for(tool_name: str, tool_input: dict | None = None, question: str = "")
                "model": res.model, "ts": time.time()}
         with _lock:
             _TIERS[tool_name] = rec
-            _persist()
+        _persist_tier(tool_name, rec)
         return rec
 
 
@@ -245,7 +237,8 @@ def about() -> FileResponse:
 def health() -> dict:
     return {"ok": True, "service": "opa-agent", "tiers": RISK_TIERS,
             "block_tiers": BLOCK_TIERS, "default_tier": DEFAULT_TIER,
-            "opa": bool(OPA_URL), "slm": _SLM.info(), "tools_classified": len(_TIERS)}
+            "opa": bool(OPA_URL), "slm": _SLM.info(), "tools_classified": len(_TIERS),
+            "db": db.enabled()}
 
 
 @app.get("/tools")
@@ -267,8 +260,14 @@ def tiers() -> dict:
         by_tool = {t: {"tier": r["tier"], "reason": r.get("reason", ""),
                        "engine": r.get("engine", ""), "model": r.get("model", "")}
                    for t, r in _TIERS.items()}
-        recent = list(_RECENT)
-    recent.reverse()                         # newest first for the UI
+        mem_recent = list(_RECENT)
+    # Prefer the durable DB feed (survives restarts); fall back to the in-memory ring.
+    db_recent = db.recent(RECENT_MAX)
+    if db_recent is not None:
+        recent = db_recent                   # already newest-first from the DB
+    else:
+        mem_recent.reverse()                 # newest first for the UI
+        recent = mem_recent
     return {"enabled": True, "tiers": RISK_TIERS, "block_tiers": BLOCK_TIERS,
             "default_tier": DEFAULT_TIER, "slm": _SLM.info(),
             "by_tool": by_tool, "recent": recent}
@@ -298,6 +297,7 @@ def evaluate(req: EvaluateRequest) -> dict:
         if decision == "block":
             entry["blocked"] = True
         _RECENT.append(record)
+    db.record_decision(record)               # durable append (no disk; survives restart)
     _log_laminar(req.agent_id, req.task_id, req.tool_name, req.tool_input)
     return {"tool_name": req.tool_name, "risk_tier": tier, "decision": decision,
             "reason": reason, "reasoning": rec.get("reason", ""),
@@ -306,7 +306,12 @@ def evaluate(req: EvaluateRequest) -> dict:
 
 @app.get("/decisions/{task_id}")
 def decisions(task_id: str) -> dict:
-    """The structured JSON of every tool call (+ tier + decision) for one question."""
+    """The structured JSON of every tool call (+ tier + decision) for one question.
+    Read from Postgres (authoritative, survives restart); falls back to the in-memory
+    mirror when the DB is disabled/unavailable."""
+    durable = db.decisions_for(task_id)
+    if durable is not None:
+        return durable
     with _lock:
         return _DECISIONS.get(task_id, {"task_id": task_id, "tools": [], "blocked": False})
 
@@ -315,5 +320,6 @@ if __name__ == "__main__":
     import uvicorn
     print(f"\U0001F6E1️  AWCP OPA Agent (SLM tool-call PDP, hidden) → http://localhost:{PORT}"
           f"   tiers={RISK_TIERS} block={BLOCK_TIERS} slm={_SLM.info()} "
-          f"opa={'on' if OPA_URL else 'off(fallback)'}")
+          f"opa={'on' if OPA_URL else 'off(fallback)'} "
+          f"db={'postgres' if db.enabled() else 'in-memory'}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
