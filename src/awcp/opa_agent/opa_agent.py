@@ -9,9 +9,11 @@ worker agents make, and it answers three questions:
   3. it records the call into a per-question JSON  ({tool_name, risk_tier, decision})
      so the Radar can render a tier bar for EVERY tool call the agents make.
 
-What changed from the slider era: the risk tier is no longer set by an operator.
-A **small language model** (a local Ollama SLM, e.g. gemma2:2b) REASONS about each
-tool call and emits its tier. The tier per tool is cached (a tool's inherent risk
+The risk TIER of each tool is not set by an operator: a **small language model** (a
+local Ollama SLM, e.g. gemma2:2b) REASONS about each tool call and emits its tier.
+What the operator DOES control is a single BLOCK THRESHOLD (a slider on the Radar):
+any tool call whose SLM tier is at or above that threshold blocks the answer. The
+threshold is runtime-mutable (POST /threshold) and persisted across restarts. The tier per tool is cached (a tool's inherent risk
 doesn't change call-to-call), persisted across restarts, and surfaced to the Radar
 UI. The block decision itself is still delegated to OPA (Open Policy Agent / Rego)
 when AWCP_OPA_URL is set, with a fail-secure deterministic fallback — the same
@@ -26,7 +28,9 @@ hardcoded:
 
   OPA_PORT                 8105                     this service's port
   OPA_RISK_TIERS           low,medium,high,severe   the tier vocabulary (ascending)
-  OPA_BLOCK_TIERS          high,severe              tiers that BLOCK the answer
+  OPA_BLOCK_THRESHOLD      (from OPA_BLOCK_TIERS)    operator slider: block at/above this tier
+  OPA_BLOCK_TIERS          high,severe              legacy seed for the initial threshold
+  OPA_THRESHOLD_PATH       <tmp>/awcp-opa-block-threshold.json  where the slider persists
   OPA_DEFAULT_TIER         low                      tier used when the SLM can't decide
   OPA_SLM_ENABLED          true                     reason the tier with the SLM
   OPA_SLM_BASE             <ollama runtime>         Ollama-compatible base URL
@@ -50,10 +54,11 @@ import json
 import os
 import threading
 import time
+import tempfile
 from collections import deque
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -72,10 +77,49 @@ def _csv(name: str, default: str) -> list[str]:
 
 
 RISK_TIERS = _csv("OPA_RISK_TIERS", "low,medium,high,severe")
-BLOCK_TIERS = [t for t in _csv("OPA_BLOCK_TIERS", "high,severe") if t in RISK_TIERS]
 DEFAULT_TIER = (os.getenv("OPA_DEFAULT_TIER", "low").strip().lower() or "low")
 if DEFAULT_TIER not in RISK_TIERS:
     DEFAULT_TIER = RISK_TIERS[0]
+
+# The block decision is driven by a SINGLE operator-set THRESHOLD (the Radar slider):
+# any tool call whose tier is at or ABOVE this tier blocks the question (which surfaces
+# as a blocked answer in the user UI). The threshold is mutable at runtime via
+# POST /threshold and persisted so the slider position survives a restart.
+THRESHOLD_PATH = os.getenv(
+    "OPA_THRESHOLD_PATH",
+    os.path.join(tempfile.gettempdir(), "awcp-opa-block-threshold.json"),
+)
+
+
+def _block_tiers_at_or_above(threshold: str) -> list[str]:
+    """Expand one threshold tier into the set of tiers that BLOCK (it + everything
+    more severe), e.g. threshold 'high' ⇒ ['high', 'severe']."""
+    try:
+        return RISK_TIERS[RISK_TIERS.index(threshold):]
+    except ValueError:
+        return list(RISK_TIERS)
+
+
+def _seed_threshold() -> str:
+    """Initial threshold: a persisted slider value wins (survives restarts), else the
+    OPA_BLOCK_THRESHOLD env, else the least-severe tier named in the legacy
+    OPA_BLOCK_TIERS env (default keeps the old high/severe behaviour)."""
+    try:
+        with open(THRESHOLD_PATH, encoding="utf-8") as fh:
+            t = str(json.load(fh).get("threshold", "")).strip().lower()
+        if t in RISK_TIERS:
+            return t
+    except Exception:                       # noqa: BLE001 — no/invalid file ⇒ fall through
+        pass
+    env = os.getenv("OPA_BLOCK_THRESHOLD", "").strip().lower()
+    if env in RISK_TIERS:
+        return env
+    legacy = [t for t in _csv("OPA_BLOCK_TIERS", "high,severe") if t in RISK_TIERS]
+    return min(legacy, key=RISK_TIERS.index) if legacy else RISK_TIERS[-1]
+
+
+BLOCK_THRESHOLD = _seed_threshold()
+BLOCK_TIERS = _block_tiers_at_or_above(BLOCK_THRESHOLD)
 
 CACHE_ENABLED = os.getenv("OPA_SLM_CACHE", "true").strip().lower() == "true"
 RECENT_MAX = int(os.getenv("OPA_RECENT_MAX", "200"))
@@ -136,6 +180,17 @@ def _persist_tier(tool_name: str, rec: dict) -> None:
     if not CACHE_ENABLED:
         return
     db.upsert_tier(tool_name, rec)
+
+
+def _persist_threshold() -> None:
+    """Best-effort persist of the operator's block threshold so the Radar slider
+    survives a restart. Always on — unlike the SLM tier cache, this is operator
+    intent, not a recomputable optimisation."""
+    try:
+        with open(THRESHOLD_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"threshold": BLOCK_THRESHOLD}, fh)
+    except Exception:                       # noqa: BLE001 — persistence is best-effort
+        pass
 
 
 def tier_for(tool_name: str, tool_input: dict | None = None, question: str = "") -> dict:
@@ -228,6 +283,10 @@ class EvaluateRequest(BaseModel):
     question: str = ""
 
 
+class ThresholdRequest(BaseModel):
+    threshold: str
+
+
 @app.get("/")
 def about() -> FileResponse:
     return FileResponse(os.path.join(_HERE, "about.html"))
@@ -236,9 +295,28 @@ def about() -> FileResponse:
 @app.get("/health")
 def health() -> dict:
     return {"ok": True, "service": "opa-agent", "tiers": RISK_TIERS,
-            "block_tiers": BLOCK_TIERS, "default_tier": DEFAULT_TIER,
-            "opa": bool(OPA_URL), "slm": _SLM.info(), "tools_classified": len(_TIERS),
+            "block_tiers": BLOCK_TIERS, "block_threshold": BLOCK_THRESHOLD,
+            "default_tier": DEFAULT_TIER, "opa": bool(OPA_URL),
+            "slm": _SLM.info(), "tools_classified": len(_TIERS),
             "db": db.enabled()}
+
+
+@app.post("/threshold")
+def set_threshold(req: ThresholdRequest) -> dict:
+    """Operator sets the SINGLE block threshold via the Radar slider: any tool call
+    whose tier is at or above this tier is blocked (which blocks the question in the
+    user UI). Recomputes the block set, persists it, and returns the new state."""
+    global BLOCK_THRESHOLD, BLOCK_TIERS
+    want = (req.threshold or "").strip().lower()
+    if want not in RISK_TIERS:
+        raise HTTPException(status_code=400,
+                            detail=f"threshold must be one of {RISK_TIERS}")
+    with _lock:
+        BLOCK_THRESHOLD = want
+        BLOCK_TIERS = _block_tiers_at_or_above(want)
+        _persist_threshold()
+    return {"block_threshold": BLOCK_THRESHOLD, "block_tiers": BLOCK_TIERS,
+            "tiers": RISK_TIERS}
 
 
 @app.get("/tools")
@@ -248,7 +326,8 @@ def tools() -> dict:
     with _lock:
         by_tool = {t: r["tier"] for t, r in _TIERS.items()}
     return {"tiers": RISK_TIERS, "block_tiers": BLOCK_TIERS,
-            "default_tier": DEFAULT_TIER, "policy": by_tool, "read_only": True}
+            "block_threshold": BLOCK_THRESHOLD, "default_tier": DEFAULT_TIER,
+            "policy": by_tool, "read_only": True}
 
 
 @app.get("/tiers")
@@ -269,8 +348,8 @@ def tiers() -> dict:
         mem_recent.reverse()                 # newest first for the UI
         recent = mem_recent
     return {"enabled": True, "tiers": RISK_TIERS, "block_tiers": BLOCK_TIERS,
-            "default_tier": DEFAULT_TIER, "slm": _SLM.info(),
-            "by_tool": by_tool, "recent": recent}
+            "block_threshold": BLOCK_THRESHOLD, "default_tier": DEFAULT_TIER,
+            "slm": _SLM.info(), "by_tool": by_tool, "recent": recent}
 
 
 @app.post("/evaluate")

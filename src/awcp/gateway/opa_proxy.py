@@ -17,6 +17,7 @@ import os
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 router = APIRouter(tags=["tool-policy"])
 
@@ -27,8 +28,8 @@ OPA_AGENT_TIMEOUT = float(os.getenv("AWCP_OPA_AGENT_TIMEOUT", "30"))
 def _disabled() -> dict:
     """Shape returned when no OPA agent is configured — the Radar shows an empty,
     inert tier panel instead of an error."""
-    return {"enabled": False, "tiers": [], "block_tiers": [], "default_tier": "",
-            "slm": {"enabled": False, "model": "", "base": ""},
+    return {"enabled": False, "tiers": [], "block_tiers": [], "block_threshold": "",
+            "default_tier": "", "slm": {"enabled": False, "model": "", "base": ""},
             "by_tool": {}, "recent": []}
 
 
@@ -56,6 +57,18 @@ async def get_tiers() -> dict:
     out = await _opa("GET", "/tiers")
     out["enabled"] = True
     return out
+
+
+class ThresholdBody(BaseModel):
+    threshold: str
+
+
+@router.post("/opa/threshold")
+async def set_threshold(body: ThresholdBody) -> dict:
+    """Operator-set block threshold (the Radar slider) → forwarded to the OPA agent.
+    Any tool call whose SLM tier is at or above this tier blocks the question in the
+    user UI. Returns the new block set; 503 when no OPA agent is wired."""
+    return await _opa("POST", "/threshold", {"threshold": body.threshold})
 
 
 @router.get("/opa/decisions/{task_id}")

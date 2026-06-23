@@ -64,6 +64,10 @@ export const testGuard = (agentId, action) =>
 // tool-call decisions (newest first) the Radar renders as tier bars. Returns an
 // inert { enabled:false } shape when no OPA agent is wired, so the Radar degrades.
 export const getToolTiers = () => call('GET', '/opa/tiers')
+// Operator slider: set the single block threshold. Any tool call whose SLM tier is
+// at or above this tier blocks the question in the user UI. Persisted by the OPA agent.
+export const setBlockThreshold = (threshold) =>
+  call('POST', '/opa/threshold', { threshold })
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>

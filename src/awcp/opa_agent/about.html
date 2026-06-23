@@ -33,11 +33,12 @@
       <strong>risk tier</strong> —
       <span class="tier low">low</span> · <span class="tier medium">medium</span> ·
       <span class="tier high">high</span> · <span class="tier severe">severe</span>.
-      The agent then decides <strong>allow / block</strong>
-      (block when <span class="tier high">high</span>/<span class="tier severe">severe</span>)
-      and records a structured JSON per question, so the Radar can draw a tier bar for
-      every tool call the five worker agents make. The block decision runs through
-      <strong>OPA / Rego</strong> when configured, with a fail-secure fallback.
+      The agent then decides <strong>allow / block</strong> against a single operator-set
+      <strong>block threshold</strong> (a slider on the Radar): any call whose tier is
+      <em>at or above</em> the threshold is blocked. It records a structured JSON per
+      question, so the Radar can draw a tier bar for every tool call the five worker
+      agents make. The block decision runs through <strong>OPA / Rego</strong> when
+      configured, with a fail-secure fallback.
     </div>
 
     <div class="card">
@@ -46,6 +47,7 @@
         <tr><td>GET /tiers</td><td>tiers, block set, per-tool SLM tiers, recent calls (Radar feed)</td></tr>
         <tr><td>GET /tools</td><td>tiers, block set, per-tool tier map (read-only)</td></tr>
         <tr><td>POST /evaluate</td><td>reason a tool call's tier · decide · record JSON</td></tr>
+        <tr><td>POST /threshold</td><td>set the block threshold (Radar slider) · persisted</td></tr>
         <tr><td>GET /decisions/{task_id}</td><td>the per-question tool-risk JSON</td></tr>
       </table>
     </div>
