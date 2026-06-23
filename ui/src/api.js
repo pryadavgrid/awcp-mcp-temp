@@ -59,6 +59,12 @@ export const setGuard = (denyTools, enabled = true) =>
 export const testGuard = (agentId, action) =>
   call('POST', '/hooks/guard/test', { agent_id: agentId, action })
 
+// ── tool risk tiers (the hidden SLM OPA agent, via the gateway proxy) ──────────
+// The SLM-reasoned tier vocabulary + block set + per-tool tiers + the recent
+// tool-call decisions (newest first) the Radar renders as tier bars. Returns an
+// inert { enabled:false } shape when no OPA agent is wired, so the Radar degrades.
+export const getToolTiers = () => call('GET', '/opa/tiers')
+
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>
   `${TEMPORAL_BASE}/namespaces/default/workflows/${encodeURIComponent(wfId)}`

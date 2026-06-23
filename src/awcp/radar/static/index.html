@@ -105,6 +105,16 @@
   .ev-hk{background:rgba(56,189,248,.10);color:var(--accent)}
   .ev-deny{background:var(--red-bg);color:var(--red)}
   .dec-deny{color:var(--red);font-family:var(--mono);font-size:11px}
+  /* tool risk tiers (SLM-reasoned) — segmented level-meter bar */
+  .tbar{display:inline-flex;gap:3px;vertical-align:middle}
+  .tseg{width:26px;height:9px;border-radius:3px;background:var(--border)}
+  .tlabel{font-family:var(--mono);font-size:11px;font-weight:700;margin-left:9px;text-transform:capitalize}
+  .tlegend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:11.5px;color:var(--muted)}
+  .tlegend .li{display:inline-flex;gap:6px;align-items:center}
+  .tlegend .sw{width:16px;height:9px;border-radius:3px}
+  .tdec-block{color:var(--red);font-family:var(--mono);font-size:11px;font-weight:700}
+  .tdec-allow{color:var(--active);font-family:var(--mono);font-size:11px}
+  .treason{color:var(--muted);font-size:11px}
 </style>
 </head>
 <body>
@@ -146,6 +156,7 @@
     <div class="tab sel" id="tab-inv" onclick="showTab('inv')">Inventory</div>
     <div class="tab" id="tab-ev" onclick="showTab('ev')">Recent decisions</div>
     <div class="tab" id="tab-hooks" onclick="showTab('hooks')">Agent Hooks</div>
+    <div class="tab" id="tab-tiers" onclick="showTab('tiers')">Tool Risk Tiers</div>
   </div>
 
   <!-- ===== Inventory tab ===== -->
@@ -193,6 +204,19 @@
     <div class="empty" id="hooks-empty" style="display:none">Agent-hooks package not mounted (src/awcp/agent_hooks absent or AWCP_HOOKS_ENABLED=false).</div>
   </div>
 
+  <!-- ===== Tool Risk Tiers tab ===== -->
+  <div id="view-tiers" class="hidden">
+    <div class="hk-h" id="tiers-head">Tool risk tiers <span style="text-transform:none;color:var(--muted);font-weight:400">· a small language model reasons the risk tier of every tool call the agents make · high/severe is blocked</span></div>
+    <div class="tlegend" id="tiers-legend"></div>
+    <table>
+      <thead><tr>
+        <th>When</th><th>Agent</th><th>Tool</th><th>Risk tier</th><th>Decision</th>
+      </tr></thead>
+      <tbody id="tier-rows"></tbody>
+    </table>
+    <div class="empty" id="tiers-empty" style="display:none">No tool calls yet — ask a question in the chat UI and every agent tool call appears here with its SLM-reasoned risk tier.</div>
+  </div>
+
   <div class="foot">Polling every 3s · scanner + onboarding run in the background · "Recent decisions" is a live audit view (not the durable evidence ledger).</div>
 </div>
 
@@ -212,7 +236,7 @@ function tokCell(id){
 function ago(ts){ if(!ts) return ''; const s=Math.max(0,Math.floor(Date.now()/1000-ts)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); }
 function esc(s){ return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 function showTab(t){ TAB=t;
-  ['inv','ev','hooks'].forEach(x=>{
+  ['inv','ev','hooks','tiers'].forEach(x=>{
     document.getElementById('tab-'+x).classList.toggle('sel',t===x);
     document.getElementById('view-'+x).classList.toggle('hidden',t!==x);
   });
@@ -338,6 +362,57 @@ async function toggleHook(name,enabled){
   renderHooks();
 }
 
+// ── Tool Risk Tiers (the hidden SLM OPA agent, via the gateway proxy) ──────────
+// A small language model reasons the risk tier of every tool call the agents make.
+// We draw it as a segmented level-meter bar (low → severe). Tier colours are
+// position-based across the (env-driven) tier vocabulary, so ANY tier list works
+// with nothing hardcoded; the meter fills up to and including the call's tier.
+const TIER_RAMP=['#10b981','#f59e0b','#fb923c','#f87171'];   // green, amber, orange, red
+function tierColor(tier,tiers){
+  const i=Math.max(0,tiers.indexOf(tier)), span=Math.max(1,tiers.length-1);
+  return TIER_RAMP[Math.min(TIER_RAMP.length-1,Math.round((i/span)*(TIER_RAMP.length-1)))];
+}
+function tierBar(tier,tiers){
+  const active=Math.max(0,tiers.indexOf(tier)), col=tierColor(tier,tiers);
+  return '<span class="tbar" title="'+esc(tier)+' ('+(active+1)+'/'+tiers.length+')">'+
+    tiers.map((t,i)=>`<span class="tseg" style="background:${i<=active?col:'var(--border)'}"></span>`).join('')+
+    '</span>';
+}
+async function renderTiers(){
+  const legend=document.getElementById('tiers-legend'),
+        rows=document.getElementById('tier-rows'),
+        empty=document.getElementById('tiers-empty'),
+        head=document.getElementById('tiers-head');
+  let d=null;
+  try{ d=await (await fetch('/opa/tiers')).json(); }catch(e){}
+  if(!d || !d.enabled){                       // OPA agent not wired → graceful message
+    legend.innerHTML=''; rows.innerHTML='';
+    empty.style.display='block';
+    empty.textContent='The OPA agent isn’t wired to the gateway — start it (AWCP_OPA_AGENT_URL) so tool calls get SLM-reasoned tiers.';
+    return;
+  }
+  const tiers=d.tiers||[], block=d.block_tiers||[], recent=d.recent||[], slm=d.slm||{};
+  // legend: the tier scale + the model + the block set
+  legend.innerHTML =
+    tiers.map(t=>`<span class="li"><span class="sw" style="background:${tierColor(t,tiers)}"></span>`+
+      `<span style="color:${tierColor(t,tiers)};text-transform:capitalize">${esc(t)}</span>`+
+      `${block.includes(t)?' <span class="tdec-block">⛔</span>':''}</span>`).join('')+
+    `<span class="li" style="margin-left:auto">model <span class="mono" style="color:var(--text)">${esc(slm.model||'—')}</span></span>`+
+    `<span class="li">blocks <span class="tdec-block">${esc((block||[]).join(', ')||'—')}</span></span>`;
+  empty.style.display = recent.length ? 'none':'block';
+  empty.textContent='No tool calls yet — ask a question in the chat UI and every agent tool call appears here with its SLM-reasoned risk tier.';
+  rows.innerHTML = recent.map(c=>{
+    const blocked=c.decision==='block', col=tierColor(c.risk_tier,tiers);
+    return `<tr${blocked?' style="background:var(--red-bg)"':''}>
+      <td class="mono" style="white-space:nowrap;color:var(--muted)">${ago(c.ts)}</td>
+      <td class="mono" style="color:var(--muted)">${esc(c.agent_id||'—')}</td>
+      <td class="mono" title="${esc(c.reasoning||'')}">${esc(c.tool_name||'')}</td>
+      <td>${tierBar(c.risk_tier,tiers)}<span class="tlabel" style="color:${col}" title="${esc(c.reasoning||'')}">${esc(c.risk_tier||'')}</span></td>
+      <td>${blocked?'<span class="tdec-block">⛔ blocked</span>':'<span class="tdec-allow">allowed</span>'}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function tick(){
   let health={};
   try{ AGENTS=await (await fetch('/agents')).json(); }catch(e){ return; }
@@ -362,7 +437,8 @@ async function tick(){
   }
   if(TAB==='inv') renderInventory();
   else if(TAB==='ev') renderEvents();
-  else renderHooks();
+  else if(TAB==='hooks') renderHooks();
+  else if(TAB==='tiers') renderTiers();
 }
 ['f-status','f-kind','f-auton','f-live','f-text'].forEach(id=>
   document.getElementById(id).addEventListener('input',renderInventory));

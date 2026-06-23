@@ -29,7 +29,7 @@ import subprocess
 
 # The bundle of standalone agents. Override with AWCP_AGENTS_DIR.
 AGENTS_DIR = os.getenv(
-    "AWCP_AGENTS_DIR", "/Users/pchandra/CAPSTONE/DEMO1/Agents/awcp-agents"
+    "AWCP_AGENTS_DIR", "/Users/pchandra/CAPSTONE/DEMO2/awcp-agents"
 )
 
 # Where launched agents should send governance + execution events. Points at
@@ -42,13 +42,25 @@ AGENT_RADAR_URL = os.getenv(
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 AGENT_HOST = os.getenv("AWCP_AGENT_HOST", "localhost")
 
+# Infra agents that live in the bundle but are NOT user-facing task workers (e.g.
+# the hidden OPA tool-policy PDP). They must not appear in the user UI's agent
+# picker or be polled for /info. Env-driven (comma list) so nothing is hardcoded;
+# defaults to the OPA agent. Same spirit as AGENT_RADAR_EXCLUDE (the radar side).
+_EXCLUDED = {
+    n.strip() for n in os.getenv("AWCP_USER_AGENTS_EXCLUDE", "opa_agent").split(",")
+    if n.strip()
+}
+
 
 def discover() -> list[dict]:
-    """Every sub-folder with a run.sh is an agent. id = folder name."""
+    """Every sub-folder with a run.sh is an agent. id = folder name. Infra agents
+    in AWCP_USER_AGENTS_EXCLUDE (e.g. the OPA agent) are skipped — not user-facing."""
     agents: list[dict] = []
     if not os.path.isdir(AGENTS_DIR):
         return agents
     for name in sorted(os.listdir(AGENTS_DIR)):
+        if name in _EXCLUDED:
+            continue
         d = os.path.join(AGENTS_DIR, name)
         run = os.path.join(d, "run.sh")
         if os.path.isdir(d) and os.path.isfile(run):

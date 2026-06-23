@@ -1,0 +1,8 @@
+# OPA Agent — hidden, SLM-reasoned tool-call policy decision point. Python >= 3.10.
+# It resolves each tool's risk tier by reasoning with a SMALL local model (Ollama)
+# and decides allow/block, optionally via an OPA (Rego) server. Deliberately minimal
+# — the small model runs in the local runtime, so no model SDK is needed here.
+fastapi>=0.95.0
+uvicorn[standard]>=0.22.0
+httpx>=0.24.0            # SLM (Ollama) call + OPA query + Laminar logging to the gateway
+pydantic>=2.2.0

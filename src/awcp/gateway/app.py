@@ -49,6 +49,7 @@ from awcp.observability.middleware import instrument_fastapi, instrument_request
 # radar now exposes an APIRouter (not a standalone FastAPI app), included below.
 from awcp.radar.api import router as radar_router, lifespan as radar_lifespan
 from awcp.gateway.user import router as user_router
+from awcp.gateway.opa_proxy import router as opa_proxy_router
 
 
 @asynccontextmanager
@@ -79,6 +80,9 @@ instrument_requests()          # outbound HTTP calls are auto-traced
 
 # ── USER routes ───────────────────────────────────────────────────────────────
 app.include_router(user_router)
+
+# ── Tool Risk Tiers proxy → the hidden SLM OPA agent (per-call tiers + decisions) ─
+app.include_router(opa_proxy_router)
 
 # ── AWCP control-plane routes (mounted at ROOT for a single-port surface) ────
 #   The radar router carries the REGISTRY endpoints (/agents, /tasks/execution/*,

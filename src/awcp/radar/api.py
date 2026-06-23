@@ -75,6 +75,42 @@ STATE: dict = {
 # Env-driven task queue for execution workflows (separate from onboarding)
 EXEC_TASK_QUEUE = os.getenv("AGENT_EXEC_TASK_QUEUE", "agent-task-execution")
 
+# ── OPA agent (hidden tool-call PDP) — env-gated, off by default ───────────────
+# When AWCP_OPA_AGENT_URL is set, every tool_called/web_search execution event is
+# evaluated by the OPA agent for its operator-set risk tier; a high/severe tier
+# finishes the task BLOCKED (surfaced in the user UI like the policy-guard). The
+# OPA agent also records the per-question tool-risk JSON + logs the call to
+# Laminar. Unset ⇒ this whole hook is a no-op (behaviour unchanged).
+OPA_AGENT_URL = os.getenv("AWCP_OPA_AGENT_URL", "").strip().rstrip("/")
+OPA_AGENT_TIMEOUT = float(os.getenv("AWCP_OPA_AGENT_TIMEOUT", "3"))
+# Fail-open: if the OPA agent is unreachable, allow the tool (default). Set false
+# to fail CLOSED (treat an unreachable PDP as a block) for stricter governance.
+OPA_AGENT_FAIL_OPEN = os.getenv("AWCP_OPA_AGENT_FAIL_OPEN", "true").strip().lower() == "true"
+
+
+async def _opa_tool_evaluate(agent_id: str, task_id: str, tool: str, event: dict) -> dict:
+    """Ask the OPA agent to tier + decide ONE tool call (it also records the JSON
+    + logs Laminar). Returns its decision dict; fail-open/closed per config when the
+    OPA agent is unset or unreachable — the PDP never crashes a task."""
+    if not OPA_AGENT_URL:
+        return {"decision": "allow", "risk_tier": None, "engine": "disabled"}
+    try:
+        async with httpx.AsyncClient(timeout=OPA_AGENT_TIMEOUT) as c:
+            r = await c.post(f"{OPA_AGENT_URL}/evaluate", json={
+                "agent_id": agent_id, "task_id": task_id, "tool_name": tool,
+                "tool_input": event.get("extra") or {},
+                "question": event.get("query", ""),
+            })
+            r.raise_for_status()
+            return r.json()
+    except Exception as exc:  # noqa: BLE001 — the PDP must never break a task
+        if OPA_AGENT_FAIL_OPEN:
+            log.warning("radar.opa_agent.unreachable tool=%s error=%r — fail-open allow", tool, exc)
+            return {"decision": "allow", "risk_tier": None, "engine": "opa_agent_error"}
+        log.warning("radar.opa_agent.unreachable tool=%s error=%r — fail-CLOSED block", tool, exc)
+        return {"decision": "block", "risk_tier": None, "engine": "opa_agent_error",
+                "reason": f"tool '{tool}' blocked — OPA agent unreachable (fail-closed)"}
+
 # ----------------------------------------------------------------------
 # Closed-loop telemetry: the quarantine decision reflects telemetry the radar
 # has actually OBSERVED in execution, not a flag the agent declared.
@@ -1002,6 +1038,7 @@ try:
         # and the gate / gateway already deny this agent immediately and live.
 
     _laminar.init_laminar(get_agent=REGISTRY.get,
+                          list_agents=REGISTRY.all,
                           on_breach=_on_token_breach,
                           record_event=_record_event)
     router.include_router(_laminar.router)
@@ -1045,6 +1082,28 @@ def _hook(hook_type, **data):
     except Exception as exc:  # noqa: BLE001 — hooks must never break a request
         log.debug("radar.hook.dispatch_failed type=%r error=%r", hook_type, exc)
         return None
+
+
+def _gate_guard(agent_id: str, decision: dict, action: str, scope: str,
+                write: bool, risk: str) -> dict:
+    """Apply the agent-hooks GATE_EVALUATED GUARD on top of a PDP decision.
+
+    A GUARD hook (e.g. the operator's policy-guard deny-list) can TIGHTEN an
+    `allow` into a `deny` but never the reverse (see GUARD_POINTS). Used by BOTH
+    the write-action gate AND the execution-event endpoint, so blocking a tool by
+    name takes effect whether the agent consults the gate (MCP path) or just runs
+    the tool itself and reports it as a step (self-instrumented bundle path)."""
+    if not _HOOKS:
+        return decision
+    outcome = _hook(_HT.GATE_EVALUATED, agent_id=agent_id, action=action,
+                    scope=scope, write=write, decision=decision["decision"],
+                    mode=decision["mode"], risk=risk)
+    if outcome is not None and outcome.is_deny and decision["decision"] == "allow":
+        # Tighten to a deny and align the gate kind so the durable
+        # policy_decisions.decision stays CHECK-legal ("denied").
+        return {**decision, "decision": "deny", "gate": "denied",
+                "mode": "hook_guard", "reason": outcome.reason}
+    return decision
 
 
 def _slug(name: str) -> str:
@@ -1362,18 +1421,12 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     # Resolve any approval-token requirement (issue/verify) — magazine Scenario B.
     decision = _resolve_approval(e, req, decision)
     # Agent-hooks GUARD: a custom/operator policy hook may TIGHTEN an allow into a
-    # deny (it can never loosen a deny — see GUARD_POINTS). Composed ON TOP of the
-    # OPA/policy decision so both apply. Run BEFORE metrics + the durable record so
-    # those reflect the FINAL decision.
-    if _HOOKS:
-        _outcome = _hook(_HT.GATE_EVALUATED, agent_id=agent_id, action=req.action,
-                         scope=req.scope, write=req.write,
-                         decision=decision["decision"], mode=decision["mode"], risk=e.risk)
-        if _outcome is not None and _outcome.is_deny and decision["decision"] == "allow":
-            # Tighten to a deny and align the gate kind so the durable
-            # policy_decisions.decision stays CHECK-legal ("denied").
-            decision = {**decision, "decision": "deny", "gate": "denied",
-                        "mode": "hook_guard", "reason": _outcome.reason}
+    # deny (never loosen — see GUARD_POINTS). Composed ON TOP of the OPA/policy
+    # decision; run BEFORE metrics + the durable record so those reflect the final
+    # decision. The SAME guard is applied to self-instrumented tool steps in the
+    # execution-event endpoint, so a deny-listed tool is blocked on either path.
+    decision = _gate_guard(agent_id, decision, action=req.action, scope=req.scope,
+                           write=req.write, risk=e.risk)
 
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
@@ -1390,8 +1443,17 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     # Durable mirror: the gate kind drives governance.policy_decisions.decision
     # (auto_authorized | awaiting_token | awaiting_operator | denied). Allows stay
     # in the live ring only; denies/holds are persisted (see _record_event).
-    _record_event("gate", agent_id, f"{decision['decision']} ({decision['mode']})",
-                  action=req.action, decision=decision.get("gate"),
+    # Surface the DECIDER in the live label so the UI shows who allowed/denied —
+    # "OPA" / "policy" for the gate engine, just like "hook_guard" marks the hooks
+    # layer. The hook-guard mode already names its source, so it's left as-is.
+    _engine = decision.get("engine", "policy")
+    if decision["mode"] == "hook_guard":
+        _detail = f"{decision['decision']} ({decision['mode']})"
+    else:
+        _src = "OPA" if _engine == "opa" else _engine
+        _detail = f"{decision['decision']} ({decision['mode']} · {_src})"
+    _record_event("gate", agent_id, _detail,
+                  action=req.action, decision=decision.get("gate"), engine=_engine,
                   scope=req.scope or None, reason=decision.get("reason"),
                   token_id=decision.get("token_id"), workflow_id=req.workflow_id or None)
     # Notify hooks of a final block (after OPA/policy + guard + token resolution).
@@ -1772,6 +1834,81 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
             elif _st == "exhausted":
                 _hook(_HT.BUDGET_EXHAUSTED, agent_id=agent_id, task_id=task_id,
                       used=token_budget.get("used_tokens"), budget=token_budget.get("budget_tokens"))
+
+    # Tool-level GUARD (self-instrumented path): a bundle agent runs its own tools
+    # and reports each as an event, so the GATE_EVALUATED guard never sees them via
+    # the write-action gate (the agent only consults the gate for writes, and runs
+    # reads like web_search directly). Apply the SAME guard here for tool-bearing
+    # steps, so an operator's policy-guard deny-list blocks a tool (e.g. web_search)
+    # on this path too. Scoped to the deny-list veto via is_write=False (reads are
+    # otherwise allowed); a deny stops the task exactly like the token hard-stop —
+    # stop forwarding the event and finish the workflow "blocked".
+    if _HOOKS and agent_id and event.get("type") in ("web_search", "tool_called"):
+        _tool = event.get("tool_name") or event.get("type")
+        _ent = REGISTRY.get(agent_id)
+        if _ent is not None and _tool:
+            _gd = _gate_guard(
+                agent_id,
+                {"decision": "allow", "gate": "auto_authorized", "mode": "tool_step"},
+                action=_tool, scope="", write=False, risk=_ent.risk,
+            )
+            if _gd["decision"] == "deny":
+                _record_event("gate", agent_id, f"deny ({_gd['mode']})",
+                              action=_tool, decision="denied",
+                              reason=_gd.get("reason"), task_id=task_id)
+                _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=_tool,
+                      reason=str(_gd.get("reason") or _gd.get("mode", "")), task_id=task_id)
+                wf_id = STATE["exec_workflows"].pop(task_id, None)
+                STATE["exec_agents"].pop(task_id, None)
+                if wf_id and STATE["temporal"] and STATE["client"]:
+                    try:
+                        handle = STATE["client"].get_workflow_handle(wf_id)
+                        await handle.signal(
+                            AgentExecutionWorkflow.finish,
+                            {"status": "blocked",
+                             "error": f"tool '{_tool}' blocked by policy-guard"},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("radar.hook.block.finish_failed task_id=%s error=%r",
+                                    task_id, exc)
+                log.warning("radar.exec.event.blocked agent_id=%s task_id=%s tool=%s reason=policy_guard",
+                            agent_id, task_id, _tool)
+                return {"ok": False, "reason": "blocked_by_policy_guard",
+                        "tool": _tool, "decision": "deny", "mode": _gd.get("mode"),
+                        "gate_reason": _gd.get("reason")}
+
+    # OPA tool-tier gate (the hidden OPA agent): tier EVERY tool/web_search call by
+    # its operator-set risk tier, record the per-question JSON + log it to Laminar,
+    # and BLOCK the answer when the tier is high/severe — reusing the same
+    # finish-blocked path as the policy-guard so the user UI surfaces the severity.
+    if OPA_AGENT_URL and agent_id and event.get("type") in ("web_search", "tool_called"):
+        _tool = event.get("tool_name") or event.get("type")
+        if _tool:
+            _opa = await _opa_tool_evaluate(agent_id, task_id, _tool, event)
+            if _opa.get("decision") == "block":
+                _why = _opa.get("reason") or (
+                    f"tool '{_tool}' is {_opa.get('risk_tier')} risk — blocked by OPA tool policy")
+                _record_event("gate", agent_id, f"deny (opa_tool_tier:{_opa.get('risk_tier')})",
+                              action=_tool, decision="denied", reason=_why, task_id=task_id)
+                _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=_tool,
+                      reason=_why, task_id=task_id)
+                wf_id = STATE["exec_workflows"].pop(task_id, None)
+                STATE["exec_agents"].pop(task_id, None)
+                if wf_id and STATE["temporal"] and STATE["client"]:
+                    try:
+                        handle = STATE["client"].get_workflow_handle(wf_id)
+                        await handle.signal(
+                            AgentExecutionWorkflow.finish,
+                            {"status": "blocked", "error": _why},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("radar.opa.block.finish_failed task_id=%s error=%r",
+                                    task_id, exc)
+                log.warning("radar.exec.event.blocked agent_id=%s task_id=%s tool=%s tier=%s reason=opa_tool_tier",
+                            agent_id, task_id, _tool, _opa.get("risk_tier"))
+                return {"ok": False, "reason": "blocked_by_opa_tool_tier",
+                        "tool": _tool, "decision": "deny",
+                        "risk_tier": _opa.get("risk_tier"), "gate_reason": _why}
 
     # Degradation directives (magazine Step 04, the half the control plane owns):
     #  • hand the runtime its CURRENT stage directives every step so it applies

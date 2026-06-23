@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from awcp.laminar import bridge, budget, config
+from awcp.laminar import bridge, budget, config, estimator
 from awcp.laminar.ledger import LEDGER
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -34,6 +34,21 @@ router = APIRouter(prefix="/laminar", tags=["laminar"])
 
 class BudgetRequest(BaseModel):
     tokens: int                 # tokens per window; 0 clears the override
+
+
+class RecordRequest(BaseModel):
+    """A metered call to fold into the token ledger. Used by the OPA agent to log
+    every governed TOOL call under the calling agent. Either pass explicit
+    input/output token counts, or pass `text` and let the server estimate the
+    input tokens with the same tiktoken estimator the LLM gateway uses."""
+    agent_id: str
+    model: str = ""
+    tool_name: str = ""
+    task_id: str = "tool"
+    step: str = "tool_called"
+    text: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class PolicyRequest(BaseModel):
@@ -98,6 +113,24 @@ def set_budget(agent_id: str, req: BudgetRequest) -> dict:
     return {"agent_id": agent_id,
             "budget_tokens": budget.budget_for(agent_id),
             "override": req.tokens > 0}
+
+
+@router.post("/record")
+def record(req: RecordRequest) -> dict:
+    """Fold one metered call (e.g. a governed tool call from the OPA agent) into
+    the ledger so it shows in the Token Monitor / Laminar under the calling agent.
+    No-op (records=None) when laminar is disabled — fail-open like the rest."""
+    model = req.model or (f"tool:{req.tool_name}" if req.tool_name else "tool")
+    tin = req.input_tokens
+    if tin is None:
+        tin = (estimator._get(estimator._encoding_for(model)).estimate(req.text)
+               if req.text else 0)
+    tout = int(req.output_tokens or 0)
+    evaluation = bridge.record_usage(req.agent_id, model, int(tin), tout,
+                                     req.task_id, req.step)
+    return {"ok": True, "agent_id": req.agent_id, "model": model,
+            "input_tokens": int(tin), "output_tokens": tout,
+            "recorded": evaluation is not None, "evaluation": evaluation}
 
 
 @router.post("/reset/{agent_id}")

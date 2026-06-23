@@ -25,16 +25,27 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import tempfile
 import time
+import uuid
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from temporalio.client import Client
 
 from awcp.gateway import agents_fs as fs
 
 router = APIRouter(prefix="/user", tags=["user"])
+
+# Where attached files land. The bundle agents run on THIS host, so a gateway-
+# local path is readable by the agent process — a file-aware agent (e.g. File
+# Inspector) opens the real bytes via the `FILE_PATH:` token the UI appends to
+# the goal. Override the dir with AWCP_UPLOAD_DIR. Cap uploads to keep a stray
+# huge file from filling the disk.
+UPLOAD_DIR = os.getenv("AWCP_UPLOAD_DIR", os.path.join(tempfile.gettempdir(), "awcp-uploads"))
+MAX_UPLOAD_BYTES = int(os.getenv("AWCP_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 # Temporal Web UI base — used only to build deep links to the task's workflow.
 TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
@@ -287,6 +298,120 @@ async def _extract_timeline(workflow_id: str | None) -> list[dict]:
         return []
 
 
+async def _workflow_outcome(workflow_id: str | None) -> dict:
+    """The AgentExecutionWorkflow's final result dict, or {} if it hasn't
+    completed / is unavailable.
+
+    This is the CONTROL-PLANE outcome and is AUTHORITATIVE over the agent's own
+    task record. When the radar's policy-guard denies a tool the workflow finishes
+    with e.g. {"status": "blocked", "error": "tool 'web_search' blocked by
+    policy-guard"} — even though the bundle agent may have run the tool and
+    produced an answer in its own record. The gateway uses this to suppress the
+    answer and show the block in the user UI."""
+    if not workflow_id:
+        return {}
+    try:
+        client = await _temporal_client()
+        handle = client.get_workflow_handle(workflow_id)
+        async for e in handle.fetch_history_events():
+            attrs = e.workflow_execution_completed_event_attributes
+            if attrs and attrs.result and attrs.result.payloads:
+                decoded = await client.data_converter.decode(list(attrs.result.payloads))
+                if decoded and isinstance(decoded[0], dict):
+                    return decoded[0]
+        return {}
+    except Exception:
+        # Workflow still running / not found / Temporal down — no outcome yet.
+        return {}
+
+
+def _agent_id_from_workflow(workflow_id: str | None, task_id: str) -> str:
+    """Recover the radar agent id from `task-{agent_id}-{task_id}`. task_id is known
+    exactly, so this is unambiguous even though agent_id itself contains hyphens."""
+    if workflow_id and workflow_id.startswith("task-") and workflow_id.endswith(f"-{task_id}"):
+        return workflow_id[len("task-"):-(len(task_id) + 1)]
+    return ""
+
+
+def _token_exhausted(agent_id: str) -> dict | None:
+    """Live token-budget state when the agent is over budget, else None. Covers the
+    block that happens at execution START (which creates no workflow, so the reason
+    would otherwise be lost). laminar runs in this same process (the radar inits
+    it), so this is a cheap in-process read; safe no-op if laminar is absent."""
+    if not agent_id:
+        return None
+    try:
+        from awcp import laminar
+        if laminar.is_exhausted(agent_id):
+            return laminar.budget_state(agent_id)
+    except Exception:
+        pass
+    return None
+
+
+def _classify_block(reason: str) -> tuple[str, str]:
+    """Map a block reason to (blocked_by, title) so the UI labels it correctly —
+    a token-budget stop must NOT read as an agent-hooks veto, and vice-versa."""
+    r = (reason or "").lower()
+    if "opa tool policy" in r or "opa agent" in r or "tool policy" in r:
+        return "opa_tool_policy", "⛔ Blocked — Tool Risk Tier"
+    if "policy-guard" in r or "hook" in r:
+        return "agent_hooks", "⛔ Blocked by Agent Hooks"
+    if "token" in r or "budget" in r:
+        return "token_budget", "⛔ Blocked — Token Budget Exhausted"
+    return "control_plane", "⛔ Blocked by the Control Plane"
+
+
+def _apply_block(payload: dict, outcome: dict, agent_id: str = "") -> dict:
+    """If the task was blocked by the control plane, override the user-facing
+    payload: force status=blocked, SUPPRESS the answer, and surface the ACCURATE
+    block reason + source (token budget vs agent-hooks vs other). A no-op when the
+    task wasn't blocked, so normal results pass through unchanged.
+
+    Sources, in priority order:
+      1. the Temporal workflow outcome (policy-guard tool deny, mid-flight token
+         hard stop) — authoritative;
+      2. live token exhaustion (the execution-START hard stop makes no workflow);
+      3. an already-blocked status on the agent's own record.
+    """
+    reason = ""
+    blocked = False
+
+    if str(outcome.get("status", "")).lower() == "blocked":
+        blocked, reason = True, (outcome.get("error") or "")
+
+    if not blocked:
+        tok = _token_exhausted(agent_id)
+        if tok is not None:
+            blocked = True
+            reason = (f"token budget exhausted "
+                      f"({tok.get('used_tokens')}/{tok.get('budget_tokens')} per window)")
+
+    if not blocked and str(payload.get("status", "")).lower() == "blocked":
+        blocked, reason = True, (payload.get("error") or "")
+        if not reason:
+            tok = _token_exhausted(agent_id)
+            if tok is not None:
+                reason = (f"token budget exhausted "
+                          f"({tok.get('used_tokens')}/{tok.get('budget_tokens')} per window)")
+
+    if not blocked:
+        return payload
+
+    blocked_by, title = _classify_block(reason)
+    reason = reason or "An action this task needed was denied by the control plane."
+    payload.update({
+        "status": "blocked",
+        "result": "",            # never show an answer the control plane blocked
+        "error": reason,
+        "blocked": True,
+        "blocked_by": blocked_by,
+        "blocked_title": title,
+        "blocked_reason": reason,
+    })
+    return payload
+
+
 # ── routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/agents")
@@ -295,6 +420,28 @@ async def list_agents() -> list[dict]:
     folder shows up here with no code change."""
     agents = fs.discover()
     return list(await asyncio.gather(*(_describe(a) for a in agents)))
+
+
+@router.post("/upload")
+async def upload(file: UploadFile = File(...)) -> dict:
+    """Save an attached file to a gateway-local path and return that path.
+
+    The UI appends `FILE_PATH: <path>` to the goal so file-aware agents (e.g. File
+    Inspector) can open the real bytes instead of only seeing the filename. Agents
+    classify by extension, so the original suffix is preserved; the stem is
+    sanitised and prefixed with a random token to avoid collisions/traversal."""
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f"file too large (max {MAX_UPLOAD_BYTES} bytes)")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    name = os.path.basename(file.filename or "upload")
+    stem, ext = os.path.splitext(name)
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem) or "file"
+    dest = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:8]}-{safe_stem}{ext}")
+    with open(dest, "wb") as fh:
+        fh.write(data)
+    return {"path": dest, "name": name, "size": len(data)}
 
 
 @router.post("/submit")
@@ -347,7 +494,7 @@ async def status(agent: str, task_id: str, workflow_id: str | None = None) -> di
         else:
             status_val = "pending"
 
-    return {
+    payload = {
         "agent": agent,
         "task_id": task_id,
         "status": status_val,
@@ -360,6 +507,10 @@ async def status(agent: str, task_id: str, workflow_id: str | None = None) -> di
         "temporal_url": _temporal_url(workflow_id),
         "timeline": timeline,
     }
+    # Control-plane block (policy-guard tool deny OR token budget) is authoritative
+    # over the agent's own record — suppress the answer and surface the real reason.
+    return _apply_block(payload, await _workflow_outcome(workflow_id),
+                        _agent_id_from_workflow(workflow_id, task_id))
 
 
 @router.post("/approve/{agent}/{task_id}")
@@ -404,8 +555,12 @@ async def ask(req: AskRequest) -> dict:
     while task.get("status") not in TERMINAL and time.monotonic() < deadline:
         await asyncio.sleep(POLL_INTERVAL)
         task = await _fetch_task(state["port"], task_id) or task
+        # Stop early if the control plane blocked the task — the agent's own record
+        # may never settle (it honoured the block) or may even keep going.
+        if str((await _workflow_outcome(workflow_id)).get("status", "")).lower() == "blocked":
+            break
 
-    return {
+    payload = {
         "agent": req.agent,
         "agent_url": base,
         "task_id": task_id,
@@ -419,3 +574,6 @@ async def ask(req: AskRequest) -> dict:
         "temporal_url": _temporal_url(workflow_id),
         "timeline": await _extract_timeline(workflow_id),
     }
+    # Control-plane block is authoritative over the agent's own record.
+    return _apply_block(payload, await _workflow_outcome(workflow_id),
+                        agent_id or _agent_id_from_workflow(workflow_id, task_id))
