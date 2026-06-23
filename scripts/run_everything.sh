@@ -137,6 +137,13 @@ export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg:
 export AGENT_RADAR_TASK_QUEUE="${AGENT_RADAR_TASK_QUEUE:-agent-radar-onboarding}"
 export AGENT_EXEC_TASK_QUEUE="${AGENT_EXEC_TASK_QUEUE:-agent-task-execution}"
 
+# Policy-as-code (OPA) for the write-action gate. Defaults to SHADOW: the local
+# Python gate still decides, OPA runs alongside and mismatches are logged — flip
+# to `opa` to enforce OPA's decision. AWCP_OPA_URL points at the OPA sidecar.
+# Both env-overridable; mirror the app-side defaults in radar/policy_engine.py.
+export AWCP_POLICY_ENGINE="${AWCP_POLICY_ENGINE:-shadow}"
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
+
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
 
