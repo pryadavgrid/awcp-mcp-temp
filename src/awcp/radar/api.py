@@ -572,8 +572,8 @@ def _observe_telemetry(agent_id: str, detail: str = "telemetry observed in execu
     # An observed telemetry event PROVES the agent is alive right now, so refresh
     # its liveness too — otherwise a self-registered agent (whose process the
     # scanner only sees under a different proc-<pid> id, and which doesn't appear
-    # in seen_ids) is pruned by store.reconcile_scan after SELF_PRUNE_AFTER_SEC
-    # even while it is actively working, which would 404 its write-action gate.
+    # in seen_ids) would be marked dead ("stop") by store.reconcile_scan after
+    # PRUNE_AFTER_SEC even while it is actively working.
     fields: dict = {"telemetry_enabled": True, "last_telemetry_ts": now,
                     "last_seen": now, "alive": True}
     if e.status == "quarantined":

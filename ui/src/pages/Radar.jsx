@@ -82,7 +82,12 @@ export default function Radar() {
             <EmptyRow colSpan={8}>No agents detected yet.</EmptyRow>
           ) : (
             agents.map((a) => (
-              <tr key={a.id} className="hover:bg-slate-50">
+              <tr
+                key={a.id}
+                // stopped agents stay on the radar — flag the whole row in a
+                // very light red so they read as "stopped, not gone"
+                className={a.alive ? 'hover:bg-slate-50' : 'bg-rose-50 hover:bg-rose-100'}
+              >
                 <Td>
                   <div className="font-medium text-brand-900">{a.name}</div>
                   <div className="font-mono text-[11px] text-slate-400">{a.id}</div>
@@ -108,10 +113,10 @@ export default function Radar() {
                 <Td>
                   <span className="flex items-center gap-2">
                     <span
-                      className={`h-2 w-2 rounded-full ${a.alive ? 'bg-brand-500' : 'bg-slate-300'}`}
+                      className={`h-2 w-2 rounded-full ${a.alive ? 'bg-brand-500' : 'bg-rose-500'}`}
                     />
-                    <span className={a.alive ? 'text-brand-600' : 'text-slate-400'}>
-                      {a.alive ? 'live' : 'gone'}
+                    <span className={a.alive ? 'text-brand-600' : 'text-rose-600'}>
+                      {a.alive ? 'live' : 'stop'}
                     </span>
                     <span className="text-xs text-slate-400">· {timeAgo(a.last_seen)}</span>
                   </span>

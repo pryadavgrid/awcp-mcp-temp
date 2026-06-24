@@ -29,11 +29,12 @@ log = logging.getLogger("awcp.radar")
 # Canonical control-plane DB — the ONLY persistence backend. When set and
 # reachable the registry persists to registry.agents; there is no JSON fallback.
 DATABASE_URL = os.getenv("AGENT_RADAR_DATABASE_URL", "").strip()
-# A scanned process that disappears is pruned after this many seconds.
+# A scanned process / self-registered agent that stops being seen is marked
+# DEAD after this many seconds (it is no longer pruned — it stays on the radar
+# as "stop"; see reconcile_scan). Liveness only; removal is operator-driven.
 PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_PRUNE_AFTER", "60"))
-# A self-registered agent is kept alive by its heartbeat (periodic re-register)
-# or by being seen in a scan. Once neither happens for this long it is pruned —
-# this stops restarted agents (new pid -> new id) from accumulating forever.
+# DEPRECATED: stopped agents are no longer auto-pruned, so this no longer drives
+# any deletion. Kept only so the old env var doesn't error if still set.
 SELF_PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_SELF_PRUNE_AFTER", "180"))
 
 
@@ -270,24 +271,25 @@ class Registry:
                 else:
                     self._entries[d.id] = d
 
-            # age out entries no longer present / no longer heartbeating
+            # age out entries no longer present / no longer heartbeating.
+            # Stopped agents are NEVER pruned automatically — they stay on the
+            # radar marked dead (alive=False) so the UI can show them as "stop"
+            # (light-red row) instead of making them disappear. Only an explicit
+            # operator remove() forgets an entry.
             for aid, e in list(self._entries.items()):
                 if aid in seen_ids:
                     continue  # detected live in this scan
                 if e.source == "scan":
-                    # a scanned process that disappeared
+                    # a scanned process that disappeared -> mark dead, keep it
                     e.alive = False
-                    if now - e.last_seen > PRUNE_AFTER_SEC:
-                        del self._entries[aid]
                 else:
                     # a self-registered agent: live only while it keeps
-                    # heartbeating (re-registering). Stale heartbeat -> dead,
-                    # then prune. last_seen is refreshed both by the agent's
-                    # heartbeat and by a scan that detects its process, so a
-                    # running agent never goes stale; a stopped one does.
-                    if now - e.last_seen > SELF_PRUNE_AFTER_SEC:
-                        del self._entries[aid]
-                    elif now - e.last_seen > PRUNE_AFTER_SEC:
+                    # heartbeating (re-registering). Once its heartbeat goes
+                    # stale it is marked dead but kept on the radar. last_seen is
+                    # refreshed both by the agent's heartbeat and by a scan that
+                    # detects its process, so a running agent never goes stale;
+                    # a stopped one does and then renders as "stop".
+                    if now - e.last_seen > PRUNE_AFTER_SEC:
                         e.alive = False
 
             self._persist()
