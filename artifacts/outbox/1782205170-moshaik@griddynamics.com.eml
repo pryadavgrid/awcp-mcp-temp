@@ -1,0 +1,7 @@
+To: moshaik@griddynamics.com
+Subject: Report on Vector Databases
+Date: Tue Jun 23 14:29:30 2026
+------------------------------------------------
+Vector databases are designed to store, query, and retrieve high-dimensional data. They use similarity search techniques which are more efficient for certain types of data analysis compared to traditional relational database technologies.
+
+These databases are particularly useful in applications such as recommendation systems, image recognition, and natural language processing.

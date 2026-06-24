@@ -1,0 +1,6 @@
+{
+  "awcp": {
+    "dangerous_tools": ["run_command", "write_file"],
+    "high_risk_tiers": ["high"]
+  }
+}

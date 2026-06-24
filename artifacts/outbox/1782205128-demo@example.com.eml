@@ -1,0 +1,8 @@
+To: demo@example.com
+Subject: Vector Databases Report
+Date: Tue Jun 23 14:28:48 2026
+------------------------------------------------
+# Overview
+Vector databases are designed to store and query vector data efficiently, often used in machine learning applications.
+## Benefits
+They enable fast similarity searches which is crucial for recommendation systems and information retrieval.

@@ -25,6 +25,32 @@ volumes:
 services:
 
   # ══════════════════════════════════════════
+  # OPA — Open Policy Agent (governance policy-as-code)
+  # The magazine's Step 03 gate engine. The radar's policy_engine queries
+  #   POST http://localhost:8181/v1/data/awcp/governance/decision
+  # to evaluate write-action governance from awcp.rego. Policies + data are
+  # mounted read-only; editing observability/opa/policies or /data hot-reloads
+  # the policy without a code deploy. Set AWCP_POLICY_ENGINE=opa|shadow to use it.
+  # ══════════════════════════════════════════
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: awcp-opa
+    restart: unless-stopped
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "/policies"
+      - "/data"
+    volumes:
+      - ./opa/policies:/policies:ro
+      - ./opa/data:/data:ro
+    ports:
+      - "8181:8181"
+    networks:
+      - awcp-obs
+
+  # ══════════════════════════════════════════
   # AWCP Postgres — canonical control-plane DB (registry / governance / evidence
   # / ops schema). Bootstrapped from ./init-db on a brand-new volume; this is the
   # same schema defined in files/observability and is the durable home for the

@@ -75,6 +75,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# OTel 0.63b1's route-detail extractor reads `.path` on every route it matches
+# while building the request span name. FastAPI's NESTED include_router() (the
+# radar router includes the gateway + laminar routers, then this app includes the
+# radar router) inserts `_IncludedRouter` entries that have no `.path`. A CORS
+# preflight (OPTIONS) matches no concrete POST route, so the extractor walks into
+# one of those entries and 500s — which makes the browser show "Failed to fetch"
+# on every JSON POST (submit/ask) while plain GETs still work. Guard the
+# extractor so a non-Route match degrades to no route name instead of crashing.
+import opentelemetry.instrumentation.fastapi as _otel_fastapi
+
+_orig_get_route_details = _otel_fastapi._get_route_details
+
+
+def _safe_get_route_details(scope):
+    try:
+        return _orig_get_route_details(scope)
+    except AttributeError:
+        return None
+
+
+_otel_fastapi._get_route_details = _safe_get_route_details
+
 instrument_fastapi(app)        # every gateway HTTP route is auto-traced
 instrument_requests()          # outbound HTTP calls are auto-traced
 

@@ -48,7 +48,7 @@ UPLOAD_DIR = os.getenv("AWCP_UPLOAD_DIR", os.path.join(tempfile.gettempdir(), "a
 MAX_UPLOAD_BYTES = int(os.getenv("AWCP_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 # Temporal Web UI base — used only to build deep links to the task's workflow.
-TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8233")
+TEMPORAL_UI_BASE = os.getenv("AWCP_TEMPORAL_UI_BASE", "http://localhost:8080")
 TEMPORAL_SERVER_URL = os.getenv("TEMPORAL_SERVER_URL", "localhost:7233")
 
 # Tunables (env-driven — nothing about timing is baked in).

@@ -167,30 +167,12 @@ export OPA_SLM_MODEL="${OPA_SLM_MODEL:-gemma2:2b}"
 # Hide the OPA agent from the radar scanner (append, don't clobber any existing list).
 export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent"
 
-# ── Toggleable-guard demo defaults ────────────────────────────────────────────
-# Make the dashboard's Policy Guard (Agent Hooks → Policy Guard) the SINGLE on/off
-# lever for blocking a tool call: deny-list a tool → blocked; remove it → works.
-# To do that we relax the OTHER governance layers that would otherwise deny writes
-# on a fresh start (quarantine, autonomy degradation, token hard-stop). Every knob
-# below is overridable — set them back to restore strict AWCP behaviour.
-#
-#  1) Trust DECLARED control hooks so bundle agents come up ACTIVE, not quarantined
-#     (a quarantined agent has ALL writes blocked, masking the guard). Restore the
-#     strict "telemetry/policy observed in execution" onboarding by setting these
-#     back to true.
-export AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY="${AGENT_RADAR_REQUIRE_OBSERVED_TELEMETRY:-false}"
-export AGENT_RADAR_REQUIRE_OBSERVED_POLICY="${AGENT_RADAR_REQUIRE_OBSERVED_POLICY:-false}"
-#  2) Generous FAILURE budget so a guard-blocked task — which the agent reports as
-#     a failure — doesn't walk the autonomy ladder down (which would block writes
-#     even with the guard off). Default is 3 / per-risk low:5,medium:3,high:1.
-export AGENT_RADAR_FAILURE_BUDGET="${AGENT_RADAR_FAILURE_BUDGET:-1000}"
-export AGENT_RADAR_RISK_BUDGET="${AGENT_RADAR_RISK_BUDGET:-low:1000,medium:1000,high:1000}"
-#  3) Generous TOKEN budget so a few multi-step tasks don't trip the token
-#     hard-stop (which also degrades autonomy). To DEMO token control instead,
-#     lower a single agent's budget from the Token Monitor UI (per-agent override).
-export LMNR_TOKEN_BUDGET="${LMNR_TOKEN_BUDGET:-5000000}"
-export LMNR_RISK_TOKEN_BUDGET="${LMNR_RISK_TOKEN_BUDGET:-low:5000000,medium:5000000,high:5000000}"
-export LMNR_ENFORCE_AT_WARN="${LMNR_ENFORCE_AT_WARN:-false}"
+# Policy-as-code (OPA) for the write-action gate. Defaults to SHADOW: the local
+# Python gate still decides, OPA runs alongside and mismatches are logged — flip
+# to `opa` to enforce OPA's decision. AWCP_OPA_URL points at the OPA sidecar.
+# Both env-overridable; mirror the app-side defaults in radar/policy_engine.py.
+export AWCP_POLICY_ENGINE="${AWCP_POLICY_ENGINE:-shadow}"
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
 
 say(){  printf "\033[1;36m▶ %s\033[0m\n" "$*"; }
 warn(){ printf "\033[1;33m! %s\033[0m\n" "$*"; }
@@ -430,6 +412,7 @@ echo "     Token monitor          : http://localhost:${GATEWAY_PORT}/laminar/ui 
 echo "     User API               : http://localhost:${GATEWAY_PORT}/user/agents · POST /user/submit"
 echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
+echo "     Policy engine (OPA)    : ${AWCP_POLICY_ENGINE} → ${AWCP_OPA_URL}   (gate at /policy/status)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
 if [ -n "${AWCP_OPA_URL:-}" ]; then

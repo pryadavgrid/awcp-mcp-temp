@@ -10,13 +10,16 @@ export function Sidebar({ active, onSelect, health }) {
   const temporal = health?.temporal_connected
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
+  const policyMode = health?.policy?.mode
 
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
       <div className="flex items-center gap-2.5 px-5 py-5">
-        <span className="grid h-9 w-9 place-items-center rounded-lg bg-brand-500 text-lg text-white shadow-sm">
-          ◆
-        </span>
+        <img
+          src="/awcp-mark-white.png"
+          alt="AWCP logo"
+          className="h-10 w-10 shrink-0 object-contain"
+        />
         <div>
           <div className="text-sm font-bold leading-tight text-white">AWCP</div>
           <div className="text-[11px] leading-tight text-brand-200">Control Plane</div>
@@ -47,8 +50,26 @@ export function Sidebar({ active, onSelect, health }) {
         <ConnRow label="Temporal" ok={temporal} />
         <ConnRow label="OTel" ok={otel} />
         <ConnRow label="Laminar" ok={laminar} />
+        <PolicyRow mode={policyMode} />
       </div>
     </aside>
+  )
+}
+
+function PolicyRow({ mode }) {
+  // The active governance engine (magazine Step 03): local | opa | shadow.
+  // Anything but local is "engaged"; local means the legacy Python gate only.
+  const engaged = mode && mode !== 'local'
+  return (
+    <div className="flex items-center justify-between">
+      <span>Policy</span>
+      <span className="flex items-center gap-1.5">
+        <span className={`h-1.5 w-1.5 rounded-full ${engaged ? 'bg-brand-300' : 'bg-white/25'}`} />
+        <span className={engaged ? 'text-brand-100' : 'text-brand-200/70'}>
+          {mode || 'unknown'}
+        </span>
+      </span>
+    </div>
   )
 }
 

@@ -113,10 +113,16 @@ def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
         logger.debug("mcp.meter.failed tool=%s error=%r", tool_name, exc)
 
 
-def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
+def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool,
+                *, tool_name: str = "", workflow_id: str = "", task_id: str = "",
+                approval_token: str = "") -> dict:
     """Ask the radar's write-action gate. Returns the radar's decision dict.
     On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a missing
-    control plane never hard-breaks tool execution (unless ops opt into fail-closed)."""
+    control plane never hard-breaks tool execution (unless ops opt into fail-closed).
+
+    Forwards the magazine Step 03 fields (tool_name for dangerous-tool risk,
+    workflow/task ids + approval_token for approval-token binding) so the radar's
+    OPA policy and approval-token validation see the full action context."""
     if not agent_id:
         # No identity to gate against — treat as an ungoverned (direct) call.
         return {"decision": "allow", "mode": "ungoverned",
@@ -124,7 +130,9 @@ def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
     try:
         resp = httpx.post(
             f"{RADAR_URL}/agents/{agent_id}/gate",
-            json={"action": action, "write": is_write, "scope": scope},
+            json={"action": action, "write": is_write, "scope": scope,
+                  "tool_name": tool_name or action, "workflow_id": workflow_id,
+                  "task_id": task_id, "approval_token": approval_token},
             timeout=GATE_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -138,6 +146,26 @@ def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
         return {"decision": "allow" if GATE_FAIL_OPEN else "deny",
                 "mode": "gate_unavailable",
                 "reason": f"radar gate unreachable: {type(exc).__name__}"}
+
+
+def _guard_sharp_tool(agent_id: str, tool_name: str, approval_token: str) -> str | None:
+    """Gate a directly-callable sharp MCP tool (write_file / run_command) through
+    the radar write-action gate. Returns a human-readable block/approval message
+    when the action is denied or needs approval, else None (caller may proceed).
+
+    Backward-compatible: with no agent_id the call is ungoverned (None), exactly
+    as before — so existing non-governed callers are unaffected."""
+    if not agent_id:
+        return None
+    gate = _radar_gate(agent_id, tool_name, "", True,
+                       tool_name=tool_name, approval_token=approval_token)
+    if gate.get("requires_approval"):
+        return (f"APPROVAL REQUIRED: '{tool_name}' is a high-risk write. An operator "
+                f"must issue an approval token ({gate.get('reason', '')}).")
+    if gate.get("decision") == "deny":
+        return (f"BLOCKED: '{tool_name}' was denied by the AWCP write-action gate "
+                f"({gate.get('reason', '')}).")
+    return None
 
 
 def _govern_span(name: str, trace_context: dict | None):
@@ -182,9 +210,17 @@ def read_file(
 def write_file(
     path: Annotated[str, Field(description="Relative path to the file")],
     content: Annotated[str, Field(description="Content to write")],
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id; when set, the write is gated by the radar.")] = "",
+    approval_token: Annotated[str, Field(
+        description="Operator approval token that unblocks this high-risk write.")] = "",
 ) -> str:
     if ".." in path or path.startswith("/"):
         return "Error: Invalid path."
+    # Sharp-tool gate (magazine Step 03): write_file is a dangerous write.
+    blocked = _guard_sharp_tool(agent_id, "write_file", approval_token)
+    if blocked is not None:
+        return blocked
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
@@ -197,7 +233,15 @@ def write_file(
 @mcp.tool(description="Execute a shell command in the workspace.")
 async def run_command(
     command: Annotated[str, Field(description="The shell command to run")],
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id; when set, the command is gated by the radar.")] = "",
+    approval_token: Annotated[str, Field(
+        description="Operator approval token that unblocks this high-risk command.")] = "",
 ) -> str:
+    # Sharp-tool gate (magazine Step 03): run_command is a dangerous exec.
+    blocked = _guard_sharp_tool(agent_id, "run_command", approval_token)
+    if blocked is not None:
+        return blocked
     try:
         process = await asyncio.create_subprocess_shell(
             command,
@@ -375,6 +419,10 @@ def execute_tool(
         description="Optional write scope override; defaults to the tool's declared scope.")] = "",
     approved: Annotated[bool, Field(
         description="Whether an operator already approved this high-risk write agent-side.")] = False,
+    approval_token: Annotated[str, Field(
+        description="Operator-issued approval token that unblocks one high-risk write at the gate.")] = "",
+    workflow_id: Annotated[str, Field(
+        description="Temporal workflow id this action belongs to (binds the approval token).")] = "",
     trace_context: Annotated[dict | None, Field(
         description="W3C trace context (traceparent) so the run links into the caller's trace.")] = None,
 ) -> str:
@@ -405,15 +453,39 @@ def execute_tool(
         #    The scope is only forwarded when strict magazine-scope authorization
         #    is enabled.
         gate = _radar_gate(
-            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write
-        )
+            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write,
+            tool_name=tool_name, workflow_id=workflow_id, task_id=task_id,
+            approval_token=approval_token,
+        ) if is_write else {
+            "decision": "allow", "mode": "read", "reason": "read-only action — not gated"}
         decision = gate.get("decision", "allow")
         if span is not None:
             try:
                 span.set_attribute("gate.decision", decision)
                 span.set_attribute("gate.mode", gate.get("mode", ""))
+                span.set_attribute("gate.requires_approval", bool(gate.get("requires_approval")))
             except Exception:  # noqa: BLE001
                 pass
+
+        # High-risk write that needs an operator approval token (magazine Step 03).
+        # Distinct from a hard deny: the caller can obtain a token and retry.
+        if gate.get("requires_approval"):
+            logger.info(
+                "mcp.execute.awaiting_approval agent_id=%s tool=%s scope=%s reason=%s",
+                agent_id, tool_name, eff_scope, gate.get("reason"),
+            )
+            return json.dumps({
+                "status": "awaiting_approval",
+                "output": (f"APPROVAL REQUIRED: '{tool_name}' is a high-risk write. "
+                           f"An operator must issue an approval token "
+                           f"({gate.get('reason', '')})."),
+                "decision": "deny",
+                "mode": gate.get("mode", ""),
+                "reason": gate.get("reason", ""),
+                "requires_approval": True,
+                "approval_scope": gate.get("approval_scope", eff_scope),
+                "risk": eff_risk,
+            })
 
         if decision == "deny":
             logger.warning(

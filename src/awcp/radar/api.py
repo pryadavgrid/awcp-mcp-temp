@@ -25,7 +25,7 @@ from fastapi import FastAPI, HTTPException, APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from awcp.radar import onboarding, policy, opa, tokens
+from awcp.radar import onboarding, policy, policy_engine, approval
 from awcp.radar import db as _events_db
 from awcp.radar.models import AgentEntry, RegisterRequest
 from awcp.radar.store import REGISTRY
@@ -1363,10 +1363,22 @@ class GateRequest(BaseModel):
     action: str = ""
     write: bool = True            # the magazine gates WRITE-capable actions
     scope: str = ""               # the action's write scope (checked vs declared write_scopes)
-    action_class: str = ""        # optional class label (e.g. "cross_system" → operator approval)
-    token_id: str = ""            # an approval token the caller presents for a gated write
-    workflow_id: str = ""         # branch context recorded on an issued approval token
-    branch_id: str = ""
+    # --- magazine Step 03: OPA + approval tokens. All optional/back-compat: an
+    # old caller that sends only action/write/scope keeps working unchanged. ---
+    tool_name: str = ""           # the concrete tool (dangerous-tool risk classification)
+    workflow_id: str = ""         # Temporal workflow this action belongs to (token binding)
+    task_id: str = ""             # task this action belongs to (token binding)
+    actor: str = "agent"          # who is acting (agent | operator | system)
+    approval_token: str = ""      # operator-issued token that unblocks one high-risk write
+
+
+class ApprovalRequest(BaseModel):
+    """Operator issues a narrow, expiring approval token for one exact action."""
+    action: str = ""
+    scope: str = ""
+    workflow_id: str = ""
+    task_id: str = ""
+    ttl_seconds: int | None = None   # override AWCP_APPROVAL_TTL_SECONDS for this token
 
 
 class SignalRequest(BaseModel):
@@ -1412,22 +1424,10 @@ def gate(agent_id: str, req: GateRequest) -> dict:
                 "autonomy_profile": e.autonomy_profile}
 
     t0 = time.monotonic()
-    # Policy Decision Point: OPA when AWCP_OPA_URL is set, else policy.evaluate_action
-    # (opa.evaluate_action falls back to it on any OPA error — fail-secure). The
-    # decision carries the magazine's 4-value gate kind (auto_authorized /
-    # awaiting_token / awaiting_operator / denied) alongside the allow|deny verdict.
-    decision = opa.evaluate_action(e, action=req.action, is_write=req.write,
-                                   scope=req.scope, action_class=req.action_class)
-    # Resolve any approval-token requirement (issue/verify) — magazine Scenario B.
-    decision = _resolve_approval(e, req, decision)
-    # Agent-hooks GUARD: a custom/operator policy hook may TIGHTEN an allow into a
-    # deny (never loosen — see GUARD_POINTS). Composed ON TOP of the OPA/policy
-    # decision; run BEFORE metrics + the durable record so those reflect the final
-    # decision. The SAME guard is applied to self-instrumented tool steps in the
-    # execution-event endpoint, so a deny-listed tool is blocked on either path.
-    decision = _gate_guard(agent_id, decision, action=req.action, scope=req.scope,
-                           write=req.write, risk=e.risk)
-
+    # Route through the policy engine (local | opa | shadow). It evaluates the
+    # same write-action gate, adds the magazine's requires_approval outcome under
+    # OPA, and validates any operator approval token the caller carries.
+    decision = policy_engine.evaluate(e, req)
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
         decision=decision["decision"],
@@ -1435,78 +1435,58 @@ def gate(agent_id: str, req: GateRequest) -> dict:
         duration=elapsed,
         risk=e.risk,
     )
+    detail = f"{decision['decision']} ({decision['mode']})"
+    if decision.get("requires_approval"):
+        detail = f"requires_approval ({decision['mode']})"
     log.info(
-        "radar.gate agent_id=%s action=%r decision=%s gate=%s mode=%s engine=%s risk=%s dur_ms=%.2f",
-        agent_id, (req.action or "")[:64], decision["decision"], decision.get("gate"),
-        decision["mode"], decision.get("engine"), e.risk, elapsed * 1000,
+        "radar.gate agent_id=%s action=%r decision=%s mode=%s requires_approval=%s "
+        "risk=%s engine=%s dur_ms=%.2f",
+        agent_id, (req.action or "")[:64], decision["decision"],
+        decision["mode"], bool(decision.get("requires_approval")), e.risk,
+        policy_engine.ENGINE_MODE, elapsed * 1000,
     )
-    # Durable mirror: the gate kind drives governance.policy_decisions.decision
-    # (auto_authorized | awaiting_token | awaiting_operator | denied). Allows stay
-    # in the live ring only; denies/holds are persisted (see _record_event).
-    # Surface the DECIDER in the live label so the UI shows who allowed/denied —
-    # "OPA" / "policy" for the gate engine, just like "hook_guard" marks the hooks
-    # layer. The hook-guard mode already names its source, so it's left as-is.
-    _engine = decision.get("engine", "policy")
-    if decision["mode"] == "hook_guard":
-        _detail = f"{decision['decision']} ({decision['mode']})"
-    else:
-        _src = "OPA" if _engine == "opa" else _engine
-        _detail = f"{decision['decision']} ({decision['mode']} · {_src})"
-    _record_event("gate", agent_id, _detail,
-                  action=req.action, decision=decision.get("gate"), engine=_engine,
-                  scope=req.scope or None, reason=decision.get("reason"),
-                  token_id=decision.get("token_id"), workflow_id=req.workflow_id or None)
-    # Notify hooks of a final block (after OPA/policy + guard + token resolution).
-    if _HOOKS and decision["decision"] == "deny":
-        _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=req.action,
-              reason=str(decision.get("reason") or decision.get("mode", "")), risk=e.risk)
+    _record_event("gate", agent_id, detail, action=req.action)
+
+    # Agent-hooks GUARD: a custom/operator policy hook may TIGHTEN an allow into a
+    # deny (it can never loosen a deny — see GUARD_POINTS). Fired on top of the
+    # radar's own policy so the two compose.
+    if _HOOKS:
+        _outcome = _hook(_HT.GATE_EVALUATED, agent_id=agent_id, action=req.action,
+                         scope=req.scope, write=req.write,
+                         decision=decision["decision"], mode=decision["mode"], risk=e.risk)
+        if _outcome is not None and _outcome.is_deny and decision["decision"] == "allow":
+            decision = {**decision, "decision": "deny", "mode": "hook_guard",
+                        "reason": _outcome.reason}
+        if decision["decision"] == "deny":
+            _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=req.action,
+                  reason=str(decision.get("reason") or decision.get("mode", "")), risk=e.risk)
+
     return {"agent_id": agent_id, **decision,
+            "engine": policy_engine.ENGINE_MODE,
             "status": e.status, "autonomy_profile": e.autonomy_profile}
 
 
-def _resolve_approval(e: AgentEntry, req: GateRequest, decision: dict) -> dict:
-    """Turn an `awaiting_token` / `awaiting_operator` PDP decision into an
-    enforceable one by issuing or verifying an expiring approval token.
+@router.post("/agents/{agent_id}/approval")
+def issue_approval(agent_id: str, req: ApprovalRequest) -> dict:
+    """Operator action: mint a narrow, expiring, single-use approval token that
+    unblocks ONE high-risk write for this agent (the magazine's approval token).
+    The agent then retries the same action carrying `approval_token`."""
+    e = _require(agent_id)
+    grant = approval.issue(
+        agent_id, action=req.action, scope=req.scope,
+        workflow_id=req.workflow_id, task_id=req.task_id, ttl=req.ttl_seconds,
+    )
+    _record_event("approval", agent_id,
+                  f"token issued for {req.action or req.scope or 'action'}",
+                  action=req.action, scope=req.scope)
+    return grant
 
-      * awaiting_token + a presented token  -> verify + single-use consume -> allow
-      * awaiting_token + no token           -> issue a pending token, hold (deny)
-      * awaiting_operator                   -> issue a pending operator token, hold
 
-    Fail-secure: if the governance DB is unavailable no token can be issued or
-    verified, so the action stays denied rather than being granted un-auditably."""
-    gate_kind = decision.get("gate")
-    if gate_kind not in ("awaiting_token", "awaiting_operator"):
-        return decision
-
-    risk_tier = policy.authoritative_risk(e)
-
-    # A caller presenting a token for a token-gated write: verify and consume it.
-    if gate_kind == "awaiting_token" and req.token_id:
-        ok, why = tokens.verify_and_consume(req.token_id, agent_id=e.id, scope=req.scope)
-        if ok:
-            _record_event("token_consumed", e.id,
-                          f"approval token consumed for {req.action!r} ({why})",
-                          action=req.action, token_id=req.token_id, decision="auto_authorized")
-            return {**decision, "decision": "allow", "gate": "auto_authorized",
-                    "mode": "token_consumed",
-                    "reason": f"approved — single-use approval token consumed ({why})",
-                    "token_id": req.token_id}
-        return {**decision, "reason": f"approval token rejected: {why}", "token_id": req.token_id}
-
-    # No (valid) token: issue a pending, branch-scoped, expiring token and hold.
-    action_class = req.action_class or ("operator_review" if gate_kind == "awaiting_operator"
-                                        else "gated_write")
-    tid = tokens.issue(e, action=req.action, action_class=action_class, scope=req.scope,
-                       risk_tier=risk_tier, workflow_id=req.workflow_id, branch_id=req.branch_id)
-    if not tid:
-        return {**decision,
-                "reason": (decision.get("reason", "") +
-                           " — approval tokens unavailable (no governance DB); action denied")}
-    _record_event("token_requested", e.id,
-                  f"approval token issued for {req.action!r} ({gate_kind})",
-                  action=req.action, token_id=tid, decision=gate_kind, scope=req.scope or None)
-    return {**decision, "token_id": tid,
-            "reason": decision.get("reason", "") + " — pending approval token issued"}
+@router.get("/policy/status")
+def policy_status() -> dict:
+    """Active policy engine (local | opa | shadow), OPA reachability, and the
+    running count of shadow-mode local/OPA disagreements (the rollout signal)."""
+    return policy_engine.status()
 
 
 @router.post("/agents/{agent_id}/signal")
@@ -2044,6 +2024,7 @@ def healthz() -> dict:
         "temporal_connected": STATE["temporal"],
         "otel_enabled": _OTEL_ENABLED,
         "laminar": _laminar.status_summary() if _LAMINAR else {"enabled": False},
+        "policy": policy_engine.status(probe=False),
     }
 
 
