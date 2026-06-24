@@ -11,41 +11,52 @@ from temporalio import activity
 
 from awcp.radar import onboarding
 from awcp.radar.store import REGISTRY
+from awcp.radar.temporal.mirror import mirror_activity
 
 
 @activity.defn
 async def map_identity(agent_id: str) -> str:
     e = REGISTRY.get(agent_id)
     if not e:
-        return "missing"
-    REGISTRY.patch(agent_id, **onboarding.map_identity_patch(e))
-    return "identity mapped"
+        result = "missing"
+    else:
+        REGISTRY.patch(agent_id, **onboarding.map_identity_patch(e))
+        result = "identity mapped"
+    mirror_activity(agent_id, result)
+    return result
 
 
 @activity.defn
 async def quarantine_check(agent_id: str) -> str:
     e = REGISTRY.get(agent_id)
     if not e:
-        return "missing"
-    status, reason = onboarding.decide_status(e)
-    REGISTRY.patch(agent_id, status=status, quarantine_reason=reason)
-    return f"{status}" + (f" ({reason})" if reason else "")
+        result = "missing"
+    else:
+        status, reason = onboarding.decide_status(e)
+        REGISTRY.patch(agent_id, status=status, quarantine_reason=reason)
+        result = f"{status}" + (f" ({reason})" if reason else "")
+    mirror_activity(agent_id, result)
+    return result
 
 
 @activity.defn
 async def link_mcp(agent_id: str) -> str:
     e = REGISTRY.get(agent_id)
     if not e:
-        return "missing"
-    caps, note = await onboarding.link_mcp(e)
-    REGISTRY.patch(agent_id, capabilities=caps)
-    return note or (f"{len(caps)} tools linked" if caps else "no link")
+        result = "missing"
+    else:
+        caps, note = await onboarding.link_mcp(e)
+        REGISTRY.patch(agent_id, capabilities=caps)
+        result = note or (f"{len(caps)} tools linked" if caps else "no link")
+    mirror_activity(agent_id, result)
+    return result
 
 
 @activity.defn
 async def admit(agent_id: str) -> str:
     e = REGISTRY.get(agent_id)
     if not e:
+        mirror_activity(agent_id, "missing")
         return "missing"
     REGISTRY.patch(agent_id, onboarding_state="done")
     # Mark the Temporal onboarding run done in ops.onboarding_runs, keyed by the
@@ -54,4 +65,5 @@ async def admit(agent_id: str) -> str:
     _db.record_onboarding_run(
         e.onboarding_workflow_id or f"onboard-{agent_id}",
         agent_id, "done", payload={"status": e.status})
+    mirror_activity(agent_id, e.status)
     return e.status

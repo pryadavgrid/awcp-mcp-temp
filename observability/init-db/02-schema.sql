@@ -254,6 +254,30 @@ CREATE TABLE ops.artifacts (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- App-level MIRROR of every Temporal ACTIVITY execution (onboarding + execution
+-- workflows). Temporal keeps its own (dev-mode SQLite) workflow history; this is
+-- the durable, queryable copy in the canonical schema so a run survives a
+-- Temporal/gateway restart and is visible in Adminer. Written best-effort by
+-- awcp.radar.db.record_workflow_event from inside each activity.
+CREATE TABLE ops.workflow_events (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts            timestamptz NOT NULL DEFAULT now(),
+    workflow_id   text NOT NULL,
+    run_id        text,
+    workflow_type text,
+    activity_type text NOT NULL,
+    agent_id      text,
+    task_id       text,
+    attempt       integer,
+    input         jsonb NOT NULL DEFAULT '{}',
+    output        text,
+    status        text NOT NULL DEFAULT 'completed'
+);
+
+CREATE INDEX idx_wfevents_wf    ON ops.workflow_events (workflow_id, ts);
+CREATE INDEX idx_wfevents_ts    ON ops.workflow_events (ts DESC);
+CREATE INDEX idx_wfevents_agent ON ops.workflow_events (agent_id, ts);
+
 CREATE TABLE evidence.token_ledger_2026_06 PARTITION OF evidence.token_ledger
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 

@@ -180,6 +180,64 @@ def ensure_partitions(months_ahead: int | None = None) -> None:
                     "partitions manually if inserts start failing", exc)
 
 
+def ensure_workflow_events_table() -> None:
+    """Create ops.workflow_events (IF NOT EXISTS) via the admin connection.
+
+    The canonical schema is owned by init-db, but on an ALREADY-initialised volume
+    that SQL won't re-run — so this guarantees the workflow-event mirror table
+    exists for the app's INSERTs (same admin-DDL pattern as ensure_partitions).
+    Best-effort: a warning on failure and the mirror simply stays a no-op."""
+    url = DB_ADMIN_URL
+    if not url:
+        return
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS ops.workflow_events ("
+        " id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        " ts timestamptz NOT NULL DEFAULT now(),"
+        " workflow_id text NOT NULL,"
+        " run_id text,"
+        " workflow_type text,"
+        " activity_type text NOT NULL,"
+        " agent_id text,"
+        " task_id text,"
+        " attempt integer,"
+        " input jsonb NOT NULL DEFAULT '{}',"
+        " output text,"
+        " status text NOT NULL DEFAULT 'completed')"
+    )
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_wfevents_wf ON ops.workflow_events (workflow_id, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_wfevents_ts ON ops.workflow_events (ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_wfevents_agent ON ops.workflow_events (agent_id, ts)",
+    )
+    # Grants are separate + best-effort: in a superuser-only setup the awcp_app /
+    # awcp_ro roles may not exist, and default privileges already cover tables the
+    # owner creates in the canonical setup.
+    grants = (
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ops.workflow_events TO awcp_app",
+        "GRANT SELECT ON ops.workflow_events TO awcp_ro",
+    )
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url, connect_args={"connect_timeout": 3}
+                            if url.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text(ddl))
+            for ix in indexes:
+                c.execute(text(ix))
+        for g in grants:
+            try:
+                with eng.begin() as c:
+                    c.execute(text(g))
+            except Exception:  # noqa: BLE001 — roles may not exist; default privs cover it
+                pass
+        eng.dispose()
+        log.info("radar.db ops.workflow_events ensured (Temporal workflow mirror table)")
+    except Exception as exc:  # noqa: BLE001 — maintenance is best-effort
+        log.warning("radar.db ensure_workflow_events_table failed (%r) — workflow "
+                    "mirror disabled until the table exists", exc)
+
+
 def init() -> bool:
     """Idempotently initialize the durable store. Safe to call many times."""
     global _initialized
@@ -190,6 +248,7 @@ def init() -> bool:
         ok = _build()
         if ok:
             ensure_partitions()
+            ensure_workflow_events_table()
         return ok
 
 
@@ -728,6 +787,49 @@ def record_onboarding_run(workflow_id: str, agent_id: str, state: str,
             })
     except Exception as exc:  # noqa: BLE001
         log.debug("radar.db.record_onboarding_run failed wf=%s error=%r", workflow_id, exc)
+
+
+# ── Workflow event mirror (ops.workflow_events) ───────────────────────────────
+# An app-level MIRROR of every Temporal ACTIVITY execution (onboarding AND
+# execution workflows) into the canonical schema. Temporal keeps its own dev-mode
+# SQLite history; this is the durable, Adminer-queryable copy so each workflow
+# step survives a Temporal/gateway restart. One row per activity execution, with
+# the activity's input (jsonb) and its returned summary string. Fail-open.
+_SQL_WORKFLOW_EVENT = (
+    "INSERT INTO ops.workflow_events "
+    "(workflow_id, run_id, workflow_type, activity_type, agent_id, task_id, "
+    " attempt, input, output, status) "
+    "VALUES (:workflow_id, :run_id, :workflow_type, :activity_type, :agent_id, "
+    " :task_id, :attempt, CAST(:input AS jsonb), :output, :status)"
+)
+
+
+def record_workflow_event(workflow_id: str, run_id: str | None = None,
+                          workflow_type: str | None = None,
+                          activity_type: str = "unknown",
+                          agent_id: str | None = None, task_id: str | None = None,
+                          attempt: int | None = None, input_obj: Any = None,
+                          output: Any = None, status: str = "completed") -> None:
+    """Append one Temporal activity execution to ops.workflow_events. No-op when
+    disabled / on error — must never raise into a running workflow activity."""
+    if not _enabled or _engine is None or not workflow_id:
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(_text(_SQL_WORKFLOW_EVENT), {
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "workflow_type": workflow_type,
+                "activity_type": activity_type or "unknown",
+                "agent_id": agent_id or None,
+                "task_id": task_id or None,
+                "attempt": int(attempt) if attempt is not None else None,
+                "input": json.dumps(input_obj if input_obj is not None else {}, default=str),
+                "output": (str(output) if output is not None else None),
+                "status": status or "completed",
+            })
+    except Exception as exc:  # noqa: BLE001 — durability is best-effort
+        log.debug("radar.db.record_workflow_event failed wf=%s error=%r", workflow_id, exc)
 
 
 def query(agent_id: str | None = None, since: float | None = None,
