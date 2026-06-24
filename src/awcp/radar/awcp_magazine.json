@@ -1,4 +1,12 @@
 {
+    "writeup-writer": {
+        "risk": "high",
+        "token_budget": 4000,
+        "write_scopes": [
+            "file_system",
+            "notify:email"
+        ]
+    },
     "pydantic-writer": {
         "risk": "medium",
         "token_budget": 2000,

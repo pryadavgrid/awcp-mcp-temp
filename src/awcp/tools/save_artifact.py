@@ -5,6 +5,10 @@ through the radar write-action gate before it runs.
 Nothing here is agent-specific: any agent that calls execute_tool("save_artifact",
 ...) over MCP gets the same governed write. The destination directory and the
 declared risk are both env-driven.
+
+The write scope is `file_system` (declared on the @tool decorator) so the radar's
+magazine-driven scope check governs which agents may persist artifacts — this is
+the scope the magazine grants as "file_system".
 """
 
 import os
@@ -20,7 +24,7 @@ ARTIFACT_DIR = os.getenv(
 )
 
 
-@tool("save_artifact", risk=os.getenv("AWCP_SAVE_ARTIFACT_RISK", "medium"))
+@tool("save_artifact", risk=os.getenv("AWCP_SAVE_ARTIFACT_RISK", "medium"), scope="file_system")
 def save_artifact(name: str, content: str) -> str:
     """Persist a result artifact to the control plane's artifact store.
 

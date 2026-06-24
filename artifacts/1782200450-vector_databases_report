@@ -1,0 +1,5 @@
+# Introduction
+Vector databases store and retrieve data in the form of vectors. They are particularly useful for nearest neighbor search, recommendation systems, and natural language processing.
+## Key Features
+- High scalability and performance for vector storage and querying.
+- Flexible querying capabilities through distance metrics like cosine similarity or Euclidean distance.
