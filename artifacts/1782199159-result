@@ -1,0 +1,12 @@
+{"name": "save_artifact", "parameters": {"name": "rag-report", "content": "### Real-time Application Gateway (RAG)
+
+#### Overview
+Real-time Application Gateway, or RAG for short, refers to a type of API gateway designed to handle high-traffic and low-latency applications.
+
+#### Characteristics
+*   High-performance capabilities with scalable infrastructure
+*   Low latency due to load balancers, CDNs, and caching mechanisms
+
+### Benefits
+*   Scalability - easily scale up or down depending on user demand
+*   Reliability - ensures high uptime with fault-tolerant design
