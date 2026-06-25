@@ -115,6 +115,22 @@
   .tdec-block{color:var(--red);font-family:var(--mono);font-size:11px;font-weight:700}
   .tdec-allow{color:var(--active);font-family:var(--mono);font-size:11px}
   .treason{color:var(--muted);font-size:11px}
+  /* recognised badge (operator policy) */
+  .rec{font-size:10px;padding:1px 6px;border-radius:100px;margin-top:3px;display:inline-block}
+  .rec-yes{background:var(--active-bg);color:var(--active)}
+  .rec-no{background:var(--red-bg);color:var(--red)}
+  /* Policy tab editor */
+  .pol-help{color:var(--muted);font-size:12px;margin-bottom:10px;line-height:1.6}
+  .pol-help code{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:var(--mono);font-size:11px}
+  #pol-text{width:100%;min-height:340px;background:#0b1220;border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:12px;font-family:var(--mono);font-size:12.5px;line-height:1.55;outline:none;resize:vertical}
+  #pol-text:focus{border-color:var(--accent)}
+  .pol-bar{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+  .pol-btn{background:rgba(56,189,248,.16);border:1px solid rgba(56,189,248,.45);color:var(--accent);border-radius:7px;padding:7px 16px;font-size:13px;cursor:pointer;font-family:var(--sans)}
+  .pol-btn:hover{background:rgba(56,189,248,.28)}
+  .pol-btn.sec{background:transparent;border-color:var(--border2);color:var(--muted)}
+  .pol-msg{font-size:12px;font-family:var(--mono)}
+  .pol-msg.ok{color:var(--active)} .pol-msg.err{color:var(--red)}
+  .pol-meta{color:var(--muted);font-size:11px}
 </style>
 </head>
 <body>
@@ -157,6 +173,7 @@
     <div class="tab" id="tab-ev" onclick="showTab('ev')">Recent decisions</div>
     <div class="tab" id="tab-hooks" onclick="showTab('hooks')">Agent Hooks</div>
     <div class="tab" id="tab-tiers" onclick="showTab('tiers')">Tool Risk Tiers</div>
+    <div class="tab" id="tab-policy" onclick="showTab('policy')">Policy</div>
   </div>
 
   <!-- ===== Inventory tab ===== -->
@@ -217,6 +234,24 @@
     <div class="empty" id="tiers-empty" style="display:none">No tool calls yet — ask a question in the chat UI and every agent tool call appears here with its SLM-reasoned risk tier.</div>
   </div>
 
+  <!-- ===== Policy tab ===== -->
+  <div id="view-policy" class="hidden">
+    <div class="hk-h">Operator policy <span style="text-transform:none;color:var(--muted);font-weight:400">· name which detected agents are <b>recognised</b> (allowed) and at what risk tier — same for tools · stored in Postgres · the OPA agent assigns a baseline tier first, then this policy is applied as the operator override</span></div>
+    <div class="pol-help">
+      Detection is unchanged — every process is still auto-detected. This policy only decides <b>which agents/tools are allowed</b> and overrides their risk tier.
+      Unnamed entries follow <code>defaults</code> (which default to <code>allow:true</code>, so an empty policy changes nothing). Set <code>defaults.agents.allow:false</code> for a strict allowlist.
+      Agent keys match an agent <code>id</code> or <code>name</code> (globs like <code>agent-crewai-*</code> or <code>*temporal*</code> allowed); tool keys match the tool name. Agent risk ∈ <code>low|medium|high</code>; tool risk ∈ <code>low|medium|high|severe</code>.
+    </div>
+    <textarea id="pol-text" spellcheck="false" placeholder='{ "defaults": {...}, "agents": {...}, "tools": {...} }'></textarea>
+    <div class="pol-bar">
+      <button class="pol-btn" onclick="savePolicy()">Save policy → Postgres</button>
+      <button class="pol-btn sec" onclick="loadPolicy()">Reload from store</button>
+      <button class="pol-btn sec" onclick="formatPolicy()">Format JSON</button>
+      <span class="pol-msg" id="pol-msg"></span>
+      <span class="pol-meta" id="pol-meta" style="margin-left:auto"></span>
+    </div>
+  </div>
+
   <div class="foot">Polling every 3s · scanner + onboarding run in the background · "Recent decisions" is a live audit view (not the durable evidence ledger).</div>
 </div>
 
@@ -236,7 +271,7 @@ function tokCell(id){
 function ago(ts){ if(!ts) return ''; const s=Math.max(0,Math.floor(Date.now()/1000-ts)); return s<60?s+'s':(s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'); }
 function esc(s){ return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
 function showTab(t){ TAB=t;
-  ['inv','ev','hooks','tiers'].forEach(x=>{
+  ['inv','ev','hooks','tiers','policy'].forEach(x=>{
     document.getElementById('tab-'+x).classList.toggle('sel',t===x);
     document.getElementById('view-'+x).classList.toggle('hidden',t!==x);
   });
@@ -279,14 +314,19 @@ function renderInventory(){
       : `<span class="ob">${a.onboarding_state||'—'}</span>`;
     // when quarantined, surface WHICH control hooks are missing (the reason)
     const miss=(a.status==='quarantined'&&a.quarantine_reason)?`<span class="miss">${esc(a.quarantine_reason)}</span>`:'';
+    // operator-policy recognition badge (only when the policy names this agent)
+    const rec = a.recognised===true ? '<span class="rec rec-yes">recognised</span>'
+              : a.recognised===false ? '<span class="rec rec-no">not recognised</span>' : '';
+    // risk shown is the AUTHORITATIVE tier (includes any operator-policy override)
+    const riskTier = a.authoritative_risk || a.risk || 'medium';
     const ladder=(a.effective_ladder||[]).join(' → ');
     tr.innerHTML=`
       <td>${esc(a.name)}<br><span class="agid" title="agent id (as used by /agents and the gate)">${esc(a.id)}</span></td>
       <td><span class="kind k-${a.kind}">${a.kind}</span></td>
       <td class="mono">${a.framework||'–'}</td>
-      <td><span class="pill s-${a.status}">${a.status}</span>${miss}</td>
+      <td><span class="pill s-${a.status}">${a.status}</span>${rec}${miss}</td>
       <td><span class="pill au-${a.autonomy_profile}" title="${esc(a.autonomy_reason||'')}">${(a.autonomy_profile||'active').replace('recommendation_only','rec-only')}</span></td>
-      <td><span class="pill risk-${a.risk||'medium'}">${a.risk||'medium'}</span></td>
+      <td><span class="pill risk-${riskTier}" title="${a.policy_risk?'operator-policy override':'authoritative risk'}">${riskTier}${a.policy_risk?' ●':''}</span></td>
       <td class="mono" title="failures tolerated before autonomy steps down">${a.effective_budget ?? '–'}</td>
       <td>${tokCell(a.id)}</td>
       <td><span class="ladder" title="${esc(ladder)}">${ladder}</span></td>
@@ -413,6 +453,47 @@ async function renderTiers(){
   }).join('');
 }
 
+// ── Policy tab (operator-authored allow/deny + risk override) ──────────────────
+// Loaded once on first view so the 3s poll never clobbers an in-progress edit.
+let POLICY_LOADED=false;
+async function loadPolicy(){
+  const ta=document.getElementById('pol-text'),
+        meta=document.getElementById('pol-meta'),
+        msg=document.getElementById('pol-msg');
+  try{
+    const j=await (await fetch('/policy')).json();
+    ta.value=JSON.stringify(j.policy||{},null,2);
+    meta.textContent = j.stored
+      ? `stored · v${j.version} · ${j.enabled?'active':'inert'} · by ${j.updated_by||'—'}`
+      : 'no policy stored — defaults apply (inert)';
+    msg.textContent=''; msg.className='pol-msg';
+    POLICY_LOADED=true;
+  }catch(e){ msg.textContent='load failed: '+e.message; msg.className='pol-msg err'; }
+}
+function renderPolicy(){ if(!POLICY_LOADED) loadPolicy(); }
+function formatPolicy(){
+  const ta=document.getElementById('pol-text'), msg=document.getElementById('pol-msg');
+  try{ ta.value=JSON.stringify(JSON.parse(ta.value),null,2); msg.textContent='formatted'; msg.className='pol-msg ok'; }
+  catch(e){ msg.textContent='invalid JSON: '+e.message; msg.className='pol-msg err'; }
+}
+async function savePolicy(){
+  const ta=document.getElementById('pol-text'),
+        msg=document.getElementById('pol-msg'),
+        meta=document.getElementById('pol-meta');
+  let doc;
+  try{ doc=JSON.parse(ta.value); }
+  catch(e){ msg.textContent='invalid JSON: '+e.message; msg.className='pol-msg err'; return; }
+  msg.textContent='saving…'; msg.className='pol-msg';
+  try{
+    const r=await fetch('/policy',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({policy:doc,updated_by:'radar-ui'})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){ msg.textContent='✗ '+(j.detail||('HTTP '+r.status)); msg.className='pol-msg err'; return; }
+    msg.textContent='✓ saved v'+j.version+(j.enabled?' (active)':' (inert)'); msg.className='pol-msg ok';
+    meta.textContent='stored · v'+j.version+' · '+(j.enabled?'active':'inert');
+  }catch(e){ msg.textContent='save failed: '+e.message; msg.className='pol-msg err'; }
+}
+
 async function tick(){
   let health={};
   try{ AGENTS=await (await fetch('/agents')).json(); }catch(e){ return; }
@@ -439,6 +520,7 @@ async function tick(){
   else if(TAB==='ev') renderEvents();
   else if(TAB==='hooks') renderHooks();
   else if(TAB==='tiers') renderTiers();
+  else if(TAB==='policy') renderPolicy();
 }
 ['f-status','f-kind','f-auton','f-live','f-text'].forEach(id=>
   document.getElementById(id).addEventListener('input',renderInventory));

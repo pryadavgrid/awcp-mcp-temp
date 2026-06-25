@@ -1,0 +1,52 @@
+{
+  "_README": [
+    "Operator policy template for the Radar 'Policy' tab. This is a SAMPLE — the",
+    "live policy is stored in Postgres (governance.operator_policy); paste an edited",
+    "copy of this into the Policy tab and click 'Save policy'.",
+    "",
+    "The 'agents' and 'tools' sections work IDENTICALLY — both use the model below.",
+    "AGENTS are enforced at the write-action gate (a denied agent is blocked) and",
+    "shown on the Policy tab's 'Agent recognition' table + the Radar 'recognised'",
+    "badge. TOOLS are enforced + shown on 'Tool Risk Tiers'.",
+    "",
+    "DECISION MODEL (agents AND tools):",
+    "  1. DEFAULT CHECK = the slider ('allowed risk level' on Tool Risk Tiers). An",
+    "     agent/tool is ALLOWED when its risk tier is BELOW the slider, DENIED at or",
+    "     above it. For an AGENT the tier is its authoritative risk; for a TOOL it is",
+    "     the SLM-reasoned tier.",
+    "  2. EXPLICIT OVERRIDE = the only thing that beats the slider:",
+    "     'allow': true  -> always allowed (whitelist, even above the slider).",
+    "     'allow': false -> always denied  (even below the slider).",
+    "  3. 'risk' RELABELS the tier the slider compares against.",
+    "",
+    "Omitting a field — or setting it to the string \"default\" — means 'no opinion,",
+    "use the slider / OPA-suggested value'. allow:\"default\" and risk:\"default\" behave",
+    "exactly as if the field were absent.",
+    "",
+    "Keys may be an exact agent id/name or a glob ('agent-crewai-*', '*temporal*');",
+    "tool keys are the tool name (globs allowed). Agent risk -> low|medium|high;",
+    "tool risk -> low|medium|high|severe. Keys beginning with '_' are ignored.",
+    "NOTE: the slider-default for agents needs the OPA agent running (it owns the",
+    "slider); without it, only explicit agent allow/deny apply."
+  ],
+
+  "version": 1,
+  "updated_by": "operator",
+  "note": "example policy — demonstrates every agent + tool capability",
+
+  "agents": {
+    "*temporal*":          { "allow": false, "note": "EXPLICIT DENY  — infra process, never recognised" },
+    "Python":              { "allow": false, "note": "EXPLICIT DENY  — bare interpreter, not a task agent" },
+    "agent-crewai-*":      { "allow": true,  "note": "EXPLICIT ALLOW — whitelist past the slider, even at high risk" },
+    "agent-langgraph-*":   { "risk": "low",  "note": "RISK OVERRIDE  — relabel to low so the slider lets it through" },
+    "agent-pydantic_ai-*": { "allow": "default", "note": "DEFAULT       — defer to the slider (same as omitting allow)" }
+  },
+
+  "tools": {
+    "run_command":   { "allow": false, "note": "EXPLICIT DENY  — shell exec, always blocked" },
+    "external_post": { "allow": false, "note": "EXPLICIT DENY  — outbound write, always blocked" },
+    "web_search":    { "allow": true,  "note": "EXPLICIT ALLOW — whitelist past the slider" },
+    "save_artifact": { "risk": "medium", "note": "RISK OVERRIDE  — relabel tier the slider compares against" },
+    "search_arxiv":  { "risk": "default", "note": "DEFAULT       — let the SLM tier + slider decide" }
+  }
+}

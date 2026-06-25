@@ -11,6 +11,51 @@ from awcp.radar.store import REGISTRY
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
 SCAN_INTERVAL = float(os.getenv("AGENT_RADAR_SCAN_INTERVAL", "30"))
+# Passive AgentCard discovery on scan-sourced entries (additive enrichment). Each
+# entry is attempted at most once (the `not entry.card` guard), with a short
+# timeout so it can't stall the scan cycle. Env-gated off-switch; SSRF-guarded, so
+# in production (AGENT_RADAR_ALLOW_LOOPBACK=false) only routable endpoints are tried.
+SCAN_CARD_DISCOVERY = os.getenv("AGENT_RADAR_SCAN_CARD_DISCOVERY", "true").lower() == "true"
+SCAN_CARD_TIMEOUT = float(os.getenv("AGENT_RADAR_SCAN_CARD_TIMEOUT", "3"))
+
+
+def _try_fetch_card_sync(agent_id: str, endpoint: str) -> None:
+    """Best-effort SYNCHRONOUS card fetch for a scan-sourced entry (the scanner runs
+    in a plain thread with no event loop, so this stays sync). Only called when the
+    entry has no card yet. Any failure — unsafe URL, no card, timeout — is silent."""
+    import time
+    import httpx
+    from awcp.radar.netguard import assert_safe_url, UnsafeURLError
+    from awcp.radar.card import skill_ids
+    card_url = endpoint.rstrip("/") + "/.well-known/agent.json"
+    try:
+        assert_safe_url(card_url)
+        resp = httpx.get(card_url, timeout=SCAN_CARD_TIMEOUT,
+                         headers={"Accept": "application/json",
+                                  "ngrok-skip-browser-warning": "true"})
+        resp.raise_for_status()
+        raw = resp.json()
+        if not isinstance(raw, dict):
+            return
+        skills = skill_ids(raw)
+        REGISTRY.patch(agent_id, card=raw, skills=skills,
+                       card_url=card_url, card_fetched_at=time.time())
+        log.info("radar.scan.card agent_id=%s skills=%d", agent_id, len(skills))
+    except UnsafeURLError:
+        pass
+    except Exception:  # noqa: BLE001 — passive discovery is best-effort, never noisy
+        pass
+
+
+def _discover_cards() -> None:
+    """After a scan, fetch a card for any alive scan-sourced entry that exposes an
+    http(s) endpoint and has no card yet. Each entry is attempted at most once."""
+    if not SCAN_CARD_DISCOVERY:
+        return
+    for entry in REGISTRY.all():
+        if (entry.source == "scan" and entry.alive and not entry.card
+                and (entry.endpoint or "").startswith(("http://", "https://"))):
+            _try_fetch_card_sync(entry.id, entry.endpoint)
 
 
 class Scanner:
@@ -38,6 +83,10 @@ class Scanner:
                     REGISTRY.reconcile_scan(detected)
                     post = len(REGISTRY.all())
                     new = max(0, post - pre)
+
+                    # Passive AgentCard discovery for newly/again-seen scan entries
+                    # (additive; guarded + best-effort; skips entries already carded).
+                    _discover_cards()
 
                     span.set_attribute("agents.new", new)
                     span.set_attribute("agents.total", post)

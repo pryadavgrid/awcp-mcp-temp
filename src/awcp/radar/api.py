@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from awcp.radar import onboarding, policy, opa, tokens
 from awcp.radar import db as _events_db
+from awcp.radar import operator_policy
 from awcp.radar.models import AgentEntry, RegisterRequest
 from awcp.radar.store import REGISTRY
 from awcp.radar.scanner import SCANNER
@@ -34,6 +35,7 @@ from awcp.radar.temporal.config import TEMPORAL_SERVER_URL, TASK_QUEUE, TEMPORAL
 from awcp.radar.temporal.workflows.onboarding import AgentOnboardingWorkflow
 from awcp.radar.temporal.workflows.execution import AgentExecutionWorkflow
 from awcp.radar.temporal.activities.onboarding import (
+    fetch_card,
     map_identity,
     quarantine_check,
     link_mcp,
@@ -86,6 +88,36 @@ OPA_AGENT_TIMEOUT = float(os.getenv("AWCP_OPA_AGENT_TIMEOUT", "3"))
 # Fail-open: if the OPA agent is unreachable, allow the tool (default). Set false
 # to fail CLOSED (treat an unreachable PDP as a block) for stricter governance.
 OPA_AGENT_FAIL_OPEN = os.getenv("AWCP_OPA_AGENT_FAIL_OPEN", "true").strip().lower() == "true"
+
+
+# The OPA agent owns the operator's block THRESHOLD (the Radar slider). The agent
+# admission check below uses it as the DEFAULT allow/deny gate (an agent whose risk
+# tier is at or above the threshold is denied unless the policy explicitly allows it),
+# so the radar fetches + caches it. Short TTL so slider moves propagate; last-good is
+# kept on a hiccup; a short timeout keeps it off the gate's critical path.
+_OPA_THR_TTL = float(os.getenv("AWCP_OPA_THRESHOLD_TTL", "10"))
+_OPA_THR_CACHE: dict = {"data": {"threshold": None, "tiers": []}, "ts": 0.0}
+
+
+def _opa_threshold() -> dict:
+    """The OPA agent's current {threshold, tiers}, cached for _OPA_THR_TTL seconds.
+    {threshold:None, tiers:[]} when the OPA agent is unset/unreachable — the agent
+    check then has no threshold opinion and falls back to explicit rules only."""
+    if not OPA_AGENT_URL:
+        return {"threshold": None, "tiers": []}
+    now = time.monotonic()
+    if _OPA_THR_CACHE["ts"] and now - _OPA_THR_CACHE["ts"] < _OPA_THR_TTL:
+        return _OPA_THR_CACHE["data"]
+    try:
+        r = httpx.get(f"{OPA_AGENT_URL}/health", timeout=min(2.0, OPA_AGENT_TIMEOUT))
+        r.raise_for_status()
+        j = r.json()
+        _OPA_THR_CACHE["data"] = {"threshold": j.get("block_threshold"),
+                                  "tiers": j.get("tiers") or []}
+    except Exception as exc:  # noqa: BLE001 — keep last-good; never break the gate
+        log.debug("radar.opa_threshold.fetch_failed error=%r", exc)
+    _OPA_THR_CACHE["ts"] = now
+    return _OPA_THR_CACHE["data"]
 
 
 async def _opa_tool_evaluate(agent_id: str, task_id: str, tool: str, event: dict) -> dict:
@@ -719,6 +751,24 @@ async def _onboard_inline(agent_id: str) -> None:
     reason: str | None = None
 
     with radar_span("radar.onboard.inline", {"agent_id": agent_id, "path": path}):
+        # Step 0: fetch AgentCard (best-effort enrichment; runs before map_identity
+        # so entry.card is populated for the rest of the pipeline). Card governance
+        # fields are NEVER applied to enforced fields (see card.py boundary). A
+        # failure just leaves the entry card-less and onboarding continues.
+        with radar_span("radar.onboard.step.fetch_card", {"agent_id": agent_id}):
+            try:
+                if not (e.card is not None and e.card_fetched_at is not None):
+                    raw, skills, note = await onboarding.fetch_card(e)
+                    patch = {"card_fetched_at": time.time()}
+                    if raw is not None:
+                        patch.update(card=raw, skills=skills,
+                                     card_url=(e.endpoint or "").rstrip("/") + "/.well-known/agent.json")
+                    REGISTRY.patch(agent_id, **patch)
+                    log.info("radar.onboard.fetch_card agent_id=%s note=%r", agent_id, note)
+                    e = REGISTRY.get(agent_id)
+            except Exception as exc:  # noqa: BLE001 — card is enrichment, never fatal
+                log.warning("radar.onboard.fetch_card.failed agent_id=%s error=%r", agent_id, exc)
+
         # Step 1: map identity (normalize owner/runtime/version)
         t0 = time.monotonic()
         with radar_span("radar.onboard.step.map_identity", {"agent_id": agent_id}):
@@ -850,7 +900,7 @@ async def _connect_temporal() -> None:
             client,
             task_queue=TASK_QUEUE,
             workflows=[AgentOnboardingWorkflow],
-            activities=[map_identity, quarantine_check, link_mcp, admit],
+            activities=[fetch_card, map_identity, quarantine_check, link_mcp, admit],
         )
         execution_worker = Worker(
             client,
@@ -940,6 +990,9 @@ async def lifespan(app: FastAPI):
     log.info("radar.startup starting scanner and connecting to Temporal...")
     # Durable governance-event log (fail-open: a no-op if no DB is configured).
     _events_db.init()
+    # Warm the operator-policy cache from Postgres so the gate / tool hot-paths
+    # read it without a DB round-trip. Inert (no-op) when no policy is stored.
+    operator_policy.reload()
     # Re-arm the approval gate (Step 2): registry.agents carries no approval state,
     # so rehydrate it from any still-open governance.approval_tokens. A no-op when
     # no DB / no open tokens.
@@ -1106,6 +1159,44 @@ def _gate_guard(agent_id: str, decision: dict, action: str, scope: str,
     return decision
 
 
+def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "") -> dict:
+    """Apply the operator policy (Radar Policy tab) as an ADMISSION check on top of
+    the PDP decision, covering BOTH halves of the policy:
+
+      * AGENT — an agent the operator marked NOT recognised (allow=false) is denied;
+      * TOOL  — the action being gated is the tool name (the MCP server gates every
+        tool by name pre-execution), so a tool the operator denied (allow=false) is
+        blocked here too — the same central chokepoint that enforces agents.
+
+    The AGENT decision is threshold-default: an explicit policy ``allow`` wins, else
+    the agent is recognised iff its (authoritative) risk tier is BELOW the slider
+    threshold. Like _gate_guard this can only TIGHTEN an allow into a deny, never the
+    reverse, and is a no-op when no policy is stored. Fail-open on any error (the gate
+    must never crash on the policy layer)."""
+    if decision.get("decision") != "allow":
+        return decision
+    try:
+        thr = _opa_threshold()
+        rec = operator_policy.agent_recognised(
+            entry.id, getattr(entry, "name", "") or "",
+            policy.authoritative_risk(entry), thr.get("threshold"), thr.get("tiers"))
+        if rec is False:
+            return {**decision, "decision": "deny", "gate": "denied", "mode": "operator_policy",
+                    "reason": (f"agent not recognised by operator policy "
+                               f"(risk {policy.authoritative_risk(entry)} ≥ allowed level "
+                               f"{thr.get('threshold')})" if thr.get("threshold")
+                               else "agent not recognised by operator policy (allow=false)")}
+        if action:
+            tov = operator_policy.tool_decision(action)
+            if tov and tov.get("block") is True:
+                return {**decision, "decision": "deny", "gate": "denied", "mode": "operator_policy",
+                        "reason": (tov.get("note") and f"tool '{action}' denied by operator policy "
+                                   f"({tov['note']})") or f"tool '{action}' denied by operator policy"}
+    except Exception:  # noqa: BLE001 — the gate must never crash on the policy layer
+        return decision
+    return decision
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "agent"
 
@@ -1125,12 +1216,38 @@ def _to_dict(e: AgentEntry) -> dict:
     # the agent's CURRENT degradation-stage directives (sampling / retry /
     # concurrency / profile / writes) so the runtime + operators can honour them
     d["effective_stage"] = policy.effective_stage(e)
+    # Operator-policy view (Radar Policy tab): whether this DETECTED agent is
+    # RECOGNISED (allowed) — explicit policy allow, else the slider threshold vs the
+    # agent's authoritative risk tier — plus any operator-set risk tier. None when the
+    # policy is inert / can't decide (no rule + no threshold), so the layer stays inert.
+    try:
+        thr = _opa_threshold()
+        d["recognised"] = operator_policy.agent_recognised(
+            e.id, getattr(e, "name", "") or "", d["authoritative_risk"],
+            thr.get("threshold"), thr.get("tiers"))
+        d["policy_risk"] = operator_policy.agent_risk_override(e.id, getattr(e, "name", "") or "")
+    except Exception:  # noqa: BLE001 — never let the policy view break the listing
+        d["recognised"], d["policy_risk"] = None, None
+    # AgentCard summary (compact — the full card is at GET /agents/{id}/card). Only
+    # present when a card was fetched, so existing list consumers are unaffected.
+    if e.card:
+        d["card_summary"] = {
+            "description": e.card.get("description", ""),
+            "skills": e.skills or [],
+            "protocol_version": e.card.get("protocol_version", ""),
+        }
     return d
 
 
 @router.get("/agents")
-def list_agents() -> list[dict]:
-    return [_to_dict(e) for e in REGISTRY.all()]
+def list_agents(skill: str | None = None) -> list[dict]:
+    """List agents. Optional ?skill=<id> filters to agents whose AgentCard
+    advertises that skill (in-memory comprehension over the denormalized
+    AgentEntry.skills — no DB query). Omitting it returns all agents (unchanged)."""
+    entries = REGISTRY.all()
+    if skill:
+        entries = [e for e in entries if skill in (e.skills or [])]
+    return [_to_dict(e) for e in entries]
 
 
 @router.get("/agents/{agent_id}")
@@ -1139,6 +1256,32 @@ def get_agent(agent_id: str) -> dict:
     if not e:
         raise HTTPException(status_code=404, detail="agent not found")
     return _to_dict(e)
+
+
+@router.get("/agents/{agent_id}/card")
+def get_agent_card(agent_id: str) -> dict:
+    """The full raw AgentCard for one agent (A2A /.well-known/agent.json), as
+    fetched. 404 when the agent or its card is absent."""
+    e = REGISTRY.get(agent_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="agent not found")
+    if not e.card:
+        raise HTTPException(status_code=404, detail="no card fetched for this agent")
+    return e.card
+
+
+@router.post("/agents/{agent_id}/card/refresh")
+async def refresh_card(agent_id: str) -> dict:
+    """Force a re-fetch of the agent's card without a full re-onboarding. Updates
+    entry.card / entry.skills on success; best-effort (returns ok=false + a note)."""
+    e = _require(agent_id)
+    raw, skills, note = await onboarding.fetch_card(e)
+    if raw is not None:
+        REGISTRY.patch(agent_id, card=raw, skills=skills,
+                       card_url=(e.endpoint or "").rstrip("/") + "/.well-known/agent.json",
+                       card_fetched_at=time.time())
+        _record_event("card_refreshed", agent_id, note or "", skills=len(skills))
+    return {"ok": raw is not None, "note": note, "skills": skills}
 
 
 def _assert_safe_agent_urls(req: RegisterRequest) -> None:
@@ -1218,7 +1361,13 @@ def register(req: RegisterRequest) -> dict:
         # agent escape a pending re-approval just by re-registering unchanged.
         entry.approval_state = existing.approval_state
         entry.approval_reason = existing.approval_reason
-        added = sorted(set(req.write_scopes) - set(existing.write_scopes or []))
+        # Carry forward the operator-APPROVED scope set so an already-approved scope
+        # never reads as "added" on a later re-register. Without this, an agent that
+        # restarts (or whose entry briefly drops its scopes) re-declares its full set
+        # and the gate re-arms every time — an endless re-approval loop.
+        entry.approved_scopes = list(existing.approved_scopes or [])
+        prior = set(existing.write_scopes or []) | set(existing.approved_scopes or [])
+        added = sorted(set(req.write_scopes) - prior)
         removed = sorted(set(existing.write_scopes or []) - set(req.write_scopes))
         if added:
             entry.approval_state = "pending"
@@ -1356,6 +1505,96 @@ async def announce(req: RegisterRequest) -> dict:
     return _to_dict(REGISTRY.get(agent_id))
 
 
+class CardRegisterRequest(BaseModel):
+    card_url: str                   # full URL to the agent's /.well-known/agent.json
+    id: str | None = None           # optional stable id override
+    pid: int | None = None          # optional pid (lets a scan row be correlated later)
+
+
+@router.post("/agents/register-card")
+async def register_card(req: CardRegisterRequest) -> dict:
+    """Card-first registration: fetch the agent's AgentCard from a well-known URL
+    and create the registry entry from it, then onboard normally.
+
+    GOVERNANCE BOUNDARY: write_scopes / policy_callbacks / feature_flags / risk that
+    appear INSIDE the card are NOT mapped onto the enforced AgentEntry fields — a
+    self-published card must not widen its own grants (hardening gap #5). They are
+    kept in the raw `card` blob for operator introspection; the magazine
+    (map_identity) sets the authoritative governance fields during onboarding."""
+    from awcp.radar.netguard import assert_safe_url, UnsafeURLError
+    from awcp.radar.card import skill_ids
+
+    # 1. SSRF guard on the card URL itself (the server is about to fetch it).
+    try:
+        assert_safe_url(req.card_url)
+    except UnsafeURLError as exc:
+        raise HTTPException(status_code=400, detail=f"unsafe card_url: {exc}")
+
+    # 2. Fetch + parse the card.
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(req.card_url, headers={"Accept": "application/json",
+                                                           "ngrok-skip-browser-warning": "true"})
+            resp.raise_for_status()
+            raw = resp.json()
+        if not isinstance(raw, dict):
+            raise ValueError("card is not a JSON object")
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502,
+                            detail=f"could not fetch card: {type(exc).__name__}: {exc}")
+
+    agent_id = req.id or f"reg-{_slug(raw.get('name', 'agent'))}"
+    skills = skill_ids(raw)
+    endpoint = raw.get("url") or None
+
+    # 3. SSRF guard on the card's DECLARED endpoint (link_mcp/fetch_card fetch it later).
+    if endpoint and endpoint.startswith(("http://", "https://")):
+        try:
+            assert_safe_url(endpoint)
+        except UnsafeURLError as exc:
+            raise HTTPException(status_code=400, detail=f"unsafe endpoint in card: {exc}")
+
+    entry = AgentEntry(
+        id=agent_id,
+        name=raw.get("name", "unknown"),
+        source="self",
+        pid=req.pid,
+        endpoint=endpoint,
+        version=raw.get("version", "unknown"),
+        # write_scopes/policy_callbacks/feature_flags/risk intentionally NOT taken
+        # from the card — set by map_identity (magazine) during onboarding.
+        card=raw,
+        card_url=req.card_url,
+        card_fetched_at=time.time(),
+        skills=skills,
+        onboarding_state="pending",
+    )
+    entry.risk = policy.authoritative_risk(entry)   # tighten-only, same as announce
+    REGISTRY.register(entry)
+    _record_event("card_registered", agent_id, raw.get("name", ""), risk=entry.risk)
+    log.info("radar.register_card agent_id=%s name=%r skills=%d endpoint=%s",
+             agent_id, raw.get("name"), len(skills), endpoint)
+
+    # 4. Onboard (Temporal if available, else inline) — same path as announce. The
+    # fetch_card step short-circuits since the card is already present.
+    if STATE["temporal"] and STATE["client"] is not None:
+        wf_id = f"onboard-{agent_id}-{int(time.time())}"
+        try:
+            await STATE["client"].start_workflow(
+                AgentOnboardingWorkflow.run, agent_id, id=wf_id, task_queue=TASK_QUEUE)
+            REGISTRY.patch(agent_id, onboarding_state="running", onboarding_workflow_id=wf_id)
+            _events_db.record_onboarding_run(wf_id, agent_id, "running")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("radar.register_card.temporal.fallback agent_id=%s error=%r", agent_id, exc)
+            await _onboard_inline(agent_id)
+    else:
+        await _onboard_inline(agent_id)
+
+    return _to_dict(REGISTRY.get(agent_id))
+
+
 # ----------------------------------------------------------------------
 # Write-action gate + degradation ladder (governance, ported from awcp_agents)
 # ----------------------------------------------------------------------
@@ -1427,6 +1666,10 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     # execution-event endpoint, so a deny-listed tool is blocked on either path.
     decision = _gate_guard(agent_id, decision, action=req.action, scope=req.scope,
                            write=req.write, risk=e.risk)
+    # Operator-policy admission: a detected agent the operator did NOT recognise,
+    # OR a tool the operator denied (the gated `action` is the tool name), is denied
+    # (Radar Policy tab). Only ever tightens; no-op when no policy names them.
+    decision = _operator_policy_gate(e, decision, action=req.action)
 
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
@@ -1592,8 +1835,13 @@ def approve(agent_id: str) -> dict:
                 "status": e.status, "note": "no pending approval"}
     probe = e.model_copy(update={"approval_state": "approved", "approval_reason": None})
     status, reason = onboarding.decide_status(probe)
+    # Record the approved scope set (union with any previously approved) so a later
+    # re-register with these same scopes does NOT re-arm the gate — this is what
+    # stops the scope_added quarantine from looping on every agent restart.
+    approved_scopes = sorted(set(e.write_scopes or []) | set(e.approved_scopes or []))
     updated = REGISTRY.patch(agent_id, approval_state="approved", approval_reason=None,
-                             status=status, quarantine_reason=reason)
+                             status=status, quarantine_reason=reason,
+                             approved_scopes=approved_scopes)
     # Settle the durable token(s) so the gate does NOT re-arm on the next restart.
     _events_db.decide_approval(agent_id, "approved")
     _record_event("approved", agent_id,
@@ -1679,6 +1927,49 @@ def set_risk(agent_id: str, req: RiskRequest) -> dict:
     _record_event("risk", agent_id, f"operator set {detail}")
     return {"agent_id": agent_id, "risk": updated.risk,
             "token_budget": getattr(updated, "token_budget", None)}
+
+
+class PolicyRequest(BaseModel):
+    # The operator-authored policy document (see operator_policy.validate_policy
+    # for the shape) plus optional audit metadata.
+    policy: dict
+    updated_by: str = ""
+    note: str = ""
+
+
+@router.get("/policy")
+def get_policy() -> dict:
+    """The ACTIVE operator policy (Radar Policy tab) + its metadata, or an inert
+    default when none is stored. Read-only; safe with no DB."""
+    env = operator_policy.active()
+    if not env:
+        return {"stored": False, "enabled": False,
+                "policy": {"defaults": {"agents": {"allow": True}, "tools": {"allow": True}},
+                           "agents": {}, "tools": {}}}
+    return {"stored": True, "enabled": operator_policy.enabled(),
+            "id": env.get("id"), "ts": env.get("ts"), "version": env.get("version"),
+            "updated_by": env.get("updated_by"), "note": env.get("note"),
+            "policy": env.get("policy") or {}}
+
+
+@router.put("/policy")
+def put_policy(req: PolicyRequest) -> dict:
+    """Operator action — save a new operator-policy version to Postgres (append-only
+    + versioned). Validates the document first (HTTP 400 on a bad shape) and refuses
+    to report success if it could not be persisted (HTTP 503 when no governance DB).
+    The new policy takes effect immediately — detection is unchanged; the gate +
+    tool-tier path consult it live."""
+    result = operator_policy.save(req.policy, updated_by=req.updated_by, note=req.note)
+    if not result.get("ok"):
+        err = result.get("error", "invalid policy")
+        # A validation problem is the caller's fault (400); a missing DB is 503.
+        code = 503 if "not persisted" in err else 400
+        raise HTTPException(status_code=code, detail=err)
+    _record_event("operator_policy", req.updated_by or "operator",
+                  f"operator saved policy v{result.get('version')} "
+                  f"(agents={len(req.policy.get('agents') or {})}, "
+                  f"tools={len(req.policy.get('tools') or {})})")
+    return {"ok": True, **result, "enabled": operator_policy.enabled()}
 
 
 @router.delete("/agents/{agent_id}")
@@ -1877,14 +2168,30 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
                         "tool": _tool, "decision": "deny", "mode": _gd.get("mode"),
                         "gate_reason": _gd.get("reason")}
 
-    # OPA tool-tier gate (the hidden OPA agent): tier EVERY tool/web_search call by
-    # its operator-set risk tier, record the per-question JSON + log it to Laminar,
-    # and BLOCK the answer when the tier is high/severe — reusing the same
-    # finish-blocked path as the policy-guard so the user UI surfaces the severity.
-    if OPA_AGENT_URL and agent_id and event.get("type") in ("web_search", "tool_called"):
+    # OPA tool-tier gate + operator tool policy. FIRST the hidden OPA agent assigns
+    # a baseline risk tier to the tool call (records the per-question JSON + logs it
+    # to Laminar) and may BLOCK on its threshold; THEN the operator policy (Radar
+    # Policy tab) is consulted as an override — it can relabel the tier and force
+    # allow (whitelist) or deny (the operator's "special changes requested"). A
+    # final block reuses the policy-guard's finish-blocked path so the user UI
+    # surfaces the severity. Runs when EITHER layer is active.
+    if agent_id and event.get("type") in ("web_search", "tool_called") and (
+            OPA_AGENT_URL or operator_policy.enabled()):
         _tool = event.get("tool_name") or event.get("type")
         if _tool:
             _opa = await _opa_tool_evaluate(agent_id, task_id, _tool, event)
+            # Operator override applied AFTER the OPA tier assignment.
+            _ov = operator_policy.tool_decision(_tool, _opa.get("risk_tier"))
+            if _ov:
+                if _ov.get("risk_tier"):
+                    _opa["risk_tier"] = _ov["risk_tier"]
+                if _ov.get("block") is True:
+                    _opa["decision"] = "block"
+                    _opa["engine"] = "operator_policy"
+                    _opa["reason"] = (f"tool '{_tool}' denied by operator policy"
+                                      + (f" ({_ov['note']})" if _ov.get("note") else ""))
+                elif _ov.get("block") is False:
+                    _opa["decision"] = "allow"      # operator whitelist overrides OPA block
             if _opa.get("decision") == "block":
                 _why = _opa.get("reason") or (
                     f"tool '{_tool}' is {_opa.get('risk_tier')} risk — blocked by OPA tool policy")

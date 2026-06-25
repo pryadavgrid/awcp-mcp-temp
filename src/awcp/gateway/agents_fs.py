@@ -28,9 +28,8 @@ import re
 import subprocess
 
 # The bundle of standalone agents. Override with AWCP_AGENTS_DIR.
-AGENTS_DIR = os.getenv(
-    "AWCP_AGENTS_DIR", "/Users/pryadav/Downloads/awcp-mcp-temp-agents"
-)
+AGENTS_DIR = "/Users/ssrivastava/Desktop/capstone-awcp/awcp-agents"
+
 
 # Where launched agents should send governance + execution events. Points at
 # THIS gateway's mounted radar so the agent -> radar -> Temporal/OTel pipeline is

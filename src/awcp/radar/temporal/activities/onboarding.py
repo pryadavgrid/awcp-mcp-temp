@@ -15,6 +15,34 @@ from awcp.radar.temporal.mirror import mirror_activity
 
 
 @activity.defn
+async def fetch_card(agent_id: str) -> str:
+    """Step 1 — fetch the agent's AgentCard (/.well-known/agent.json), best-effort.
+
+    Card data is ENRICHMENT only: it populates entry.card / entry.skills for
+    introspection and ?skill= filtering. The governance fields a card may carry are
+    NEVER patched onto the enforced AgentEntry fields (see card.py governance
+    boundary). Short-circuits when a card is already present (e.g. register-card
+    pre-populated it), so onboarding never re-fetches a card it already has."""
+    import time
+    e = REGISTRY.get(agent_id)
+    if not e:
+        result = "missing"
+    elif e.card is not None and e.card_fetched_at is not None:
+        result = f"card already present ({len(e.skills or [])} skills) — skipping re-fetch"
+    else:
+        raw, skills, note = await onboarding.fetch_card(e)
+        patch: dict = {"card_fetched_at": time.time()}
+        if raw is not None:
+            patch["card"] = raw
+            patch["skills"] = skills
+            patch["card_url"] = (e.endpoint or "").rstrip("/") + "/.well-known/agent.json"
+        REGISTRY.patch(agent_id, **patch)
+        result = note or "no card"
+    mirror_activity(agent_id, result)
+    return result
+
+
+@activity.defn
 async def map_identity(agent_id: str) -> str:
     e = REGISTRY.get(agent_id)
     if not e:

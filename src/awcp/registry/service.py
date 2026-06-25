@@ -14,6 +14,31 @@ def _make_stable_id(route: str) -> str:
     return f"agt_{hashlib.md5(route.encode()).hexdigest()[:8]}"
 
 
+def _spec_to_card(spec: AgentSpec, endpoint_url: str, version: str) -> dict:
+    """Generate a minimal A2A AgentCard dict from an AgentSpec, so AWCP's own agents
+    are discoverable at /.well-known/agent.json. Built via the AgentCard model so
+    schema-level defaults (protocol_version, etc.) come from one source (radar/card.py)
+    rather than being re-stated here. The governance fields it carries are advisory
+    only — same boundary as a fetched card (see radar/card.py)."""
+    from awcp.radar.card import AgentCard, AgentSkill
+    card = AgentCard(
+        name=spec.name,
+        description=f"AWCP agent: {spec.name}",
+        url=endpoint_url,
+        version=version or "unknown",
+        skills=[AgentSkill(id=spec.tool, name=spec.tool)] if spec.tool else [],
+        capabilities={"streaming": False},
+        write_scopes=list(spec.write_scopes or []),
+        policy_callbacks=list(getattr(spec, "policy_callbacks", []) or []),
+        feature_flags=dict(spec.feature_flags or {}),
+        # AWCP's own in-process agents are the most-trusted tier (T0); risk uses the
+        # AgentCard default. Both read from the spec when it provides them.
+        risk=getattr(spec, "risk", None) or AgentCard.model_fields["risk"].default,
+        harness_tier=getattr(spec, "harness_tier", 0),
+    )
+    return card.model_dump()
+
+
 def _hash_agent_file(spec: AgentSpec) -> str:
     """
     Locate the physical source file of the agent's handler function
@@ -64,17 +89,25 @@ def build_registry() -> list[AgentSpec]:
         else:
             status = "active"
 
+        endpoint_url = f"{base_url.rstrip('/')}{spec.route}"
+        card = _spec_to_card(spec, endpoint_url, dynamic_version)
         entries.append(AgentEntry(
             agent_id=stable_id,
             name=spec.name,
             route=spec.route,
-            endpoint_url=f"{base_url.rstrip('/')}{spec.route}",
+            endpoint_url=endpoint_url,
             runtime=spec.runtime,
             version=dynamic_version,
             owner=owner,
             write_scopes=spec.write_scopes,
             feature_flags=feature_flags,
             status=status,
+            # AgentCard generated from the spec (served from this process — so
+            # card_url / card_fetched_at stay None, unlike a fetched card).
+            card=card,
+            skills=[spec.tool] if spec.tool else [],
+            card_url=None,
+            card_fetched_at=None,
         ))
 
     populate(entries)

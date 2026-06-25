@@ -162,10 +162,28 @@ def assigned_risk_for(entry: AgentEntry) -> str | None:
     return (profile.get("risk") or "").strip().lower() or None
 
 
+def operator_risk_for(entry: AgentEntry) -> str | None:
+    """An operator-set risk tier from the Radar Policy tab, or None. The human
+    operator is authoritative — unlike a self-declaring agent — so this OVERRIDES
+    both the declared and magazine tiers when present. Fail-open + lazy-imported
+    (no effect when no policy is stored); never breaks the gate hot-path."""
+    try:
+        from awcp.radar import operator_policy
+        return operator_policy.agent_risk_override(
+            getattr(entry, "id", "") or "", getattr(entry, "name", "") or "")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def authoritative_risk(entry: AgentEntry) -> str:
-    """The risk tier that ACTUALLY governs this agent: the more restrictive of
-    its self-declared tier and the magazine-assigned tier. Self-declaration can
-    only tighten, never loosen (hardening gap #1)."""
+    """The risk tier that ACTUALLY governs this agent. Precedence:
+    1. an operator-set tier (Radar Policy tab) — the human operator may set ANY
+       recognised tier, up or down;
+    2. else the more restrictive of the self-declared and magazine-assigned tiers
+       (self-declaration can only tighten, never loosen — hardening gap #1)."""
+    op = operator_risk_for(entry)
+    if op:
+        return op
     tier = more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
     # Guarantee a canonical, CHECK-legal tier: anything outside RISK_ORDER (e.g. a
     # self-declared unknown like "critical" with no magazine opinion) falls back to
