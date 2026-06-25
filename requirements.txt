@@ -64,8 +64,7 @@ opentelemetry-instrumentation-logging>=0.63b1
 protobuf>=6.33.6
 
 # --- Laminar LLM observability (native dashboard + auto-instrumentation) ---
-# lmnr 0.7.x pins opentelemetry-semantic-conventions==0.60b1 which conflicts
-# with this project's 0.63b1. pip will warn about the conflict but the packages
-# coexist — lmnr's instrumentors use a stable OTel API subset.
+# Verified on Python 3.12: lmnr 0.7.42 resolves cleanly alongside this project's
+# opentelemetry-semantic-conventions 0.63b1 (no conflict; pip check passes).
 lmnr>=0.7.0
 
