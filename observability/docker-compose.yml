@@ -79,33 +79,6 @@ services:
       - awcp-obs
 
   # ══════════════════════════════════════════
-  # OPA — Open Policy Agent (the write-action gate's Policy Decision Point)
-  # The magazine names OPA as the engine behind "Gate Write Actions" (Step 03) and
-  # the Approval Gate Controller ("Temporal + OPA"). The radar (radar/opa.py) POSTs
-  # each action's context to data.awcp.gate and enforces the verdict; policies live
-  # in ../policies (gate.rego). Decision API → http://localhost:8181
-  #
-  # Enable enforcement from the radar by pointing it here (shadow mode first):
-  #   AWCP_OPA_URL=http://localhost:8181 AWCP_OPA_SHADOW=true bash scripts/run_everything.sh
-  # ══════════════════════════════════════════
-  opa:
-    image: openpolicyagent/opa:0.70.0
-    container_name: awcp-opa
-    restart: unless-stopped
-    command:
-      - "run"
-      - "--server"
-      - "--addr=0.0.0.0:8181"
-      - "--log-level=info"
-      - "/policies"
-    volumes:
-      - ../policies:/policies:ro
-    ports:
-      - "8181:8181" # OPA Decision/Data API → http://localhost:8181
-    networks:
-      - awcp-obs
-
-  # ══════════════════════════════════════════
   # OTel Collector — receives from Python apps
   # ══════════════════════════════════════════
   otel-collector:
