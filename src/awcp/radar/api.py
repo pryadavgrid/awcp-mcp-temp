@@ -1179,7 +1179,8 @@ def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "") -
         thr = _opa_threshold()
         rec = operator_policy.agent_recognised(
             entry.id, getattr(entry, "name", "") or "",
-            policy.authoritative_risk(entry), thr.get("threshold"), thr.get("tiers"))
+            policy.authoritative_risk(entry), thr.get("threshold"), thr.get("tiers"),
+            getattr(entry, "skills", ()) or ())
         if rec is False:
             return {**decision, "decision": "deny", "gate": "denied", "mode": "operator_policy",
                     "reason": (f"agent not recognised by operator policy "
@@ -1224,7 +1225,7 @@ def _to_dict(e: AgentEntry) -> dict:
         thr = _opa_threshold()
         d["recognised"] = operator_policy.agent_recognised(
             e.id, getattr(e, "name", "") or "", d["authoritative_risk"],
-            thr.get("threshold"), thr.get("tiers"))
+            thr.get("threshold"), thr.get("tiers"), e.skills or [])
         d["policy_risk"] = operator_policy.agent_risk_override(e.id, getattr(e, "name", "") or "")
     except Exception:  # noqa: BLE001 — never let the policy view break the listing
         d["recognised"], d["policy_risk"] = None, None

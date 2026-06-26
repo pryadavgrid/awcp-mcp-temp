@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { usePoll } from '../hooks/usePoll.js'
 import { getPolicy, putPolicy, getAgents } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
@@ -26,6 +26,62 @@ const TEMPLATE = {
   },
 }
 
+// ── lightweight JSON syntax highlighting ──────────────────────────────────────
+// Renders the editor text as coloured HTML shown UNDER a transparent textarea, so
+// colouring tracks typing live without a heavy editor dependency. Restrained
+// palette: property keys, strings, numbers, booleans/null, punctuation. Strings are
+// matched whole (their contents are never re-tokenised), and everything is
+// HTML-escaped first, so this can't break the markup or mis-highlight.
+const _HL = {
+  key: '#1d4ed8',    // blue-700  — property names
+  str: '#047857',    // emerald-700 — string values
+  num: '#b45309',    // amber-700 — numbers
+  lit: '#7c3aed',    // violet-600 — true/false/null
+  punct: '#64748b',  // slate-500 — { } [ ] , :
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
+}
+
+// Colour one line of JSON. (Strings never span lines in valid JSON, so a per-line
+// pass is safe and lets us style the error line independently.)
+function highlightLine(line) {
+  return escapeHtml(line).replace(
+    /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],:])/g,
+    (m, str, colon, lit, num, punct) => {
+      if (str !== undefined) {
+        if (colon !== undefined) {
+          return `<span style="color:${_HL.key}">${str}</span><span style="color:${_HL.punct}">${colon}</span>`
+        }
+        return `<span style="color:${_HL.str}">${str}</span>`
+      }
+      if (lit !== undefined) return `<span style="color:${_HL.lit}">${lit}</span>`
+      if (num !== undefined) return `<span style="color:${_HL.num}">${num}</span>`
+      if (punct !== undefined) return `<span style="color:${_HL.punct}">${punct}</span>`
+      return m
+    },
+  )
+}
+
+// Render every line as a block, so the offending line (1-based `errorLine`, or null
+// when the JSON is valid) gets a soft red wash + a red wavy underline — an IDE-style
+// error marker that lines up exactly with the line number in the gutter.
+const _ERR_STYLE =
+  'display:block;background:rgba(239,68,68,0.13);' +
+  'text-decoration:underline wavy #ef4444;text-underline-offset:3px;text-decoration-skip-ink:none'
+
+function highlightJsonLines(src, errorLine) {
+  return src
+    .split('\n')
+    .map((ln, i) => {
+      const inner = highlightLine(ln) || ' ' // keep empty lines at full row height
+      const style = i + 1 === errorLine ? _ERR_STYLE : 'display:block'
+      return `<span style="${style}">${inner}</span>`
+    })
+    .join('')
+}
+
 export default function Policy() {
   const { data, loading, refresh } = usePoll(getPolicy, [])
   const { data: agentsData } = usePoll(getAgents, [])
@@ -36,6 +92,44 @@ export default function Policy() {
   const [msg, setMsg] = useState(null) // { tone:'green'|'red', text }
   const [saving, setSaving] = useState(false)
   const fileRef = useRef(null)
+  const taRef = useRef(null)
+  const gutterRef = useRef(null)
+  const preRef = useRef(null)
+
+  // Line numbers for the gutter, derived from the current text.
+  const lineCount = text.length ? text.split('\n').length : 1
+  const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')
+
+  // Live JSON validity → the 1-based line of the parse error (or null when valid /
+  // empty), so the editor can mark that line red as the operator types.
+  const errorLine = useMemo(() => {
+    if (!text.trim()) return null
+    try {
+      JSON.parse(text)
+      return null
+    } catch (e) {
+      const m = /position (\d+)/.exec(e.message || '')
+      return m ? text.slice(0, Number(m[1])).split('\n').length : null
+    }
+  }, [text])
+
+  // The highlighted HTML for the editor's underlay (colours + red error line).
+  const highlightedHtml = useMemo(() => highlightJsonLines(text, errorLine), [text, errorLine])
+
+  // Turn a JSON.parse error into a line/column the operator can jump to. V8's
+  // message carries a character "position N"; we map it back to line+col so the
+  // gutter number is actionable. Falls back to the raw message if no position.
+  function jsonError(e, src) {
+    const m = /position (\d+)/.exec(e.message || '')
+    if (m) {
+      const pos = Number(m[1])
+      const before = src.slice(0, pos)
+      const line = before.split('\n').length
+      const col = pos - before.lastIndexOf('\n')
+      return `invalid JSON at line ${line}, col ${col}: ${e.message}`
+    }
+    return `invalid JSON: ${e.message}`
+  }
 
   // Seed the editor from the store ONCE (and on an external reload), but never
   // clobber an in-progress edit on the 3s poll.
@@ -55,8 +149,49 @@ export default function Policy() {
       setText(JSON.stringify(JSON.parse(text), null, 2))
       setMsg({ tone: 'green', text: 'formatted' })
     } catch (e) {
-      setMsg({ tone: 'red', text: `invalid JSON: ${e.message}` })
+      setMsg({ tone: 'red', text: jsonError(e, text) })
     }
+  }
+
+  // Tab indents instead of moving focus, so the JSON editor behaves like a code
+  // editor. Tab: insert 2 spaces at the cursor, or indent every line in a multi-line
+  // selection. Shift+Tab: dedent the current/selected lines. 2 spaces matches
+  // JSON.stringify(…, 2). Selection is restored after React re-renders the value.
+  function handleEditorKeyDown(e) {
+    if (e.key !== 'Tab') return
+    e.preventDefault()
+    const INDENT = '  '
+    const ta = e.target
+    const { selectionStart: start, selectionEnd: end, value } = ta
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1
+    const restore = (s, end2) => requestAnimationFrame(() => ta.setSelectionRange(s, end2))
+
+    // Plain Tab with no selection -> just insert an indent at the cursor.
+    if (!e.shiftKey && start === end) {
+      setText(value.slice(0, start) + INDENT + value.slice(end))
+      setDirty(true)
+      restore(start + INDENT.length, start + INDENT.length)
+      return
+    }
+
+    // Otherwise indent / dedent every line touched by the selection.
+    const lines = value.slice(lineStart, end).split('\n')
+    let firstDelta = 0
+    let totalDelta = 0
+    const out = lines.map((ln, i) => {
+      if (e.shiftKey) {
+        const removed = (ln.match(/^( {1,2}|\t)/) || [''])[0].length
+        if (i === 0) firstDelta = -removed
+        totalDelta -= removed
+        return ln.slice(removed)
+      }
+      if (i === 0) firstDelta = INDENT.length
+      totalDelta += INDENT.length
+      return INDENT + ln
+    })
+    setText(value.slice(0, lineStart) + out.join('\n') + value.slice(end))
+    setDirty(true)
+    restore(Math.max(lineStart, start + firstDelta), end + totalDelta)
   }
 
   function reload() {
@@ -79,7 +214,7 @@ export default function Policy() {
       setDirty(true)
       setMsg({ tone: 'green', text: `imported ${file.name} — review, then Save` })
     } catch (err) {
-      setMsg({ tone: 'red', text: `import failed (${file.name}): ${err.message}` })
+      setMsg({ tone: 'red', text: `import failed (${file.name}): ${jsonError(err, '')}` })
     }
   }
 
@@ -88,7 +223,7 @@ export default function Policy() {
     try {
       doc = JSON.parse(text)
     } catch (e) {
-      setMsg({ tone: 'red', text: `invalid JSON: ${e.message}` })
+      setMsg({ tone: 'red', text: jsonError(e, text) })
       return
     }
     setSaving(true)
@@ -110,33 +245,77 @@ export default function Policy() {
     <div className="space-y-6">
       <Panel
         title="Operator Policy"
-        subtitle="Name which detected agents are recognised (allowed) and at what risk tier — same for tools. The OPA agent assigns a baseline tier first; this policy is applied after, as the operator override. Stored in Postgres."
+        subtitle="Operator overrides for which agents and tools are allowed, and at what risk tier — applied on top of the OPA-assigned baseline."
         right={<span className="text-xs text-slate-500">{meta}</span>}
       >
-        <div className="space-y-3 px-5 py-4">
-          <p className="text-xs leading-relaxed text-slate-500">
-            Detection is unchanged — every process is still auto-detected. <b>Default check:</b> the{' '}
-            <b>slider</b> on Tool Risk Tiers (“allowed risk level”) — an agent/tool is allowed when its risk tier is{' '}
-            <i>below</i> the slider, denied at or above it. <b>Override:</b> a rule with{' '}
-            <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">allow:true</code> is always allowed and{' '}
-            <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">allow:false</code> always denied; omit{' '}
-            <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">allow</code> to let the slider decide.{' '}
-            <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">risk</code> relabels the tier compared to the slider.
-            Agent keys match an <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">id</code>/
-            <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">name</code> (globs ok); tool keys match the tool name.
-            Agent risk ∈ low|medium|high; tool risk ∈ low|medium|high|severe.
-          </p>
+        <div className="space-y-4 px-5 py-4">
+          <dl className="grid grid-cols-[6.5rem_1fr] gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+            <dt className="font-mono text-[11px] text-slate-500">default</dt>
+            <dd className="text-slate-600">
+              Allowed when the tier is <span className="font-medium">below</span> the “allowed risk level” slider;
+              denied at or above it.
+            </dd>
+            <dt className="font-mono text-[11px] text-slate-500">allow</dt>
+            <dd className="text-slate-600">
+              <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">true</code> always
+              allow, <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">false</code>{' '}
+              always deny — overrides the slider. Omit to let the slider decide.
+            </dd>
+            <dt className="font-mono text-[11px] text-slate-500">risk</dt>
+            <dd className="text-slate-600">
+              Relabels the tier compared against the slider — agents{' '}
+              <span className="font-mono">low·medium·high</span>, tools also <span className="font-mono">severe</span>.
+            </dd>
+            <dt className="font-mono text-[11px] text-slate-500">skills</dt>
+            <dd className="text-slate-600">
+              Match agents by a card-declared skill (Skills column below). Can only{' '}
+              <span className="font-medium">tighten</span> — <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">allow:false</code> or raise risk — since skills are self-declared.
+            </dd>
+          </dl>
 
-          <textarea
-            value={text}
-            spellCheck={false}
-            onChange={(e) => {
-              setText(e.target.value)
-              setDirty(true)
-            }}
-            placeholder={loading ? 'Loading…' : '{ "defaults": {...}, "agents": {...}, "tools": {...} }'}
-            className="h-80 w-full resize-y rounded-lg border border-slate-300 bg-slate-50 p-3 font-mono text-[12.5px] leading-relaxed text-slate-800 outline-none focus:border-brand-500 focus:bg-white"
-          />
+          {/* Code-style editor: a line-number gutter + live JSON syntax colouring.
+              The colours are rendered in a <pre> UNDER a transparent textarea (the
+              textarea handles input/caret/selection; the pre shows the colours). All
+              three layers share the same font/size/line-height/padding and no-wrap,
+              so colours, caret and line numbers line up exactly and scroll together. */}
+          <div className="flex h-80 overflow-hidden rounded-lg border border-slate-300 bg-slate-50 focus-within:border-brand-500 focus-within:bg-white">
+            <div
+              ref={gutterRef}
+              aria-hidden="true"
+              className="select-none overflow-hidden whitespace-pre py-3 pl-3 pr-2 text-right font-mono text-[12.5px] leading-relaxed text-slate-400"
+            >
+              {lineNumbers}
+            </div>
+            <div className="relative flex-1 overflow-hidden">
+              <pre
+                ref={preRef}
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-slate-800"
+                dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+              />
+              <textarea
+                ref={taRef}
+                value={text}
+                spellCheck={false}
+                wrap="off"
+                onChange={(e) => {
+                  setText(e.target.value)
+                  setDirty(true)
+                }}
+                onKeyDown={handleEditorKeyDown}
+                onScroll={(e) => {
+                  const { scrollTop, scrollLeft } = e.target
+                  if (gutterRef.current) gutterRef.current.scrollTop = scrollTop
+                  if (preRef.current) {
+                    preRef.current.scrollTop = scrollTop
+                    preRef.current.scrollLeft = scrollLeft
+                  }
+                }}
+                placeholder={loading ? 'Loading…' : '{ "agents": {...}, "tools": {...} }'}
+                className="absolute inset-0 m-0 resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-transparent caret-slate-800 outline-none placeholder:text-slate-400"
+              />
+            </div>
+          </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <button
@@ -192,9 +371,9 @@ export default function Policy() {
           </span>
         }
       >
-        <Table columns={['Name', 'Status', 'Recognised', 'Risk (authoritative)']}>
+        <Table columns={['Name', 'Status', 'Recognised', 'Risk (authoritative)', 'Skills']}>
           {agents.length === 0 ? (
-            <EmptyRow colSpan={4}>No agents detected yet.</EmptyRow>
+            <EmptyRow colSpan={5}>No agents detected yet.</EmptyRow>
           ) : (
             agents.map((a) => (
               <tr key={a.id} className="hover:bg-slate-50">
@@ -223,6 +402,22 @@ export default function Policy() {
                       </span>
                     )}
                   </span>
+                </Td>
+                <Td>
+                  {(() => {
+                    const sk = (a.card_summary && a.card_summary.skills) || a.skills || []
+                    if (!sk.length) return <span className="text-slate-400">—</span>
+                    return (
+                      <span className="flex flex-wrap gap-1" title={sk.join(', ')}>
+                        {sk.slice(0, 4).map((s) => (
+                          <span key={s} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+                            {s}
+                          </span>
+                        ))}
+                        {sk.length > 4 && <span className="text-[10px] text-slate-400">+{sk.length - 4}</span>}
+                      </span>
+                    )
+                  })()}
                 </Td>
               </tr>
             ))

@@ -93,7 +93,7 @@ def enabled() -> bool:
     """True once a non-empty policy document is stored — the switch every
     enforcement point checks first so an absent policy is a guaranteed no-op."""
     d = _doc()
-    return bool(d.get("agents") or d.get("tools") or d.get("defaults"))
+    return bool(d.get("agents") or d.get("tools") or d.get("defaults") or d.get("skills"))
 
 
 # ── validation ────────────────────────────────────────────────────────────────
@@ -133,8 +133,12 @@ def validate_policy(doc: object) -> tuple[bool, str]:
           "defaults": {"agents": {"allow": <bool>, "risk": <tier|null>},
                        "tools":  {"allow": <bool>, "risk": <tier|null>}},
           "agents": { "<id|name|glob>": {"allow": <bool>, "risk": <low|medium|high|null>, "note": <str>} },
-          "tools":  { "<tool|glob>":    {"allow": <bool>, "risk": <low|medium|high|severe|null>, "note": <str>} }
+          "tools":  { "<tool|glob>":    {"allow": <bool>, "risk": <low|medium|high|severe|null>, "note": <str>} },
+          "skills": { "<skill-id|glob>": {"allow": false, "risk": <low|medium|high|null>, "note": <str>} }
         }
+    The "skills" section matches any AGENT whose card declares that skill — TIGHTEN
+    only (deny / raise risk), because skills are self-declared (an agent must not be
+    able to whitelist itself by claiming a skill).
     """
     if not isinstance(doc, dict):
         return False, "policy must be a JSON object"
@@ -167,6 +171,18 @@ def validate_policy(doc: object) -> tuple[bool, str]:
         for key, rule in section.items():
             if err := _check_rule(grp, key, rule, tiers):
                 return False, err
+
+    # "skills" section: match agents by a card-declared skill. Self-declared, so it
+    # may only TIGHTEN — deny (allow:false) or raise risk — never whitelist.
+    skills_section = doc.get("skills", {})
+    if not isinstance(skills_section, dict):
+        return False, "'skills' must be an object of rules"
+    for key, rule in skills_section.items():
+        if err := _check_rule("skills", key, rule, AGENT_RISK_TIERS):
+            return False, err
+        if _is_rule(rule) and rule.get("allow") is True:
+            return False, (f"skills['{key}'].allow can't be true — a skill is self-declared, "
+                           f"so a skill rule may only deny (allow:false) or raise risk")
     return True, ""
 
 
@@ -249,34 +265,99 @@ def _rank(tier: str | None, tiers: list[str]) -> int:
     return tiers.index(t) if t in tiers else -1
 
 
-def agent_explicit(agent_id: str, name: str = "") -> bool | None:
-    """An EXPLICIT per-entry allow for an agent (ignores defaults + threshold).
-    True / False when the matching rule names `allow`; None otherwise. This is the
-    only thing that OVERRIDES the slider-threshold default."""
+# Agent risk tiers, ordered low → high. Used to pick the most restrictive tier among
+# matching skill rules (skills may only RAISE risk, never lower it).
+_AGENT_TIER_ORDER = ("low", "medium", "high")
+
+
+def _more_restrictive(a: str | None, b: str | None) -> str | None:
+    """The higher (more restrictive) of two agent tiers, skipping unknowns/None."""
+    ra = _AGENT_TIER_ORDER.index(a) if a in _AGENT_TIER_ORDER else -1
+    rb = _AGENT_TIER_ORDER.index(b) if b in _AGENT_TIER_ORDER else -1
+    if ra < 0:
+        return b if rb >= 0 else None
+    if rb < 0:
+        return a
+    return a if ra >= rb else b
+
+
+def _has_agent_rule(agent_id: str, name: str) -> bool:
+    """True when the agents section names this agent (by id/name/glob). Skill rules
+    apply ONLY to agents WITHOUT such a rule — an explicitly-named agent is governed
+    entirely by its own rule."""
+    return _match(_doc().get("agents") or {}, agent_id or "", name or "") is not None
+
+
+def _skill_rules(skills) -> list[dict]:
+    """Rules from the ``skills`` section that match any of the agent's declared skill
+    ids (exact or glob)."""
+    section = _doc().get("skills") or {}
+    out: list[dict] = []
+    for sk in (skills or []):
+        r = _match(section, str(sk or ""))
+        if r is not None:
+            out.append(r)
+    return out
+
+
+def agent_explicit(agent_id: str, name: str = "", skills=()) -> bool | None:
+    """The explicit allow/deny for an agent. Precedence:
+
+      * an ``agents`` rule that names this agent wins (allow True / False / None);
+      * else a ``skills`` rule may DENY (allow:false) the agent by a declared skill —
+        tighten-only, since skills are self-declared (it can never allow).
+
+    None means 'no explicit decision' → the caller falls back to the slider threshold."""
     if not enabled():
         return None
     try:
         rule = _match(_doc().get("agents") or {}, agent_id or "", name or "")
-        if rule:
-            return _explicit_allow(rule)             # bool, or None for absent / "default"
+        if rule is not None:
+            return _explicit_allow(rule)             # named agent governs (True/False/None)
+        for r in _skill_rules(skills):               # else: a skill may only DENY
+            if _explicit_allow(r) is False:
+                return False
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.operator_policy.agent_explicit failed id=%s error=%r", agent_id, exc)
     return None
 
 
-def agent_recognised(agent_id: str, name: str, risk_tier: str | None,
-                     threshold: str | None, tiers: list[str] | None) -> bool | None:
-    """Is this agent RECOGNISED (allowed)? Unified decision model:
-
-      * an EXPLICIT per-entry ``allow`` wins (force allow / deny);
-      * else the SLIDER THRESHOLD is the default — allowed iff the agent's risk tier
-        is BELOW the threshold (tier rank < threshold rank), denied at or above.
-
-    Returns None (no opinion → callers leave behaviour untouched) when the policy is
-    inert, or there's no explicit rule AND no usable threshold/tier to compare."""
+def agent_skill_risk(agent_id: str, name: str = "", skills=()) -> str | None:
+    """The most-restrictive risk tier from matching ``skills`` rules, or None. Applied
+    by authoritative_risk as a TIGHTEN only (raise, never lower). Returns None when the
+    agent has its own ``agents`` rule (that governs instead) — so skills never override
+    an operator who named the agent."""
     if not enabled():
         return None
-    exp = agent_explicit(agent_id, name)
+    try:
+        if _has_agent_rule(agent_id, name):
+            return None
+        worst: str | None = None
+        for r in _skill_rules(skills):
+            rk = _explicit_risk(r.get("risk"))
+            if rk in AGENT_RISK_TIERS:
+                worst = _more_restrictive(worst, rk)
+        return worst
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.operator_policy.agent_skill_risk failed id=%s error=%r", agent_id, exc)
+        return None
+
+
+def agent_recognised(agent_id: str, name: str, risk_tier: str | None,
+                     threshold: str | None, tiers: list[str] | None,
+                     skills=()) -> bool | None:
+    """Is this agent RECOGNISED (allowed)? Decision model:
+
+      * an EXPLICIT allow/deny wins — a named ``agents`` rule, or a ``skills`` rule
+        that denies (see agent_explicit);
+      * else the SLIDER THRESHOLD decides — allowed iff the agent's risk tier is BELOW
+        the threshold. (Any skill-based risk RAISE is already folded into ``risk_tier``
+        via authoritative_risk, so a risky declared skill can push an agent over.)
+
+    Returns None when the policy is inert or there's no rule AND no usable threshold."""
+    if not enabled():
+        return None
+    exp = agent_explicit(agent_id, name, skills)
     if exp is not None:
         return exp
     tiers = tiers or []
@@ -286,8 +367,9 @@ def agent_recognised(agent_id: str, name: str, risk_tier: str | None,
 
 
 def agent_risk_override(agent_id: str, name: str = "") -> str | None:
-    """An operator-set risk tier for this agent (low|medium|high), or None.
-    Operator-authoritative: this OVERRIDES the declared/magazine tier."""
+    """An operator-set risk tier from a NAMED ``agents`` rule (low|medium|high), or
+    None. Operator-authoritative: this OVERRIDES the declared/magazine tier (up OR
+    down). Skill-based risk is separate (agent_skill_risk) and tighten-only."""
     risk = _explicit_risk(agent_rule(agent_id, name).get("risk"))   # skips absent / "default"
     return risk if risk in AGENT_RISK_TIERS else None
 
