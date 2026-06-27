@@ -42,6 +42,7 @@ psutil>=5.9.0
 # Fail-open: the radar runs without these if no DB is reachable.
 SQLAlchemy>=2.0.0
 psycopg[binary]>=3.1.0   # Postgres driver (postgresql+psycopg://)
+neo4j>=5.0.0             # context-graph projection (bolt://); fail-open if absent
 
 # --- OpenTelemetry (observability) ---
 # Pinned for Python 3.14 compatibility (protobuf C-ext is broken on 3.14 below these)
