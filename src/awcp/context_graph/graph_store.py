@@ -84,6 +84,26 @@ ORDER BY ts ASC
 """
 
 
+# A2A wiring: project an agent's advertised AgentCard skills as graph nodes, so
+# the context graph knows what each agent CAN do (capability) next to what it DID.
+# Skill nodes are deduped by id (one (:Skill {id:"web_search"}) shared across every
+# agent that advertises it) — which is exactly the A2A discovery view.
+_MIRROR_SKILLS = """
+MERGE (a:Agent {id: $agent_id})
+SET a.card_name = $card_name, a.card_description = $card_desc
+WITH a
+UNWIND $skills AS sk
+  MERGE (s:Skill {id: sk})
+  MERGE (a)-[:HAS_SKILL]->(s)
+"""
+
+_FETCH_SKILLS = """
+MATCH (a:Agent)-[:HAS_SKILL]->(s:Skill)
+WHERE a.id IN $agents
+RETURN a.id AS agent, s.id AS skill
+"""
+
+
 def _connect():
     """Lazily build the driver; returns it or None (and disables further tries)."""
     global _driver, _init_done
@@ -146,8 +166,70 @@ def mirror_checkpoint(node) -> None:
                   workflow_id=node.workflow_id or "unknown", row_hash=node.row_hash,
                   props=props, tool=props["tool"] or "", ts=props["ts"],
                   blocked_policy=blocked_policy, error_msg=error_msg)
+            # A2A: enrich the acting agent with its advertised AgentCard skills.
+            _attach_skills(s, node.agent_id)
     except Exception as exc:  # noqa: BLE001
         log.debug("context_graph.neo4j.mirror failed row=%s err=%r", node.row_hash[:12], exc)
+
+
+def _agent_card(agent_id: str):
+    """Look up an agent's (skills, card) from the live registry. Returns
+    (skills_list, card_dict) or (None, None) if the registry isn't reachable from
+    this process (fail-open — the radar process has it; others don't)."""
+    if not agent_id:
+        return None, None
+    try:
+        from awcp.radar.store import REGISTRY
+        e = REGISTRY.get(agent_id)
+    except Exception:  # noqa: BLE001 — registry not importable here
+        return None, None
+    if e is None:
+        return None, None
+    skills = [x for x in (getattr(e, "skills", None) or []) if x]
+    card = getattr(e, "card", None)
+    return skills, (card if isinstance(card, dict) else {})
+
+
+def _attach_skills(session, agent_id: str) -> None:
+    """Attach an agent's AgentCard skills as (:Agent)-[:HAS_SKILL]->(:Skill). No-op
+    when the agent has no card/skills or the registry isn't reachable."""
+    skills, card = _agent_card(agent_id)
+    if not skills and not card:
+        return
+    try:
+        session.run(_MIRROR_SKILLS, agent_id=agent_id, skills=skills or [],
+                    card_name=(card or {}).get("name", "") or "",
+                    card_desc=(card or {}).get("description", "") or "")
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.neo4j.skills failed agent=%s err=%r", agent_id, exc)
+
+
+def sync_cards() -> dict:
+    """Project EVERY registered agent's AgentCard skills (A2A) into the graph —
+    independent of whether the agent has recorded a step yet. Idempotent."""
+    drv = _connect()
+    if drv is None:
+        return {"enabled": False, "agents": 0, "skills": 0}
+    try:
+        from awcp.radar.store import REGISTRY
+        entries = list(REGISTRY.all())
+    except Exception:  # noqa: BLE001
+        return {"enabled": True, "agents": 0, "skills": 0, "note": "registry unavailable"}
+    n_agents = n_skills = 0
+    try:
+        with drv.session() as s:
+            for e in entries:
+                skills, card = _agent_card(e.id)
+                if not skills and not card:
+                    continue
+                s.run(_MIRROR_SKILLS, agent_id=e.id, skills=skills or [],
+                      card_name=(card or {}).get("name", "") or "",
+                      card_desc=(card or {}).get("description", "") or "")
+                n_agents += 1
+                n_skills += len(skills or [])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.neo4j.sync_cards failed err=%r", exc)
+    return {"enabled": True, "agents": n_agents, "skills": n_skills}
 
 
 # ── read (for the UI graph view) ─────────────────────────────────────────────
@@ -199,6 +281,19 @@ def fetch_graph(workflow: str | None = None, agent: str | None = None,
             add(eid, "error", msg[:28] + ("…" if len(msg) > 28 else ""), message=msg)
             edges.append({"source": sid, "target": eid, "type": "RAISED"})
 
+    # A2A capability layer: attach each agent's advertised card skills. Skill nodes
+    # are deduped, so a shared skill links every agent that advertises it.
+    agent_ids = [n["label"] for n in nodes.values() if n["type"] == "agent" and n["label"]]
+    if agent_ids:
+        try:
+            with drv.session() as s2:
+                for r in s2.run(_FETCH_SKILLS, agents=agent_ids):
+                    skid = f"skill:{r['skill']}"
+                    add(skid, "skill", r["skill"])
+                    edges.append({"source": f"agent:{r['agent']}", "target": skid, "type": "HAS_SKILL"})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("context_graph.neo4j.fetch_skills failed err=%r", exc)
+
     counts: dict[str, int] = {}
     for n in nodes.values():
         counts[n["type"]] = counts.get(n["type"], 0) + 1
@@ -238,4 +333,6 @@ def backfill(limit: int = 10000) -> dict:
     for nd in nodes:
         mirror_checkpoint(nd)
         n += 1
-    return {"enabled": True, "mirrored": n}
+    # also project A2A card skills for every registered agent
+    cards = sync_cards()
+    return {"enabled": True, "mirrored": n, "cards": cards}
