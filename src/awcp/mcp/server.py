@@ -27,6 +27,7 @@ from awcp.runtime.tool_runtime import (
 )
 from awcp.runtime.ollama_client import ask_ollama
 from awcp.runtime.config import SEARCH_MODEL
+from awcp.context_graph.client import record_checkpoint as _cg_record
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
@@ -111,6 +112,37 @@ def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
         }, timeout=GATE_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 — metering must never break a tool call
         logger.debug("mcp.meter.failed tool=%s error=%r", tool_name, exc)
+
+
+def _record_checkpoint(agent_id: str, task_id: str, tool_name: str,
+                       tool_input: dict, gate: dict, eff_risk: str,
+                       outcome: str, error: str = "") -> None:
+    """Record this tool call as a node in the context graph (the governed-step
+    trail). `outcome` is "succeeded" (the tool ran), "blocked" (the gate denied it
+    before it ran), or "error" (the tool ran but raised) — all are part of the
+    trail. Best-effort HTTP to the radar; never breaks a tool call. The
+    resume_pointer marks where the run continues from; the context is the tool
+    input (so equal inputs get an equal context_hash)."""
+    if not agent_id:
+        return
+    marker = {"blocked": "blocked-at", "error": "errored-at"}.get(outcome, "after")
+    payload = {"tool": tool_name, "risk": eff_risk, "outcome": outcome,
+               "decision": gate.get("decision", "allow"),
+               "mode": gate.get("mode", ""),
+               "reason": error or gate.get("reason", "")}
+    if error:
+        payload["error"] = error[:500]
+    _cg_record(
+        RADAR_URL, agent_id,
+        step=f"tool:{tool_name}",
+        task_id=task_id,
+        workflow_id=task_id,
+        actor=agent_id,
+        resume_pointer=f"{task_id or 'task'}:{marker}:tool:{tool_name}",
+        context=tool_input or {},
+        payload=payload,
+        timeout=GATE_TIMEOUT,
+    )
 
 
 def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
@@ -420,6 +452,9 @@ def execute_tool(
                 "mcp.execute.blocked agent_id=%s tool=%s risk=%s mode=%s reason=%s",
                 agent_id, tool_name, eff_risk, gate.get("mode"), gate.get("reason"),
             )
+            # Record the blocked attempt as a node too — a denial is part of the trail.
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "blocked")
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
@@ -435,6 +470,9 @@ def execute_tool(
             result = run_tool(tool_name, tool_input or {})
             # Meter the call's real input+output tokens into Laminar (best-effort).
             _meter_tool_tokens(agent_id, task_id, tool_name, tool_input or {}, result)
+            # Record the step in the context graph (governed-step trail, best-effort).
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "succeeded")
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
@@ -454,6 +492,9 @@ def execute_tool(
                 except Exception:  # noqa: BLE001
                     pass
             logger.warning("mcp.execute.error tool=%s error=%r", tool_name, e)
+            # Record the failed step as an error node in the context graph.
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "error", error=str(e))
             return json.dumps({
                 "status": "error",
                 "output": f"Error executing tool '{tool_name}': {str(e)}",
