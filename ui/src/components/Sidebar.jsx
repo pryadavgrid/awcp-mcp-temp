@@ -2,6 +2,7 @@ const ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'radar', label: 'Radar', icon: '◎' },
   { id: 'workflow', label: 'Workflow', icon: '⤳' },
+  { id: 'context', label: 'Context Graph', icon: '◈' },
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
   { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
 ]

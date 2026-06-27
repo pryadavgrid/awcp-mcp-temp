@@ -3,6 +3,7 @@ import { Sidebar } from './components/Sidebar.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Radar from './pages/Radar.jsx'
 import Workflows from './pages/Workflows.jsx'
+import ContextGraph from './pages/ContextGraph.jsx'
 import TokenMonitor from './pages/TokenMonitor.jsx'
 import Hooks from './pages/Hooks.jsx'
 import { usePoll } from './hooks/usePoll.js'
@@ -13,6 +14,7 @@ const TITLES = {
   dashboard: 'Dashboard',
   radar: 'Radar',
   workflow: 'Workflow',
+  context: 'Context Graph',
   tokens: 'Token Monitor',
   hooks: 'Agent Hooks',
 }
@@ -59,6 +61,7 @@ export default function App() {
           {active === 'dashboard' && <Dashboard />}
           {active === 'radar' && <Radar />}
           {active === 'workflow' && <Workflows />}
+          {active === 'context' && <ContextGraph />}
           {active === 'tokens' && <TokenMonitor />}
           {active === 'hooks' && <Hooks />}
         </div>
