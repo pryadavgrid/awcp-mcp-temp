@@ -237,6 +237,33 @@ def decisions_for(task_id: str) -> dict | None:
         return None
 
 
+def load_operator_policy() -> dict | None:
+    """Read the ACTIVE operator policy document from the SHARED governance.operator_policy
+    table (written by the radar's Policy tab). Returns the policy JSON body, or None when
+    disabled / no policy stored / the table doesn't exist yet. Fail-open: the OPA agent
+    keeps tiering with the SLM alone if it can't read the policy."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.connect() as c:
+            row = c.execute(_text(
+                "SELECT policy FROM governance.operator_policy ORDER BY id DESC LIMIT 1"
+            )).mappings().first()
+        if not row:
+            return None
+        policy = row["policy"]
+        if isinstance(policy, str):
+            import json as _json
+            try:
+                policy = _json.loads(policy)
+            except Exception:  # noqa: BLE001
+                return None
+        return policy if isinstance(policy, dict) else None
+    except Exception as exc:  # noqa: BLE001 — missing table / no perms / DB down: fail open
+        log.warning("opa.db.load_operator_policy failed error=%r", exc)
+        return None
+
+
 def recent(limit: int = 200) -> list[dict] | None:
     """The most recent evaluated tool calls across ALL tasks, newest first (the
     Radar's tier-bar feed). None when disabled / on error so the caller can fall back."""

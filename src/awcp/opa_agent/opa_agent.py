@@ -50,6 +50,7 @@ hardcoded:
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import threading
@@ -244,6 +245,69 @@ def _decide(tool_name: str, tier: str) -> tuple[str, str]:
     return _result(fallback_block, "policy(opa_fallback)")
 
 
+# ── operator policy (the Radar "Policy" tab, read from the SHARED Postgres table) ──
+# After the SLM assigns a tool's baseline tier, the operator policy is consulted as an
+# override — exactly the "first the OPA agent assigns a tier, then it checks the json"
+# flow. It can RELABEL the tier and FORCE allow/deny. Read from governance.operator_policy
+# (the same table the radar's Policy tab writes), cached with a short TTL so operator
+# edits propagate without restarting this service. Fail-open: no policy ⇒ SLM tier stands.
+# Nothing is hardcoded — tool names/tiers come entirely from the stored document.
+POLICY_TTL = float(os.getenv("OPA_POLICY_TTL", "10"))
+_policy_cache: dict = {"doc": {}, "ts": 0.0}
+_policy_lock = threading.Lock()
+
+
+def _operator_policy_doc() -> dict:
+    """The active operator-policy JSON body, cached for POLICY_TTL seconds."""
+    now = time.time()
+    with _policy_lock:
+        if _policy_cache["ts"] and now - _policy_cache["ts"] < POLICY_TTL:
+            return _policy_cache["doc"]
+    doc = db.load_operator_policy() or {}
+    with _policy_lock:
+        _policy_cache["doc"] = doc
+        _policy_cache["ts"] = now
+    return doc
+
+
+def _match_tool_rule(tools: dict, tool: str) -> dict | None:
+    """Resolve a tool's rule: an EXACT name wins, else the first glob (fnmatch) pattern."""
+    if tool in tools:
+        return tools[tool]
+    for pat, rule in tools.items():
+        if any(ch in pat for ch in "*?[") and fnmatch.fnmatch(tool, pat):
+            return rule
+    return None
+
+
+def _operator_tool_override(tool: str) -> dict | None:
+    """The operator policy for ONE tool, or None when no policy / no rule applies.
+    Returns {tier, block, note} where tier RELABELS the tier the slider threshold
+    compares against (or None), and block is True (force block) / False (force allow)
+    / None (defer to the slider threshold — the DEFAULT check). Only an EXPLICIT
+    per-tool ``allow`` overrides the threshold. Mirrors the radar's
+    operator_policy.tool_decision so both paths agree."""
+    doc = _operator_policy_doc()
+    if not doc:
+        return None
+    tools = doc.get("tools") or {}
+    default = (doc.get("defaults") or {}).get("tools") or {}
+    explicit = _match_tool_rule(tools, tool) or {}
+    if not explicit and not default:
+        return None
+    # A field that is absent OR the literal "default" means 'no opinion — use the
+    # slider / SLM-suggested value', so it is skipped here.
+    risk = ""
+    for v in (explicit.get("risk"), default.get("risk")):
+        if v not in (None, "") and not (isinstance(v, str) and v.strip().lower() == "default"):
+            risk = str(v).strip().lower()
+            break
+    tier = risk if risk in RISK_TIERS else None
+    a = explicit.get("allow")
+    block = (not a) if isinstance(a, bool) else None   # "default"/absent -> defer to slider
+    return {"tier": tier, "block": block, "note": explicit.get("note") or ""}
+
+
 def _log_laminar(agent_id: str, task_id: str, tool_name: str, tool_input) -> None:
     """Optionally log this tool call (+ estimated tokens) to Laminar via the control
     plane. OFF by default — the MCP server already meters tool tokens at the source,
@@ -360,10 +424,28 @@ def evaluate(req: EvaluateRequest) -> dict:
     in the user UI."""
     rec = tier_for(req.tool_name, req.tool_input, req.question)
     tier = rec["tier"]
+    engine = rec.get("engine", "")
+    # Operator policy override, applied AFTER the SLM tier. A relabeled tier is set
+    # BEFORE the threshold decision so the block set re-evaluates against it; an explicit
+    # allow/deny then overrides the threshold outright. No-op when no policy / no rule.
+    ov = _operator_tool_override(req.tool_name)
+    if ov and ov.get("tier"):
+        tier = ov["tier"]
     decision, reason = _decide(req.tool_name, tier)
+    if ov and ov.get("block") is True:
+        decision = "block"
+        reason = (f"tool '{req.tool_name}' denied by operator policy"
+                  + (f" ({ov['note']})" if ov.get("note") else ""))
+        engine = "operator_policy"
+    elif ov and ov.get("block") is False:
+        decision = "allow"
+        reason = f"tool '{req.tool_name}' allowed by operator policy"
+        engine = "operator_policy"
+    elif ov and ov.get("tier"):
+        engine = "operator_policy"               # tier relabeled by the operator
     record = {"tool_name": req.tool_name, "risk_tier": tier, "decision": decision,
               "reason": reason, "reasoning": rec.get("reason", ""),
-              "engine": rec.get("engine", ""), "agent_id": req.agent_id,
+              "engine": engine, "agent_id": req.agent_id,
               "task_id": req.task_id, "question": req.question, "ts": time.time()}
     with _lock:
         entry = _DECISIONS.setdefault(
@@ -380,7 +462,7 @@ def evaluate(req: EvaluateRequest) -> dict:
     _log_laminar(req.agent_id, req.task_id, req.tool_name, req.tool_input)
     return {"tool_name": req.tool_name, "risk_tier": tier, "decision": decision,
             "reason": reason, "reasoning": rec.get("reason", ""),
-            "engine": rec.get("engine", ""), "block_tiers": BLOCK_TIERS}
+            "engine": engine, "block_tiers": BLOCK_TIERS}
 
 
 @app.get("/decisions/{task_id}")

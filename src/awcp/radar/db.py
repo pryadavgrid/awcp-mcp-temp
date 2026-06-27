@@ -249,6 +249,7 @@ def init() -> bool:
         if ok:
             ensure_partitions()
             ensure_workflow_events_table()
+            ensure_operator_policy_table()
         return ok
 
 
@@ -863,3 +864,105 @@ def query(agent_id: str | None = None, since: float | None = None,
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.db.query failed error=%r", exc)
         return []
+
+
+# ── operator policy (the Radar "Policy" tab) ──────────────────────────────────
+# An append-only, versioned JSON document the operator types in the UI. The ACTIVE
+# policy is the most-recent row; older rows are retained as history. Same admin-DDL
+# "ensure" pattern as ensure_workflow_events_table — the canonical schema owns the
+# table, but on an already-initialised volume that SQL won't re-run, so this
+# guarantees the table exists for the app's INSERT/SELECT. All fail-open: with no
+# DB the operator-policy layer simply has no stored policy and stays inert.
+def ensure_operator_policy_table() -> None:
+    """Create governance.operator_policy (IF NOT EXISTS) via the admin connection."""
+    url = DB_ADMIN_URL
+    if not url:
+        return
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS governance.operator_policy ("
+        " id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        " ts timestamptz NOT NULL DEFAULT now(),"
+        " version integer NOT NULL DEFAULT 1,"
+        " updated_by text,"
+        " note text,"
+        " policy jsonb NOT NULL DEFAULT '{}')"
+    )
+    index = ("CREATE INDEX IF NOT EXISTS idx_oppolicy_ts "
+             "ON governance.operator_policy (ts DESC)")
+    grants = (
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON governance.operator_policy TO awcp_app",
+        "GRANT SELECT ON governance.operator_policy TO awcp_ro",
+    )
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url, connect_args={"connect_timeout": 3}
+                            if url.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text(ddl))
+            c.execute(text(index))
+        for g in grants:
+            try:
+                with eng.begin() as c:
+                    c.execute(text(g))
+            except Exception:  # noqa: BLE001 — roles may not exist; default privs cover it
+                pass
+        eng.dispose()
+        log.info("radar.db governance.operator_policy ensured (operator policy store)")
+    except Exception as exc:  # noqa: BLE001 — maintenance is best-effort
+        log.warning("radar.db ensure_operator_policy_table failed (%r) — operator "
+                    "policy not persisted until the table exists", exc)
+
+
+def save_operator_policy(policy: dict, updated_by: str = "", note: str = "",
+                         version: int = 1) -> dict | None:
+    """Append a new operator-policy version. Returns the stored row
+    (id/ts/version) or None when the DB is unavailable (caller surfaces the
+    failure — a policy the operator can't persist must not look saved)."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "INSERT INTO governance.operator_policy (version, updated_by, note, policy) "
+                "VALUES (:version, :updated_by, :note, CAST(:policy AS jsonb)) "
+                "RETURNING id, extract(epoch FROM ts) AS ts, version"
+            ), {
+                "version": int(version or 1),
+                "updated_by": updated_by or None,
+                "note": note or None,
+                "policy": json.dumps(policy or {}, default=str),
+            }).mappings().first()
+        return {"id": int(row["id"]), "ts": float(row["ts"]), "version": int(row["version"])}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.save_operator_policy failed error=%r", exc)
+        return None
+
+
+def load_operator_policy() -> dict | None:
+    """The ACTIVE (most-recent) operator policy as
+    {id, ts, version, updated_by, note, policy}, or None when none is stored / the
+    DB is unavailable."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.connect() as c:
+            row = c.execute(_text(
+                "SELECT id, extract(epoch FROM ts) AS ts, version, updated_by, note, policy "
+                "FROM governance.operator_policy ORDER BY id DESC LIMIT 1"
+            )).mappings().first()
+        if not row:
+            return None
+        policy = row["policy"] or {}
+        if isinstance(policy, str):
+            try:
+                policy = json.loads(policy)
+            except Exception:  # noqa: BLE001
+                policy = {}
+        return {
+            "id": int(row["id"]), "ts": float(row["ts"]) if row["ts"] is not None else None,
+            "version": int(row["version"]), "updated_by": row["updated_by"],
+            "note": row["note"], "policy": policy,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.load_operator_policy failed error=%r", exc)
+        return None

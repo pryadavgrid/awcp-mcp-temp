@@ -1,0 +1,57 @@
+{
+  "_README": [
+    "Operator policy template for the Radar 'Policy' tab. The live policy is stored",
+    "in Postgres (governance.operator_policy); paste an edited copy here and Save.",
+    "",
+    "RISK-TIER FLOW (the main feature — agents AND tools):",
+    "  1. OPA assigns a BASELINE risk tier first — the OPA agent's SLM tiers each",
+    "     tool call; an agent's baseline is its authoritative (declared+magazine) tier.",
+    "  2. This JSON's 'risk' field UPDATES that tier (operator override / relabel).",
+    "  3. The updated tier is APPLIED against the slider ('allowed risk level' on Tool",
+    "     Risk Tiers): tier BELOW the slider -> allowed; AT OR ABOVE -> denied.",
+    "",
+    "  So: OPA baseline -> your 'risk' -> slider decides. Set 'risk' lower to admit",
+    "  something under the slider, higher to push it over.",
+    "",
+    "EXPLICIT OVERRIDE (optional): 'allow' beats the slider entirely —",
+    "  'allow': true  -> always allowed,  'allow': false -> always denied",
+    "  (use it for a hard pre-execution deny on dangerous tools). Omit 'allow' to let",
+    "  the risk-tier + slider flow decide.",
+    "",
+    "Omitting a field — or the string \"default\" — means 'no opinion, use the OPA",
+    "baseline / slider'. Keys match an agent id/name or a tool name (globs ok).",
+    "Agent risk -> low|medium|high ; tool risk -> low|medium|high|severe. '_'-keys ignored.",
+    "",
+    "SKILLS (optional): match any AGENT by a skill its AgentCard declares (shown in the",
+    "Policy tab's Skills column). Because skills are SELF-declared, a skill rule may only",
+    "TIGHTEN: 'allow': false to deny, or 'risk' to RAISE the agent's tier. It can never",
+    "allow or lower (an agent must not whitelist itself by claiming a skill). A rule that",
+    "names an agent directly (in 'agents') always wins over a skill rule."
+  ],
+
+  "version": 1,
+  "updated_by": "operator",
+  "note": "risk-tier overrides: OPA baseline -> JSON risk -> slider",
+
+  "agents": {
+    "agent-langgraph-*":   { "risk": "low",  "note": "override magazine tier -> recognised under the slider" },
+    "agent-crewai-*":      { "risk": "low" },
+    "agent-pydantic_ai-*": { "risk": "low" },
+    "*temporal*":          { "allow": false, "note": "explicit hard deny (infra)" }
+  },
+
+  "tools": {
+    "web_search":          { "risk": "low",    "note": "OPA tier -> relabel low -> below slider -> allowed" },
+    "advanced_web_search": { "risk": "low" },
+    "search_arxiv":        { "risk": "low" },
+    "get_paper":           { "risk": "low" },
+    "save_artifact":       { "risk": "low" },
+    "run_command":         { "risk": "severe", "allow": false, "note": "shell exec - severe tier + hard deny" },
+    "external_post":       { "risk": "high",   "allow": false, "note": "outbound write - hard deny" }
+  },
+
+  "skills": {
+    "external_post": { "allow": false, "note": "any agent that CAN post outbound -> deny" },
+    "run_command":   { "risk": "high",  "note": "any agent that CAN run shell -> raise its risk tier" }
+  }
+}

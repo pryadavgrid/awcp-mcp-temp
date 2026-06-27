@@ -29,10 +29,30 @@ log = logging.getLogger("awcp.radar")
 # Canonical control-plane DB — the ONLY persistence backend. When set and
 # reachable the registry persists to registry.agents; there is no JSON fallback.
 DATABASE_URL = os.getenv("AGENT_RADAR_DATABASE_URL", "").strip()
+# Owner connection used ONLY for the additive AgentCard column migration (DDL the
+# least-privileged app role can't do). Falls back to DATABASE_URL. Same pattern as
+# awcp.radar.db.DB_ADMIN_URL / ensure_operator_policy_table.
+DB_ADMIN_URL = os.getenv("AGENT_RADAR_DB_ADMIN_URL", "").strip() or DATABASE_URL
 # A scanned process / self-registered agent that stops being seen is marked
 # DEAD after this many seconds (it is no longer pruned — it stays on the radar
 # as "stop"; see reconcile_scan). Liveness only; removal is operator-driven.
 PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_PRUNE_AFTER", "60"))
+# Fold a scanned process row INTO the self-registered agent that is the same
+# process — matched by pid, else by a shared endpoint / AgentCard url — so the same
+# agent is not listed twice (the scan sighting + its self-registration). On by
+# default; AGENT_RADAR_DEDUP_SCAN=false restores the old (always-two-rows) behavior.
+DEDUP_SCAN = os.getenv("AGENT_RADAR_DEDUP_SCAN", "true").lower() == "true"
+
+
+def _norm_url(u: str | None) -> str | None:
+    """A comparable form of an endpoint / card url (trim trailing slash, lowercase)."""
+    s = (u or "").strip().rstrip("/").lower()
+    return s or None
+
+
+def _entry_url(e: AgentEntry) -> str | None:
+    """The agent's identity url: its declared endpoint, else its card's `url`."""
+    return _norm_url(getattr(e, "endpoint", None)) or _norm_url((e.card or {}).get("url"))
 # DEPRECATED: stopped agents are no longer auto-pruned, so this no longer drives
 # any deletion. Kept only so the old env var doesn't error if still set.
 SELF_PRUNE_AFTER_SEC = float(os.getenv("AGENT_RADAR_SELF_PRUNE_AFTER", "180"))
@@ -54,6 +74,8 @@ _PG_COLUMNS = (
     "pid", "os_user", "cwd", "cmdline", "detected_via",
     "onboarding_state", "onboarding_workflow_id",
     "first_seen", "last_seen", "alive",
+    # AgentCard (A2A description layer — additive)
+    "card", "card_url", "card_fetched_at", "skills",
 )
 # columns that need a value expression other than a plain :param bind
 _PG_VALUE_EXPR = {
@@ -63,27 +85,36 @@ _PG_VALUE_EXPR = {
     "last_policy_ts": "to_timestamp(:last_policy_ts)",
     "first_seen": "to_timestamp(:first_seen)",
     "last_seen": "to_timestamp(:last_seen)",
+    "card": "CAST(:card AS jsonb)",
+    "card_fetched_at": "to_timestamp(:card_fetched_at)",
 }
 
 
-def _pg_upsert_sql() -> str:
-    cols = ", ".join(_PG_COLUMNS)
-    vals = ", ".join(_PG_VALUE_EXPR.get(c, f":{c}") for c in _PG_COLUMNS)
+# AgentCard columns are additive — on an already-initialised DB they may be absent
+# until the migration runs. The backend computes the EFFECTIVE column set at
+# startup (base columns + whichever card columns actually exist) so persistence of
+# the base record never breaks if the card migration couldn't be applied.
+_CARD_COLUMNS = ("card", "card_url", "card_fetched_at", "skills")
+
+
+def _pg_upsert_sql(cols: tuple[str, ...]) -> str:
+    colstr = ", ".join(cols)
+    vals = ", ".join(_PG_VALUE_EXPR.get(c, f":{c}") for c in cols)
     # id is the conflict key; created_at is DB-managed; updated_at = now()
-    sets = ", ".join(f"{c}=EXCLUDED.{c}" for c in _PG_COLUMNS if c != "id")
+    sets = ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "id")
     return (
-        f"INSERT INTO registry.agents ({cols}, updated_at) "
+        f"INSERT INTO registry.agents ({colstr}, updated_at) "
         f"VALUES ({vals}, now()) "
         f"ON CONFLICT (id) DO UPDATE SET {sets}, updated_at=now()"
     )
 
 
-def _pg_select_sql() -> str:
+def _pg_select_sql(cols: tuple[str, ...]) -> str:
     # map timestamptz back to epoch floats; only self-registered survive a restart
     sel = []
-    for c in _PG_COLUMNS:
+    for c in cols:
         if c in ("last_flags_ts", "last_telemetry_ts", "last_policy_ts",
-                 "first_seen", "last_seen"):
+                 "first_seen", "last_seen", "card_fetched_at"):
             sel.append(f"EXTRACT(EPOCH FROM {c}) AS {c}")
         else:
             sel.append(c)
@@ -113,6 +144,11 @@ def _row_params(e: AgentEntry) -> dict:
         "cmdline": d["cmdline"], "detected_via": d["detected_via"],
         "onboarding_state": d["onboarding_state"], "onboarding_workflow_id": d["onboarding_workflow_id"],
         "first_seen": d["first_seen"], "last_seen": d["last_seen"], "alive": d["alive"],
+        # AgentCard columns (card stored as JSON text -> CAST to jsonb in the SQL)
+        "card": json.dumps(d["card"]) if d.get("card") else None,
+        "card_url": d.get("card_url"),
+        "card_fetched_at": d.get("card_fetched_at"),
+        "skills": list(d.get("skills") or []),
     }
 
 
@@ -120,10 +156,62 @@ def _entry_from_row(row: dict) -> AgentEntry:
     d = dict(row)
     d["user"] = d.pop("os_user", None)               # column -> model field
     for k in ("last_flags_ts", "last_telemetry_ts", "last_policy_ts",
-              "first_seen", "last_seen"):
+              "first_seen", "last_seen", "card_fetched_at"):
         if d.get(k) is not None:
             d[k] = float(d[k])                       # Decimal/epoch -> float
+    # JSONB sometimes round-trips as a string depending on the driver — normalize
+    # the card back to a dict so AgentEntry.card stays dict | None.
+    if isinstance(d.get("card"), str):
+        try:
+            d["card"] = json.loads(d["card"])
+        except Exception:  # noqa: BLE001 — a corrupt card blob shouldn't drop the row
+            d["card"] = None
     return AgentEntry(**d)
+
+
+def _migrate_card_columns() -> None:
+    """Best-effort: add the additive AgentCard columns to registry.agents IF NOT
+    EXISTS, via the owner connection (mirrors db.ensure_operator_policy_table). On
+    an already-initialised volume the canonical init-db SQL won't re-run, so this
+    lets the live DB pick up the columns. Failure is tolerated — the backend then
+    simply omits any card column that doesn't exist, so base persistence is intact."""
+    if not DB_ADMIN_URL:
+        return
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(DB_ADMIN_URL, connect_args={"connect_timeout": 3}
+                            if DB_ADMIN_URL.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text(
+                "ALTER TABLE registry.agents "
+                " ADD COLUMN IF NOT EXISTS card            jsonb,"
+                " ADD COLUMN IF NOT EXISTS card_url        text,"
+                " ADD COLUMN IF NOT EXISTS card_fetched_at timestamptz,"
+                " ADD COLUMN IF NOT EXISTS skills          text[] NOT NULL DEFAULT '{}'"))
+            c.execute(text("CREATE INDEX IF NOT EXISTS idx_agents_skills_gin "
+                           "ON registry.agents USING gin (skills)"))
+        eng.dispose()
+        log.info("radar.store AgentCard columns ensured on registry.agents")
+    except Exception as exc:  # noqa: BLE001 — additive migration is best-effort
+        log.warning("radar.store card-column migration skipped (%r) — cards persist "
+                    "only if the columns already exist", exc)
+
+
+def _existing_card_columns(engine, text) -> tuple[str, ...]:
+    """Which of the AgentCard columns actually exist on registry.agents right now.
+    Used to build the effective column set so a missing migration never breaks the
+    base upsert/select."""
+    try:
+        with engine.connect() as c:
+            rows = c.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='registry' AND table_name='agents' "
+                "  AND column_name = ANY(:cols)"
+            ), {"cols": list(_CARD_COLUMNS)}).scalars().all()
+        return tuple(col for col in _CARD_COLUMNS if col in set(rows))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.store card-column probe failed (%r) — omitting card cols", exc)
+        return ()
 
 
 class _PgBackend:
@@ -148,12 +236,17 @@ class _PgBackend:
             )
             with eng.connect() as c:                 # require the canonical table
                 c.execute(text("SELECT 1 FROM registry.agents LIMIT 1"))
+            # Apply the additive AgentCard migration, then use only the card columns
+            # that exist — so a DB without them still persists the base record.
+            _migrate_card_columns()
+            base = tuple(c for c in _PG_COLUMNS if c not in _CARD_COLUMNS)
+            cols = base + _existing_card_columns(eng, text)
             self._engine = eng
-            self._upsert = _pg_upsert_sql()
-            self._select = _pg_select_sql()
+            self._upsert = _pg_upsert_sql(cols)
+            self._select = _pg_select_sql(cols)
             self.ok = True
-            log.info("radar.store persistence=postgres (registry.agents) at %s",
-                     DATABASE_URL.split("@")[-1])
+            log.info("radar.store persistence=postgres (registry.agents, %d cols) at %s",
+                     len(cols), DATABASE_URL.split("@")[-1])
         except Exception as exc:  # noqa: BLE001 — fall back to JSON
             log.warning("radar.store postgres unavailable (%r) — using JSON file", exc)
 
@@ -259,7 +352,52 @@ class Registry:
         seen_ids: set[str] = set()
         with self._lock:
             self.scan_count += 1
+
+            # Index self-registered agents for dedup correlation: by pid, and by
+            # identity url (endpoint / card url). A scanned proc that matches one is
+            # the SAME process as a governed agent, so it's folded in rather than
+            # listed as its own row.
+            by_pid: dict[int, AgentEntry] = {}
+            by_url: dict[str, AgentEntry] = {}
+            if DEDUP_SCAN:
+                for s in self._entries.values():
+                    if s.source != "self":
+                        continue
+                    if s.pid:
+                        by_pid[s.pid] = s
+                    u = _entry_url(s)
+                    if u:
+                        by_url[u] = s
+
             for d in detected:
+                # Dedup fold: same pid (primary) or same endpoint/card url
+                # (secondary) as a self-registered agent -> treat the scan as a
+                # liveness + process-info signal for that agent; do NOT keep a
+                # separate proc-* row.
+                match = None
+                if DEDUP_SCAN:
+                    if d.pid and d.pid in by_pid:
+                        match = by_pid[d.pid]
+                    else:
+                        du = _entry_url(d)
+                        if du and du in by_url:
+                            match = by_url[du]
+                if match is not None:
+                    match.last_seen = now
+                    match.alive = True
+                    if match.pid is None and d.pid:
+                        match.pid = d.pid
+                    # enrich the governed entry with the process facts the scan saw
+                    for f in ("cwd", "cmdline", "user", "detected_via"):
+                        if not getattr(match, f, None) and getattr(d, f, None):
+                            setattr(match, f, getattr(d, f))
+                    seen_ids.add(match.id)
+                    # drop any stale standalone scan row now represented by the self entry
+                    prev = self._entries.get(d.id)
+                    if prev is not None and prev.source == "scan":
+                        self._entries.pop(d.id, None)
+                    continue
+
                 seen_ids.add(d.id)
                 existing = self._entries.get(d.id)
                 if existing and existing.source == "scan":

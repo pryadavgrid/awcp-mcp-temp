@@ -162,11 +162,44 @@ def assigned_risk_for(entry: AgentEntry) -> str | None:
     return (profile.get("risk") or "").strip().lower() or None
 
 
+def operator_risk_for(entry: AgentEntry) -> str | None:
+    """An operator-set risk tier from the Radar Policy tab, or None. The human
+    operator is authoritative — unlike a self-declaring agent — so this OVERRIDES
+    both the declared and magazine tiers when present. Fail-open + lazy-imported
+    (no effect when no policy is stored); never breaks the gate hot-path."""
+    try:
+        from awcp.radar import operator_policy
+        return operator_policy.agent_risk_override(
+            getattr(entry, "id", "") or "", getattr(entry, "name", "") or "")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def operator_skill_risk_for(entry: AgentEntry) -> str | None:
+    """A risk tier implied by the agent's card-declared SKILLS (Radar Policy tab,
+    ``skills`` section), or None. TIGHTEN-only — it can only RAISE the agent's risk,
+    because skills are self-declared. Fail-open + lazy-imported."""
+    try:
+        from awcp.radar import operator_policy
+        return operator_policy.agent_skill_risk(
+            getattr(entry, "id", "") or "", getattr(entry, "name", "") or "",
+            getattr(entry, "skills", ()) or ())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def authoritative_risk(entry: AgentEntry) -> str:
-    """The risk tier that ACTUALLY governs this agent: the more restrictive of
-    its self-declared tier and the magazine-assigned tier. Self-declaration can
-    only tighten, never loosen (hardening gap #1)."""
-    tier = more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
+    """The risk tier that ACTUALLY governs this agent. Precedence:
+    1. an operator-set tier for a NAMED agent (Radar Policy tab) — the human operator
+       may set ANY recognised tier, up or down;
+    2. else the more restrictive of the self-declared and magazine-assigned tiers
+       (self-declaration can only tighten, never loosen — hardening gap #1);
+    3. then a TIGHTEN by any risk implied by the agent's declared skills (skills can
+       only raise the tier, never lower it — see operator_skill_risk_for)."""
+    op = operator_risk_for(entry)
+    base = op if op else more_restrictive(getattr(entry, "risk", None), assigned_risk_for(entry))
+    # Skill-based tightening: a risky declared capability can only RAISE the tier.
+    tier = more_restrictive(base, operator_skill_risk_for(entry))
     # Guarantee a canonical, CHECK-legal tier: anything outside RISK_ORDER (e.g. a
     # self-declared unknown like "critical" with no magazine opinion) falls back to
     # the MOST restrictive known tier — fail-secure, and never violates the

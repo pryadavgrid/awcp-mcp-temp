@@ -155,3 +155,48 @@ async def link_mcp(entry: AgentEntry) -> tuple[list[str], str | None]:
         return caps, f"linked via {url}"
     except Exception as e:  # noqa: BLE001 - best-effort link
         return [], f"link failed: {type(e).__name__}: {e}"
+
+
+async def fetch_card(entry: AgentEntry) -> tuple[dict | None, list[str], str | None]:
+    """Fetch the agent's AgentCard from ``{endpoint}/.well-known/agent.json``.
+
+    Returns ``(raw_card_dict, skill_ids, note)``. Best-effort and SSRF-guarded —
+    any failure yields ``(None, [], note)`` and the caller continues unchanged
+    (the card is pure enrichment; it never gates onboarding). Shared by the Temporal
+    activity and the inline fallback, exactly like ``link_mcp``."""
+    ep = (entry.endpoint or "").strip()
+    if not ep or not ep.startswith(("http://", "https://")):
+        return None, [], "no http(s) endpoint to fetch card from"
+
+    card_url = ep.rstrip("/") + "/.well-known/agent.json"
+
+    # SSRF guard — same pattern as link_mcp (the endpoint is agent-supplied).
+    from awcp.radar.netguard import assert_safe_url, UnsafeURLError
+    try:
+        assert_safe_url(card_url)
+    except UnsafeURLError as e:
+        return None, [], f"card fetch refused (unsafe url): {e}"
+
+    try:
+        import anyio
+        import httpx
+        from awcp.radar.card import skill_ids
+
+        async def _get() -> dict:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    card_url,
+                    headers={"Accept": "application/json",
+                             "ngrok-skip-browser-warning": "true"},
+                )
+                resp.raise_for_status()
+                return resp.json()
+
+        with anyio.fail_after(12):   # outer wall slightly above the httpx timeout
+            raw = await _get()
+        if not isinstance(raw, dict):
+            return None, [], "card fetch returned non-object JSON"
+        skills = skill_ids(raw)
+        return raw, skills, f"card fetched from {card_url} ({len(skills)} skills)"
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        return None, [], f"card fetch failed: {type(exc).__name__}: {exc}"

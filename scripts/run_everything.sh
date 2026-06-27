@@ -93,7 +93,7 @@ TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pryadav/Downloads/awcp-mcp-temp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/ssrivastava/Desktop/capstone-awcp/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
@@ -164,8 +164,12 @@ export AWCP_OPA_AGENT_TIMEOUT="${AWCP_OPA_AGENT_TIMEOUT:-30}"
 # infra, not a metered worker. Both are env-overridable; nothing is hardcoded.
 export OPA_SLM_BASE="${OPA_SLM_BASE:-${AWCP_GATEWAY_UPSTREAM:-http://localhost:11434}}"
 export OPA_SLM_MODEL="${OPA_SLM_MODEL:-gemma2:2b}"
-# Hide the OPA agent from the radar scanner (append, don't clobber any existing list).
-export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent"
+# Hide infra/noise processes from the radar SCANNER (append, don't clobber any
+# existing list): the OPA agent, the Temporal dev server, and the bare Python
+# interpreter. Matched against the process name + executable, so governed agents —
+# which self-register (source=self) and are never filtered by the scanner — are
+# unaffected. Override AGENT_RADAR_EXCLUDE to change the set.
+export AGENT_RADAR_EXCLUDE="${AGENT_RADAR_EXCLUDE:+$AGENT_RADAR_EXCLUDE,}opa_agent,temporal,python"
 
 # ── Toggleable-guard demo defaults ────────────────────────────────────────────
 # Make the dashboard's Policy Guard (Agent Hooks → Policy Guard) the SINGLE on/off

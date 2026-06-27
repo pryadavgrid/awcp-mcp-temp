@@ -4,6 +4,7 @@ const ITEMS = [
   { id: 'workflow', label: 'Workflow', icon: '⤳' },
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
   { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
+  { id: 'policy', label: 'Operator Policy', icon: '⚖' },
 ]
 
 export function Sidebar({ active, onSelect, health }) {

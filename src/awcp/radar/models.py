@@ -45,6 +45,12 @@ class AgentEntry(BaseModel):
     # "approved" => the operator cleared it; behaves like None thereafter.
     approval_state: str | None = None
     approval_reason: str | None = None
+    # The write_scopes an operator has already APPROVED. Carried across
+    # re-registration so re-declaring an already-approved scope set never re-arms
+    # the gate — only scopes BEYOND this set are "added" and need re-approval. This
+    # stops the scope_added quarantine from re-triggering on every agent restart.
+    # In-memory only (like approval_state, not a registry.agents column).
+    approved_scopes: list[str] = Field(default_factory=list)
 
     # --- write-action gate + degradation ladder (ported from awcp_agents) ---
     # autonomy_profile mirrors awcp_agents' active -> recommendation_only path,
@@ -115,6 +121,17 @@ class AgentEntry(BaseModel):
     first_seen: float = Field(default_factory=_now)
     last_seen: float = Field(default_factory=_now)
     alive: bool = True
+
+    # --- AgentCard (A2A description layer — additive enrichment) ---
+    # The agent's self-describing manifest (/.well-known/agent.json). ADVISORY: the
+    # governance fields it may carry are stored here for introspection only and are
+    # never patched onto the enforced fields above (see card.py governance boundary).
+    card: dict | None = None               # raw fetched card JSON (full, for /card)
+    card_url: str | None = None            # URL the card was fetched from
+    card_fetched_at: float | None = None   # epoch float; None = never fetched
+    # Denormalized projection of card.skills[*].id — a flat list so GET /agents
+    # can filter ?skill=... in-memory without re-deserializing the card JSONB.
+    skills: list[str] = Field(default_factory=list)
 
     # fields a fresh scan is allowed to refresh on an existing entry
     _SCAN_REFRESH = (

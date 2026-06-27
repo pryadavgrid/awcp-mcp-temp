@@ -55,6 +55,24 @@ function TierBar({ tier, tiers }) {
   )
 }
 
+// Compact skills cell — the AgentCard's denormalized skill ids as small chips,
+// capped so a skill-heavy agent doesn't blow out the row. '—' when no card/skills.
+function SkillCell({ skills }) {
+  if (!skills || skills.length === 0) return <span className="text-slate-400">—</span>
+  const shown = skills.slice(0, 3)
+  const extra = skills.length - shown.length
+  return (
+    <div className="flex flex-wrap items-center gap-1" title={skills.join(', ')}>
+      {shown.map((s) => (
+        <span key={s} className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">
+          {s}
+        </span>
+      ))}
+      {extra > 0 && <span className="text-[10px] text-slate-400">+{extra}</span>}
+    </div>
+  )
+}
+
 export default function Radar() {
   const { data, loading } = usePoll(getAgents, [])
   const agents = data || []
@@ -74,12 +92,12 @@ export default function Radar() {
         }
       >
         <Table
-          columns={['Name', 'Kind', 'Framework', 'Status', 'Autonomy', 'Onboarding', 'Owner', 'Live']}
+          columns={['Name', 'Kind', 'Framework', 'Skills', 'Status', 'Autonomy', 'Onboarding', 'Owner', 'Live']}
         >
           {loading && !data ? (
-            <EmptyRow colSpan={8}>Loading agents…</EmptyRow>
+            <EmptyRow colSpan={9}>Loading agents…</EmptyRow>
           ) : agents.length === 0 ? (
-            <EmptyRow colSpan={8}>No agents detected yet.</EmptyRow>
+            <EmptyRow colSpan={9}>No agents detected yet.</EmptyRow>
           ) : (
             agents.map((a) => (
               <tr
@@ -89,7 +107,19 @@ export default function Radar() {
                 className={a.alive ? 'hover:bg-slate-50' : 'bg-rose-50 hover:bg-rose-100'}
               >
                 <Td>
-                  <div className="font-medium text-brand-900">{a.name}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-medium text-brand-900">{a.name}</span>
+                    {a.card_summary && (
+                      <span
+                        className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 ring-1 ring-inset ring-violet-600/20"
+                        title={a.card_summary.description
+                          ? `AgentCard: ${a.card_summary.description}`
+                          : 'AgentCard published'}
+                      >
+                        card
+                      </span>
+                    )}
+                  </div>
                   <div className="font-mono text-[11px] text-slate-400">{a.id}</div>
                 </Td>
                 <Td className="text-slate-700">{a.kind || '—'}</Td>
@@ -99,6 +129,9 @@ export default function Radar() {
                   ) : (
                     <span className="text-slate-400">—</span>
                   )}
+                </Td>
+                <Td>
+                  <SkillCell skills={(a.card_summary && a.card_summary.skills) || a.skills || []} />
                 </Td>
                 <Td>
                   <StatusBadge value={a.status} title={a.quarantine_reason || undefined} />
