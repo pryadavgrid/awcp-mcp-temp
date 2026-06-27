@@ -6,6 +6,7 @@ import Workflows from './pages/Workflows.jsx'
 import ContextGraph from './pages/ContextGraph.jsx'
 import TokenMonitor from './pages/TokenMonitor.jsx'
 import Hooks from './pages/Hooks.jsx'
+import Policy from './pages/Policy.jsx'
 import { usePoll } from './hooks/usePoll.js'
 import { getHealth } from './api.js'
 import { API_BASE } from './config.js'
@@ -17,6 +18,7 @@ const TITLES = {
   context: 'Context Graph',
   tokens: 'Token Monitor',
   hooks: 'Agent Hooks',
+  policy: 'Operator Policy',
 }
 
 export default function App() {
@@ -64,6 +66,7 @@ export default function App() {
           {active === 'context' && <ContextGraph />}
           {active === 'tokens' && <TokenMonitor />}
           {active === 'hooks' && <Hooks />}
+          {active === 'policy' && <Policy />}
         </div>
       </main>
     </div>

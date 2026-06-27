@@ -46,9 +46,17 @@ Per record this module:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 
 from awcp.laminar import budget, config
+
+# The radar process-scanner mints synthetic ids as `proc-<pid>-<ts>` (see
+# radar/detectors/base.py + the reconciliation regex in radar/api.py). Those rows
+# are duplicates of an agent's own self-registered id (or dead-process cruft left
+# in the persisted ledger), so they must never surface in the Token Monitor — the
+# real metered usage lives on the self-registered id. Same pattern the radar uses.
+_SCAN_ID_RE = re.compile(r"^proc-\d+-\d+$")
 from awcp.laminar.exporter import attach_laminar_exporter, exporter_attached
 from awcp.laminar.ledger import LEDGER
 
@@ -607,12 +615,14 @@ def all_usage() -> list[dict]:
     rows) are excluded; their tokens attribute to the agent's own self-registered
     id anyway. Falls back to ledger-only if the registry roster is unavailable."""
     exclude = config.USAGE_EXCLUDE
-    ids = [a for a in LEDGER.agents() if a not in exclude]
+    ids = [a for a in LEDGER.agents()
+           if a not in exclude and not _SCAN_ID_RE.match(a)]
     seen = set(ids) | exclude
     try:
         for e in _list_agents() or []:
             aid = getattr(e, "id", None)
-            if aid and aid not in seen and getattr(e, "source", "") == "self":
+            if (aid and aid not in seen and not _SCAN_ID_RE.match(aid)
+                    and getattr(e, "source", "") == "self"):
                 ids.append(aid)
                 seen.add(aid)
     except Exception:                       # noqa: BLE001 — never break the feed

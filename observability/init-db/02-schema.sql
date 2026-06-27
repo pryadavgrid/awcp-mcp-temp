@@ -62,6 +62,13 @@ CREATE TABLE registry.agents (
     last_seen              timestamptz NOT NULL DEFAULT now(),
     alive                  boolean NOT NULL DEFAULT true,
 
+    -- AgentCard (A2A description layer — additive enrichment over governance).
+    -- All nullable / defaulted, so existing rows are backward-compatible.
+    card                   jsonb,
+    card_url               text,
+    card_fetched_at        timestamptz,
+    skills                 text[] NOT NULL DEFAULT '{}',
+
     created_at             timestamptz NOT NULL DEFAULT now(),
     updated_at             timestamptz NOT NULL DEFAULT now()
 );
@@ -72,6 +79,16 @@ CREATE INDEX idx_agents_source    ON registry.agents (source);
 CREATE INDEX idx_agents_risk      ON registry.agents (risk);
 CREATE INDEX idx_agents_lastseen  ON registry.agents (last_seen);
 CREATE INDEX idx_agents_flags_gin ON registry.agents USING gin (feature_flags);
+CREATE INDEX idx_agents_skills_gin ON registry.agents USING gin (skills);
+
+-- Migration for an ALREADY-initialised DB (the radar also self-applies this at
+-- startup via store._ensure_card_columns, mirroring ensure_operator_policy_table):
+-- ALTER TABLE registry.agents
+--     ADD COLUMN IF NOT EXISTS card            jsonb,
+--     ADD COLUMN IF NOT EXISTS card_url        text,
+--     ADD COLUMN IF NOT EXISTS card_fetched_at timestamptz,
+--     ADD COLUMN IF NOT EXISTS skills          text[] NOT NULL DEFAULT '{}';
+-- CREATE INDEX IF NOT EXISTS idx_agents_skills_gin ON registry.agents USING gin (skills);
 
 CREATE TABLE registry.freeze_journal (
     agent_id     text PRIMARY KEY,
@@ -191,6 +208,24 @@ CREATE TABLE governance.tool_call_evaluations (
 
 CREATE INDEX idx_tooleval_task ON governance.tool_call_evaluations (task_id, ts);
 CREATE INDEX idx_tooleval_ts   ON governance.tool_call_evaluations (ts DESC);
+
+-- Operator-authored policy (the Radar "Policy" tab). An operator types a single
+-- JSON document that names which detected agents are RECOGNISED (allowed) and at
+-- what risk tier, and the same for tools. The OPA agent still assigns a baseline
+-- risk tier first; this policy is consulted AFTER, as an operator override /
+-- allowlist on top. Append-only + versioned: every save is a new row, the ACTIVE
+-- policy is the most-recent row, so prior policies are retained as history. The
+-- whole layer is inert when no row exists (detection + governance unchanged).
+CREATE TABLE governance.operator_policy (
+    id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts         timestamptz NOT NULL DEFAULT now(),
+    version    integer NOT NULL DEFAULT 1,
+    updated_by text,
+    note       text,
+    policy     jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_oppolicy_ts ON governance.operator_policy (ts DESC);
 
 CREATE TABLE evidence.token_ledger (
     id            bigint GENERATED ALWAYS AS IDENTITY,

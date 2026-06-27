@@ -88,6 +88,15 @@ export const getToolTiers = () => call('GET', '/opa/tiers')
 export const setBlockThreshold = (threshold) =>
   call('POST', '/opa/threshold', { threshold })
 
+// ── operator policy (the Radar "Policy" tab, now in this UI) ────────────────────
+// A single operator-authored JSON document that names which detected agents are
+// RECOGNISED (allowed) and at what risk tier — same for tools. Stored in Postgres
+// (governance.operator_policy). getPolicy returns { stored, enabled, policy, ... };
+// putPolicy validates + persists a new version (the gateway proxies to the radar).
+export const getPolicy = () => call('GET', '/policy')
+export const putPolicy = (policy, updatedBy = 'awcp-ui', note = '') =>
+  call('PUT', '/policy', { policy, updated_by: updatedBy, note })
+
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>
   `${TEMPORAL_BASE}/namespaces/default/workflows/${encodeURIComponent(wfId)}`
