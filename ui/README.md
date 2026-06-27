@@ -2,13 +2,14 @@
 
 React + Vite + Tailwind control-plane UI for the AWCP gateway.
 
-Four views (left menu):
+Views (left menu):
 
 | View              | Source endpoints                                              |
 | ----------------- | ------------------------------------------------------------- |
 | **Dashboard**     | `/healthz`, `/agents`, `/events` — fleet counters, recent workflows, live tool/gate decisions |
 | **Radar**         | `/agents` — every detected/registered agent                   |
 | **Workflow**      | `/agents` (onboarding) + `/laminar/usage[/{id}]` (task execution) — each row deep-links to the Temporal Web UI |
+| **Context Graph** | `/context-graph` (+ `/verify`, `/neo4j/graph`) — every governed step as a tamper-chained node. **Timeline** view: runs + each run's step chain (resume pointers, full hashes, chain-integrity). **Graph** view: the Neo4j projection as a node-link diagram (Agent · Workflow · Step · Tool) |
 | **Token Monitor** | `/laminar/usage`, `/laminar/budgets`, `POST /laminar/reset/{id}` — per-agent usage/budget/cost, reset window, link to the Laminar dashboard |
 
 Everything rendered is **live data from the gateway** — nothing is hardcoded.
