@@ -77,8 +77,16 @@ def neo4j_graph(workflow: str | None = None, agent: str | None = None,
 @router.post("/context-graph/neo4j/backfill")
 def neo4j_backfill(limit: int = 10000) -> dict:
     """Mirror existing ledger checkpoints into Neo4j (idempotent). Run once after
-    Neo4j first comes up to project history that predates it."""
+    Neo4j first comes up to project history that predates it. Also projects A2A
+    AgentCard skills for every registered agent."""
     return graph_store.backfill(limit=limit)
+
+
+@router.post("/context-graph/neo4j/sync-cards")
+def neo4j_sync_cards() -> dict:
+    """Project registered agents' A2A AgentCard skills into the graph as
+    (:Agent)-[:HAS_SKILL]->(:Skill). Idempotent; safe to call anytime."""
+    return graph_store.sync_cards()
 
 
 @router.get("/context-graph/{workflow_id}")
