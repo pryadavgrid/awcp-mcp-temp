@@ -52,6 +52,10 @@ WITH s
 FOREACH (_ IN CASE WHEN $tool = '' THEN [] ELSE [1] END |
   MERGE (t:Tool {name: $tool}) MERGE (s)-[:USED]->(t))
 WITH s
+// an LLM step links to the Model it called (so the graph shows which model ran)
+FOREACH (_ IN CASE WHEN $model = '' THEN [] ELSE [1] END |
+  MERGE (m:Model {name: $model}) MERGE (s)-[:USED_MODEL]->(m))
+WITH s
 // explainability: a denied step links to the Policy (gate rule) that blocked it
 FOREACH (_ IN CASE WHEN $blocked_policy = '' THEN [] ELSE [1] END |
   MERGE (pol:Policy {name: $blocked_policy}) MERGE (s)-[:BLOCKED_BY]->(pol))
@@ -76,7 +80,8 @@ OPTIONAL MATCH (p:Step)-[:NEXT]->(s)
 OPTIONAL MATCH (s)-[:BLOCKED_BY]->(pol:Policy)
 OPTIONAL MATCH (s)-[:RAISED]->(err:Error)
 RETURN s.row_hash AS id, s.step AS step, s.ts AS ts, s.decision AS decision,
-       s.outcome AS outcome, s.risk AS risk, s.tool AS tool,
+       s.outcome AS outcome, s.risk AS risk, s.tool AS tool, s.model AS model,
+       s.input_tokens AS input_tokens, s.output_tokens AS output_tokens,
        s.agent_id AS agent, s.workflow_id AS workflow,
        s.resume_pointer AS resume_pointer, s.context_hash AS context_hash,
        p.row_hash AS prev, pol.name AS policy, err.message AS error
@@ -152,7 +157,10 @@ def mirror_checkpoint(node) -> None:
     props = {
         "step": node.step, "ts": float(node.ts or 0.0), "decision": decision,
         "outcome": outcome, "risk": pl.get("risk", ""),
-        "tool": pl.get("tool", ""), "resume_pointer": node.resume_pointer,
+        "tool": pl.get("tool", ""), "model": pl.get("model", ""),
+        "input_tokens": int(pl.get("input_tokens", 0) or 0),
+        "output_tokens": int(pl.get("output_tokens", 0) or 0),
+        "resume_pointer": node.resume_pointer,
         "context_hash": node.context_hash, "prev_hash": node.prev_hash or "",
         "workflow_id": node.workflow_id, "agent_id": node.agent_id, "task_id": node.task_id,
     }
@@ -164,8 +172,8 @@ def mirror_checkpoint(node) -> None:
         with drv.session() as s:
             s.run(_MIRROR, agent_id=node.agent_id or "unknown",
                   workflow_id=node.workflow_id or "unknown", row_hash=node.row_hash,
-                  props=props, tool=props["tool"] or "", ts=props["ts"],
-                  blocked_policy=blocked_policy, error_msg=error_msg)
+                  props=props, tool=props["tool"] or "", model=props["model"] or "",
+                  ts=props["ts"], blocked_policy=blocked_policy, error_msg=error_msg)
             # A2A: enrich the acting agent with its advertised AgentCard skills.
             _attach_skills(s, node.agent_id)
     except Exception as exc:  # noqa: BLE001
@@ -259,7 +267,9 @@ def fetch_graph(workflow: str | None = None, agent: str | None = None,
         aid = f"agent:{r['agent']}"
         wid = f"wf:{r['workflow']}"
         add(sid, "step", r["step"] or "step", decision=r["decision"], outcome=r["outcome"],
-            risk=r["risk"], tool=r["tool"], agent=r["agent"], workflow=r["workflow"],
+            risk=r["risk"], tool=r["tool"], model=r["model"],
+            input_tokens=r["input_tokens"], output_tokens=r["output_tokens"],
+            agent=r["agent"], workflow=r["workflow"],
             resume_pointer=r["resume_pointer"], context_hash=r["context_hash"], ts=r["ts"])
         add(aid, "agent", r["agent"] or "agent")
         add(wid, "workflow", r["workflow"] or "workflow")
@@ -269,6 +279,10 @@ def fetch_graph(workflow: str | None = None, agent: str | None = None,
             tid = f"tool:{r['tool']}"
             add(tid, "tool", r["tool"])
             edges.append({"source": sid, "target": tid, "type": "USED"})
+        if r["model"]:
+            mid = f"model:{r['model']}"
+            add(mid, "model", r["model"])
+            edges.append({"source": sid, "target": mid, "type": "USED_MODEL"})
         if r["prev"]:
             edges.append({"source": r["prev"], "target": sid, "type": "NEXT"})
         if r["policy"]:
