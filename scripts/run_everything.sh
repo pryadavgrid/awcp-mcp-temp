@@ -93,7 +93,7 @@ TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/ssrivastava/Desktop/capstone-awcp/awcp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO2/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
