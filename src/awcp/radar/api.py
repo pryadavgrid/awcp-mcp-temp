@@ -987,6 +987,13 @@ router = APIRouter()
 from awcp.radar.llm_gateway import gateway_router  # noqa: E402
 router.include_router(gateway_router)
 
+# Context graph (the governed-step trail): /agents/{id}/checkpoint + /context-graph/*.
+# Additive and fail-open — it writes the resume_pointer/context_hash lineage into
+# evidence.ledger that nothing populated before. Mounted here so it is served on
+# every surface the radar router is (the port the MCP server posts checkpoints to).
+from awcp.context_graph.api import router as context_graph_router  # noqa: E402
+router.include_router(context_graph_router)
+
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
 # The laminar package never imports radar internals; the radar injects the
