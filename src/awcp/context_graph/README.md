@@ -95,7 +95,8 @@ execute_tool()
 | `GET  /context-graph/verify`           | re-hash the **whole ledger** and report any break |
 | `GET  /context-graph/neo4j/status`     | Neo4j projection connection + node counts |
 | `GET  /context-graph/neo4j/graph`      | node-link graph (nodes+edges) for visualization |
-| `POST /context-graph/neo4j/backfill`   | mirror existing ledger checkpoints into Neo4j |
+| `POST /context-graph/neo4j/backfill`   | mirror existing ledger checkpoints into Neo4j (+ A2A skills) |
+| `POST /context-graph/neo4j/sync-cards` | project agents' A2A AgentCard skills into the graph |
 | `GET  /context-graph/{workflow_id}`    | one run's ordered nodes **+ edges** |
 | `GET  /context-graph`                  | recent steps across all runs (global feed) |
 
@@ -227,6 +228,21 @@ can be queried and visualised as a real graph:
 (:Step)-[:USED]->(:Tool {name})
 (:Step)-[:BLOCKED_BY]->(:Policy {name})   # explainability: which gate rule denied it
 (:Step)-[:RAISED]->(:Error {message})     # a failed step (per-step, no hub)
+(:Agent)-[:HAS_SKILL]->(:Skill {id})      # A2A: capabilities from the agent's AgentCard
+```
+
+**A2A wiring.** The merged AgentCard (A2A) feature gives each `AgentEntry` a `skills`
+list (its advertised capabilities). The graph reads those from the live registry
+and attaches them as `(:Agent)-[:HAS_SKILL]->(:Skill)`. `Skill` nodes are **deduped
+by id**, so one `(:Skill {id:"web_search"})` is shared by every agent that
+advertises it — which is exactly the A2A *discovery* view ("who can do X?").
+Skills attach automatically when an agent records a step, and `POST
+/context-graph/neo4j/sync-cards` (also run inside `backfill`) projects skills for
+every registered agent up front. So the graph now connects what an agent **can do**
+(A2A capability) to what it **did** (provenance). Example query:
+
+```cypher
+MATCH (a:Agent)-[:HAS_SKILL]->(s:Skill {id:"web_search"}) RETURN a;   // who can web_search?
 ```
 
 `Policy` and `Error` nodes are **derived from the checkpoint payload we already
