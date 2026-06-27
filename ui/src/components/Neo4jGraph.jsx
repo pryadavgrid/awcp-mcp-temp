@@ -14,10 +14,11 @@ const COLORS = {
   tool: '#f59e0b', // amber
   policy: '#a855f7', // purple — gate rule that blocked a step
   error: '#dc2626', // red — a failed step
+  skill: '#14b8a6', // teal — an A2A AgentCard capability the agent advertises
 }
 // workflow kept for safety but not rendered; columns re-spaced without it
-const COLX = { agent: 0.1, workflow: 0.1, step: 0.4, tool: 0.58, policy: 0.77, error: 0.92 }
-const RADIUS = { agent: 10, workflow: 10, step: 8, tool: 7, policy: 8, error: 7 }
+const COLX = { skill: 0.05, agent: 0.2, workflow: 0.2, step: 0.42, tool: 0.6, policy: 0.78, error: 0.92 }
+const RADIUS = { agent: 10, workflow: 10, step: 8, tool: 7, policy: 8, error: 7, skill: 7 }
 const PAD_Y = 30
 
 const truncate = (s, n = 18) => (s && s.length > n ? s.slice(0, n - 1) + '…' : s || '')
@@ -28,10 +29,10 @@ const nodeColor = (n) =>
 
 // Initial column layout — used as the starting position before any dragging.
 function layout(nodes, width, height) {
-  const cols = { agent: [], workflow: [], step: [], tool: [], policy: [], error: [] }
+  const cols = { skill: [], agent: [], workflow: [], step: [], tool: [], policy: [], error: [] }
   for (const n of nodes) (cols[n.type] || cols.step).push(n)
   cols.step.sort((a, b) => (a.ts || 0) - (b.ts || 0))
-  for (const t of ['agent', 'workflow', 'tool', 'policy', 'error'])
+  for (const t of ['skill', 'agent', 'workflow', 'tool', 'policy', 'error'])
     cols[t].sort((a, b) => String(a.label).localeCompare(String(b.label)))
   const pos = {}
   for (const type of Object.keys(cols)) {
@@ -170,6 +171,7 @@ export default function Neo4jGraph({ workflow }) {
               e.type === 'NEXT' ? '#94a3b8'
               : e.type === 'BLOCKED_BY' ? '#f87171'
               : e.type === 'RAISED' ? '#fb923c'
+              : e.type === 'HAS_SKILL' ? '#5eead4'
               : '#dbe2ea'
             return (
               <path
@@ -227,6 +229,7 @@ export default function Neo4jGraph({ workflow }) {
 function Legend({ counts, edges, selected, onClear }) {
   const items = [
     ['agent', 'Agent', COLORS.agent],
+    ['skill', 'Skill (A2A)', COLORS.skill],
     ['step', 'Step', COLORS.step],
     ['tool', 'Tool', COLORS.tool],
     ['policy', 'Policy', COLORS.policy],
