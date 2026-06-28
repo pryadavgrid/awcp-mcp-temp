@@ -23,6 +23,9 @@ Pillow>=10.0.0         # llama_vision agent (image handling)
 # --- MCP server/client (FastMCP API) ---
 mcp>=1.2.0
 
+# --- Sandboxed tool execution (workspace tools run in an isolated container) ---
+opensandbox>=0.1.13
+
 # --- Temporal orchestration (worker + workflow + client) ---
 temporalio>=1.12.0
 

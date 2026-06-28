@@ -1,14 +1,16 @@
-import asyncio
 import arxiv
+import contextlib
 import inspect
 import json
 import logging
 
 import os
 import sys
+from datetime import timedelta
 from typing import Annotated, Any
 
 import httpx
+from opensandbox.models.execd import RunCommandOpts
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import HTMLResponse
@@ -27,6 +29,14 @@ from awcp.runtime.tool_runtime import (
 )
 from awcp.runtime.ollama_client import ask_ollama
 from awcp.runtime.config import SEARCH_MODEL
+from awcp.runtime.sandbox import (
+    SANDBOX_MOUNT_PATH,
+    close_sandbox,
+    get_sandbox,
+    record_event as record_sandbox_event,
+    sandbox_events,
+    sandbox_status,
+)
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
@@ -166,31 +176,37 @@ def _govern_span(name: str, trace_context: dict | None):
 # ======================================================================
 
 @mcp.tool(description="Read the contents of a file in the workspace.")
-def read_file(
+async def read_file(
     path: Annotated[str, Field(description="Relative path to the file")],
 ) -> str:
     if ".." in path or path.startswith("/"):
+        record_sandbox_event("read_file_blocked", detail=path)
         return "Error: Invalid path."
     try:
-        with open(path, "r") as f:
-            return f.read()
+        sb = await get_sandbox()
+        content = await sb.files.read_file(f"{SANDBOX_MOUNT_PATH}/{path}")
+        record_sandbox_event("read_file", detail=path)
+        return content
     except Exception as e:
+        record_sandbox_event("read_file_error", detail=f"{path}: {e}"[:200])
         return f"Error reading file: {str(e)}"
 
 
 @mcp.tool(description="Write or overwrite a file in the workspace.")
-def write_file(
+async def write_file(
     path: Annotated[str, Field(description="Relative path to the file")],
     content: Annotated[str, Field(description="Content to write")],
 ) -> str:
     if ".." in path or path.startswith("/"):
+        record_sandbox_event("write_file_blocked", detail=path)
         return "Error: Invalid path."
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
+        sb = await get_sandbox()
+        await sb.files.write_file(f"{SANDBOX_MOUNT_PATH}/{path}", content)
+        record_sandbox_event("write_file", detail=f"{path} ({len(content)} bytes)")
         return f"Successfully wrote to {path}"
     except Exception as e:
+        record_sandbox_event("write_file_error", detail=f"{path}: {e}"[:200])
         return f"Error writing file: {str(e)}"
 
 
@@ -199,14 +215,20 @@ async def run_command(
     command: Annotated[str, Field(description="The shell command to run")],
 ) -> str:
     try:
-        process = await asyncio.create_subprocess_shell(
+        sb = await get_sandbox()
+        execution = await sb.commands.run(
             command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            opts=RunCommandOpts(
+                working_directory=SANDBOX_MOUNT_PATH,
+                timeout=timedelta(seconds=30),
+            ),
         )
-        stdout, stderr = await process.communicate()
-        return f"STDOUT:\n{stdout.decode()}\nSTDERR:\n{stderr.decode()}"
+        stdout = "".join(m.text or "" for m in execution.logs.stdout)
+        stderr = "".join(m.text or "" for m in execution.logs.stderr)
+        record_sandbox_event("run_command", detail=command[:200])
+        return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
     except Exception as e:
+        record_sandbox_event("run_command_error", detail=f"{command}: {e}"[:200])
         return f"Error executing command: {str(e)}"
 
 
@@ -856,11 +878,39 @@ async def get_index(request):
     return HTMLResponse(_DASHBOARD_HTML)
 
 
+async def get_sandbox_status(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse(sandbox_status())
+
+
+async def get_sandbox_events(request):
+    from starlette.responses import JSONResponse
+    limit = int(request.query_params.get("limit", "50"))
+    return JSONResponse(sandbox_events(limit))
+
+
 # FastMCP builds the Starlette SSE app (routes: GET /sse, POST /messages/).
 # We attach the human-facing dashboard at GET / on the same app. This is the
 # object uvicorn serves: `uvicorn awcp.mcp.server:app`.
 app = mcp.sse_app()
 app.router.routes.append(Route("/", endpoint=get_index, methods=["GET"]))
+app.router.routes.append(Route("/sandbox/status", endpoint=get_sandbox_status, methods=["GET"]))
+app.router.routes.append(Route("/sandbox/events", endpoint=get_sandbox_events, methods=["GET"]))
+
+# Starlette dropped add_event_handler()/on_shutdown in favor of the lifespan
+# context manager, so we wrap FastMCP's default lifespan to also tear down
+# the sandbox container when uvicorn shuts the server down.
+_inner_lifespan = app.router.lifespan_context
+
+
+@contextlib.asynccontextmanager
+async def _lifespan_with_sandbox_cleanup(app_):
+    async with _inner_lifespan(app_) as state:
+        yield state
+    await close_sandbox()
+
+
+app.router.lifespan_context = _lifespan_with_sandbox_cleanup
 
 
 if __name__ == "__main__":

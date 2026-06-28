@@ -6,6 +6,7 @@ const ITEMS = [
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
   { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
   { id: 'policy', label: 'Operator Policy', icon: '⚖' },
+  { id: 'sandbox', label: 'Sandbox', icon: '▣' },
 ]
 
 export function Sidebar({ active, onSelect, health }) {
@@ -13,6 +14,7 @@ export function Sidebar({ active, onSelect, health }) {
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
   const opa = health?.opa?.connected
+  const sandboxStatus = health?.sandbox?.status
 
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
@@ -51,19 +53,25 @@ export function Sidebar({ active, onSelect, health }) {
         <ConnRow label="OTel" ok={otel} />
         <ConnRow label="Laminar" ok={laminar} />
         <ConnRow label="OPA" ok={opa} />
+        <ConnRow
+          label="Sandbox"
+          ok={sandboxStatus === 'running' || sandboxStatus === 'not_started'}
+          text={sandboxStatus ? sandboxStatus.replace('_', ' ') : 'offline'}
+          title={health?.sandbox?.reason || health?.sandbox?.workspace_dir}
+        />
       </div>
     </aside>
   )
 }
 
-function ConnRow({ label, ok }) {
+function ConnRow({ label, ok, text, title }) {
   return (
-    <div className="flex items-center justify-between">
+    <div className="flex items-center justify-between" title={title}>
       <span>{label}</span>
       <span className="flex items-center gap-1.5">
         <span className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-brand-300' : 'bg-white/25'}`} />
         <span className={ok ? 'text-brand-100' : 'text-brand-200/70'}>
-          {ok ? 'connected' : 'offline'}
+          {text ?? (ok ? 'connected' : 'offline')}
         </span>
       </span>
     </div>

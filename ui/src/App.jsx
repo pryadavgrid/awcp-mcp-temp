@@ -7,6 +7,7 @@ import Workflows from './pages/Workflows.jsx'
 import TokenMonitor from './pages/TokenMonitor.jsx'
 import Hooks from './pages/Hooks.jsx'
 import Policy from './pages/Policy.jsx'
+import Sandbox from './pages/Sandbox.jsx'
 import { usePoll } from './hooks/usePoll.js'
 import { getHealth } from './api.js'
 import { API_BASE } from './config.js'
@@ -19,6 +20,7 @@ const TITLES = {
   tokens: 'Token Monitor',
   hooks: 'Agent Hooks',
   policy: 'Operator Policy',
+  sandbox: 'Sandbox',
 }
 
 // Valid page ids are exactly the nav entries — derived, not hardcoded twice.
@@ -97,6 +99,7 @@ export default function App() {
           {active === 'tokens' && <TokenMonitor />}
           {active === 'hooks' && <Hooks />}
           {active === 'policy' && <Policy />}
+          {active === 'sandbox' && <Sandbox />}
         </div>
       </main>
     </div>

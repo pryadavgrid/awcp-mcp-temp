@@ -26,6 +26,9 @@ async function call(method, path, body) {
 
 // ── registry / radar ────────────────────────────────────────────────────────
 export const getHealth = () => call('GET', '/healthz')
+// Sandbox lifecycle + tool-call timeline, proxied from the MCP server's own
+// process. health.sandbox (from getHealth) already carries the live status.
+export const getSandboxEvents = (limit = 50) => call('GET', `/sandbox/events?limit=${limit}`)
 export const getAgents = () => call('GET', '/agents')
 // The bundle agents + their live tool catalogs (folder id, registry agent_id, tools).
 export const getUserAgents = () => call('GET', '/user/agents')

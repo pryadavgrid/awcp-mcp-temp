@@ -82,3 +82,6 @@ temp_uploads/
 # --- Runtime agent outputs (save_artifact) ---
 artifacts/
 agent_radar_registry.json
+
+# --- Sandboxed agent workspace (volume-mounted into OpenSandbox) ---
+workspace/

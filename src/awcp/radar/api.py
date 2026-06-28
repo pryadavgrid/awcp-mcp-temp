@@ -2514,6 +2514,40 @@ def _opa_connected() -> bool:
     return ok
 
 
+# The sandbox singleton lives in the MCP server's own process (port 8002), not
+# here, so reporting its status means asking that process directly. Derived
+# from the same AWCP_MCP_URL agents already use to reach the SSE endpoint.
+_MCP_BASE_URL = os.getenv("AWCP_MCP_URL", "http://localhost:8002/sse").removesuffix("/sse")
+_MCP_STATUS_URL = _MCP_BASE_URL + "/sandbox/status"
+_MCP_EVENTS_URL = _MCP_BASE_URL + "/sandbox/events"
+_MCP_STATUS_TIMEOUT = float(os.getenv("AWCP_MCP_STATUS_TIMEOUT", "2"))
+
+
+def _sandbox_status() -> dict:
+    """Fail-safe sandbox status: an unreachable MCP server is reported as
+    'unreachable', never raised — this must never break /healthz."""
+    try:
+        resp = httpx.get(_MCP_STATUS_URL, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "unreachable", "reason": f"HTTP {resp.status_code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unreachable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/sandbox/events")
+def sandbox_events(limit: int = 50) -> dict:
+    """Proxies the MCP server's sandbox event timeline (lifecycle + tool calls)
+    for the UI's Sandbox page. Fail-safe like /healthz's sandbox field."""
+    try:
+        resp = httpx.get(_MCP_EVENTS_URL, params={"limit": limit}, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return {"reachable": True, "events": resp.json()}
+        return {"reachable": False, "reason": f"HTTP {resp.status_code}", "events": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"reachable": False, "reason": f"{type(exc).__name__}: {exc}", "events": []}
+
+
 @router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
@@ -2536,6 +2570,7 @@ def healthz() -> dict:
         # When not connected the gate runs on the policy.py fallback.
         "opa": {"enabled": opa.enabled(), "connected": _opa_connected(),
                 "url": opa.OPA_URL or None},
+        "sandbox": _sandbox_status(),
     }
 
 
