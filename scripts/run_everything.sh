@@ -88,7 +88,7 @@ export LMNR_OTLP_ENDPOINT="${LMNR_OTLP_ENDPOINT:-http://localhost:8881}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 UI_PORT="${UI_PORT:-5173}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-everything-run"; mkdir -p "$LOGDIR"
-TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""
+TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""; SANDBOX_PID=""; OPA_SERVER_PID=""
 
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
@@ -238,6 +238,7 @@ cleanup(){
   [ -n "$OPA_PID" ]        && kill "$OPA_PID"        2>/dev/null || true
   [ -n "$OPA_SERVER_PID" ] && kill "$OPA_SERVER_PID" 2>/dev/null || true
   [ -n "$MCP_PID" ]        && kill "$MCP_PID"        2>/dev/null || true
+  [ -n "$SANDBOX_PID" ]    && kill "$SANDBOX_PID"    2>/dev/null || true
   [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
   [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
   say "Stopped the gateway (+ Temporal/MCP/Ollama/UI if this script started them)."
@@ -359,6 +360,72 @@ elif command -v ollama >/dev/null 2>&1; then
     || warn "Ollama didn't come up — agents that need a local model will fail."
 else
   warn "Ollama not found — install it and 'ollama pull llama3.1:8b gemma2:2b', else agents fail (https://ollama.com)."
+fi
+
+# ── 4b. OpenSandbox runtime (:8080) — backend for the MCP workspace tools ──────
+# The MCP server's read_file/write_file/run_command tools run inside an
+# OpenSandbox-managed container; this is the control-plane the SDK talks to. We
+# start it here so the WHOLE stack comes up from one script (no separate terminal).
+#
+# Fully portable — nothing is hardcoded to one machine:
+#   • the bind-mounted workspace dir is AWCP_WORKSPACE_DIR (set it in .env to move
+#     it; otherwise it defaults to <repo>/workspace),
+#   • the dir is created if missing,
+#   • the config (~/.sandbox.toml) is generated on first run, and
+#   • the runtime's allowed_host_paths allowlist is updated to include the
+#     workspace automatically (an EMPTY list means deny-all, despite the comment
+#     the generator writes).
+# Set SKIP_SANDBOX=1 to leave it off; OPENSANDBOX_VERSION / OPENSANDBOX_CONFIG
+# override the pinned version and the config path.
+SANDBOX_VERSION="${OPENSANDBOX_VERSION:-0.1.13}"
+SANDBOX_CONFIG="${OPENSANDBOX_CONFIG:-$HOME/.sandbox.toml}"
+# Read from .env (loaded above) or auto-detect; exported so the MCP server (step 5)
+# bind-mounts the SAME dir the allowlist authorizes.
+export AWCP_WORKSPACE_DIR="${AWCP_WORKSPACE_DIR:-$ROOT/workspace}"
+if [ "${SKIP_SANDBOX:-0}" = "1" ]; then
+  warn "SKIP_SANDBOX=1 — not starting the OpenSandbox runtime (sandbox tools will report unreachable)."
+elif ! command -v uvx >/dev/null 2>&1; then
+  warn "uvx (uv) not found — can't start the OpenSandbox runtime (install: brew install uv). Sandbox tools will be unreachable."
+else
+  mkdir -p "$AWCP_WORKSPACE_DIR"
+  if [ ! -f "$SANDBOX_CONFIG" ]; then
+    say "Generating OpenSandbox config → $SANDBOX_CONFIG (first run only)…"
+    uvx "opensandbox-server@${SANDBOX_VERSION}" init-config "$SANDBOX_CONFIG" --example docker \
+      || warn "init-config failed — the sandbox may not start (see above)."
+  fi
+  # Idempotently ensure the workspace dir is on allowed_host_paths (merge, don't
+  # clobber any paths already there). Portable: the path comes from this repo.
+  if [ -f "$SANDBOX_CONFIG" ]; then
+    AWCP_WORKSPACE_DIR="$AWCP_WORKSPACE_DIR" SANDBOX_CONFIG="$SANDBOX_CONFIG" python3 - <<'PY' || warn "couldn't update allowed_host_paths automatically — check $SANDBOX_CONFIG."
+import os, re
+cfg = os.environ["SANDBOX_CONFIG"]; ws = os.environ["AWCP_WORKSPACE_DIR"]
+text = open(cfg).read()
+m = re.search(r'(?m)^[ \t]*allowed_host_paths[ \t]*=[ \t]*\[(.*?)\]', text)
+if m:
+    existing = re.findall(r'"([^"]*)"', m.group(1))
+    if ws in existing:
+        print("  allowed_host_paths already includes the workspace — ok")
+    else:
+        merged = existing + [ws]
+        line = 'allowed_host_paths = [' + ', '.join('"%s"' % p for p in merged) + ']'
+        open(cfg, "w").write(text[:m.start()] + line + text[m.end():])
+        print("  added workspace to allowed_host_paths")
+else:
+    open(cfg, "a").write('\n[storage]\nallowed_host_paths = ["%s"]\n' % ws)
+    print("  added [storage] allowed_host_paths")
+PY
+  fi
+  if [ -n "$(port_open 8080)" ]; then
+    say "OpenSandbox runtime already on :8080 — reusing it."
+  else
+    say "Starting OpenSandbox runtime on :8080 (workspace: $AWCP_WORKSPACE_DIR)…"
+    OPENSANDBOX_INSECURE_SERVER=YES nohup uvx "opensandbox-server@${SANDBOX_VERSION}" \
+      --config "$SANDBOX_CONFIG" > "$LOGDIR/opensandbox.log" 2>&1 &
+    SANDBOX_PID=$!
+    for i in $(seq 1 60); do [ -n "$(port_open 8080)" ] && break; sleep 1; done
+    [ -n "$(port_open 8080)" ] && say "OpenSandbox runtime is up." \
+      || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running?)."
+  fi
 fi
 
 # ── 5. MCP control server (:8002, SSE) — background ───────────────────
@@ -488,6 +555,9 @@ else
 echo "     OPA policy engine      : not running   (gate uses policy.py fallback — see $LOGDIR/opa-server.log)"
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
+if [ "${SKIP_SANDBOX:-0}" != "1" ]; then
+echo "     OpenSandbox runtime    : http://localhost:8080   (sandbox backend; workspace: $AWCP_WORKSPACE_DIR)"
+fi
 if [ "${SKIP_OPA:-0}" != "1" ]; then
 echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden SLM PDP, model ${OPA_SLM_MODEL}; tier bars on Radar)"
 fi

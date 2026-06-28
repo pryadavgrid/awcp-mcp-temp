@@ -1,4 +1,5 @@
 import arxiv
+import asyncio
 import contextlib
 import inspect
 import json
@@ -33,9 +34,12 @@ from awcp.runtime.sandbox import (
     SANDBOX_MOUNT_PATH,
     close_sandbox,
     get_sandbox,
+    read_file_sync,
     record_event as record_sandbox_event,
+    run_command_sync,
     sandbox_events,
     sandbox_status,
+    write_file_sync,
 )
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
@@ -175,61 +179,33 @@ def _govern_span(name: str, trace_context: dict | None):
 # Workspace tools
 # ======================================================================
 
-@mcp.tool(description="Read the contents of a file in the workspace.")
+# These static tools (for direct MCP clients / the Inspector) and the runtime
+# @tool versions in awcp.tools.sandbox_tools (for agents, via execute_tool) both
+# delegate to the same sync wrappers in awcp.runtime.sandbox, which own the path
+# guard, the event recording, and the bridge onto the dedicated sandbox loop. We
+# run them via asyncio.to_thread so the blocking bridge call never freezes this
+# (async) server's event loop.
+
+@mcp.tool(description="Read the contents of a file in the workspace sandbox.")
 async def read_file(
     path: Annotated[str, Field(description="Relative path to the file")],
 ) -> str:
-    if ".." in path or path.startswith("/"):
-        record_sandbox_event("read_file_blocked", detail=path)
-        return "Error: Invalid path."
-    try:
-        sb = await get_sandbox()
-        content = await sb.files.read_file(f"{SANDBOX_MOUNT_PATH}/{path}")
-        record_sandbox_event("read_file", detail=path)
-        return content
-    except Exception as e:
-        record_sandbox_event("read_file_error", detail=f"{path}: {e}"[:200])
-        return f"Error reading file: {str(e)}"
+    return await asyncio.to_thread(read_file_sync, path)
 
 
-@mcp.tool(description="Write or overwrite a file in the workspace.")
+@mcp.tool(description="Write or overwrite a file in the workspace sandbox.")
 async def write_file(
     path: Annotated[str, Field(description="Relative path to the file")],
     content: Annotated[str, Field(description="Content to write")],
 ) -> str:
-    if ".." in path or path.startswith("/"):
-        record_sandbox_event("write_file_blocked", detail=path)
-        return "Error: Invalid path."
-    try:
-        sb = await get_sandbox()
-        await sb.files.write_file(f"{SANDBOX_MOUNT_PATH}/{path}", content)
-        record_sandbox_event("write_file", detail=f"{path} ({len(content)} bytes)")
-        return f"Successfully wrote to {path}"
-    except Exception as e:
-        record_sandbox_event("write_file_error", detail=f"{path}: {e}"[:200])
-        return f"Error writing file: {str(e)}"
+    return await asyncio.to_thread(write_file_sync, path, content)
 
 
-@mcp.tool(description="Execute a shell command in the workspace.")
+@mcp.tool(description="Execute a shell command in the workspace sandbox.")
 async def run_command(
     command: Annotated[str, Field(description="The shell command to run")],
 ) -> str:
-    try:
-        sb = await get_sandbox()
-        execution = await sb.commands.run(
-            command,
-            opts=RunCommandOpts(
-                working_directory=SANDBOX_MOUNT_PATH,
-                timeout=timedelta(seconds=30),
-            ),
-        )
-        stdout = "".join(m.text or "" for m in execution.logs.stdout)
-        stderr = "".join(m.text or "" for m in execution.logs.stderr)
-        record_sandbox_event("run_command", detail=command[:200])
-        return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
-    except Exception as e:
-        record_sandbox_event("run_command_error", detail=f"{command}: {e}"[:200])
-        return f"Error executing command: {str(e)}"
+    return await asyncio.to_thread(run_command_sync, command)
 
 
 @mcp.tool(description="Search academic papers on arXiv.")
@@ -907,7 +883,8 @@ _inner_lifespan = app.router.lifespan_context
 async def _lifespan_with_sandbox_cleanup(app_):
     async with _inner_lifespan(app_) as state:
         yield state
-    await close_sandbox()
+    # close_sandbox() blocks on the dedicated sandbox loop; run it off this loop.
+    await asyncio.to_thread(close_sandbox)
 
 
 app.router.lifespan_context = _lifespan_with_sandbox_cleanup

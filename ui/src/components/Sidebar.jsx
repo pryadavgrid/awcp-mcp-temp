@@ -9,7 +9,7 @@ const ITEMS = [
   { id: 'sandbox', label: 'Sandbox', icon: '▣' },
 ]
 
-export function Sidebar({ active, onSelect, health }) {
+export function Sidebar({ active, onSelect, health, approvalsCount = 0 }) {
   const temporal = health?.temporal_connected
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
@@ -42,7 +42,15 @@ export function Sidebar({ active, onSelect, health }) {
               }`}
             >
               <span className="w-4 text-center text-base leading-none">{it.icon}</span>
-              {it.label}
+              <span className="flex-1 text-left">{it.label}</span>
+              {it.id === 'approvals' && approvalsCount > 0 && (
+                <span
+                  title={`${approvalsCount} approval${approvalsCount === 1 ? '' : 's'} pending`}
+                  className="text-sm font-bold tabular-nums text-white"
+                >
+                  {approvalsCount}
+                </span>
+              )}
             </button>
           )
         })}
