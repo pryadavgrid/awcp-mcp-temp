@@ -1,116 +1,91 @@
 import { usePoll } from '../hooks/usePoll.js'
-import { getAgents, getUsage, getUsageOne, temporalUrl } from '../api.js'
+import { getWorkflows } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { Badge, StatusBadge } from '../components/Badge.jsx'
+import { StatCard } from '../components/StatCard.jsx'
 import { fmtDuration, timeAgo } from '../lib/format.js'
-import { onboardingWorkflows } from '../lib/domain.js'
 
-// A task-execution workflow has no dedicated list endpoint, so we reconstruct it
-// from the token ledger: every recorded LLM/tool call carries (agent_id, task_id,
-// ts), and the gateway names the workflow `task-<agent_id>-<task_id>`. Grouping
-// the per-agent recent calls by task_id yields the same workflows Temporal ran —
-// fully dynamic, nothing hardcoded.
-async function loadWorkflows() {
-  const [agents, usage] = await Promise.all([getAgents(), getUsage().catch(() => [])])
-
-  const onboarding = onboardingWorkflows(agents)
-
-  const details = await Promise.all(
-    (usage || []).map((u) =>
-      getUsageOne(u.agent_id)
-        .then((d) => ({ u, d }))
-        .catch(() => null),
-    ),
-  )
-
-  const now = Date.now() / 1000
-  const exec = []
-  for (const item of details) {
-    if (!item) continue
-    const { u, d } = item
-    const byTask = {}
-    for (const r of d.recent || []) {
-      const tid = r.task_id || 'unknown'
-      ;(byTask[tid] ||= []).push(r)
-    }
-    for (const [tid, recs] of Object.entries(byTask)) {
-      const tss = recs.map((r) => r.ts).filter(Boolean)
-      const min = tss.length ? Math.min(...tss) : 0
-      const max = tss.length ? Math.max(...tss) : 0
-      const wfId = `task-${u.agent_id}-${tid}`
-      exec.push({
-        key: wfId,
-        workflow_id: wfId,
-        type: 'Task Execution',
-        status: now - max < 60 ? 'running' : 'complete',
-        agent: u.name || u.agent_id,
-        agent_id: u.agent_id,
-        tool_calls: recs.length,
-        duration: max - min,
-        url: temporalUrl(wfId),
-        ts: max,
-      })
-    }
-  }
-
-  return [...exec, ...onboarding].sort((a, b) => (b.ts || 0) - (a.ts || 0))
+// Status comes straight from Temporal now (running / completed / terminated /
+// canceled / failed / timed_out) — never guessed from timestamps — so a
+// terminated run reads as "terminated", not "completed". Fully dynamic.
+const prettyType = (t) => {
+  const s = String(t || '')
+  if (/exec/i.test(s)) return 'Task Execution'
+  if (/onboard/i.test(s)) return 'Agent Onboarding'
+  return s || 'Workflow'
 }
 
 export default function Workflows() {
-  const { data, loading } = usePoll(loadWorkflows, [])
-  const rows = data || []
+  const { data, loading } = usePoll(getWorkflows, [])
+  const rows = data?.workflows || []
+  const c = data?.counts || {}
+  const terminatedCanceled = (c.terminated || 0) + (c.canceled || 0)
+  const failed = (c.failed || 0) + (c.timed_out || 0)
 
   return (
-    <Panel
-      title="Workflows"
-      subtitle="Agent-onboarding & task-execution workflows — click an id to open it in Temporal"
-      right={
-        <span className="text-xs text-slate-500">
-          {rows.length} workflow{rows.length === 1 ? '' : 's'}
-        </span>
-      }
-    >
-      <Table columns={['Workflow ID', 'Type', 'Status', 'Agent', 'Tool Calls', 'Total Time']}>
-        {loading && !data ? (
-          <EmptyRow colSpan={6}>Loading workflows…</EmptyRow>
-        ) : rows.length === 0 ? (
-          <EmptyRow colSpan={6}>No workflows yet.</EmptyRow>
-        ) : (
-          rows.map((w) => (
-            <tr key={w.key} className="hover:bg-slate-50">
-              <Td>
-                {w.url ? (
-                  <a
-                    href={w.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="font-mono text-xs font-semibold text-brand-600 hover:text-brand-700 hover:underline"
-                    title="Open in Temporal"
-                  >
-                    {w.workflow_id} ↗
-                  </a>
-                ) : (
-                  <span className="font-mono text-xs text-brand-900">{w.workflow_id}</span>
-                )}
-              </Td>
-              <Td>
-                <Badge tone={w.type === 'Task Execution' ? 'violet' : 'blue'}>{w.type}</Badge>
-              </Td>
-              <Td>
-                <StatusBadge value={w.status} />
-              </Td>
-              <Td>
-                <div className="text-slate-800">{w.agent}</div>
-                <div className="font-mono text-[11px] text-slate-400">{w.agent_id}</div>
-              </Td>
-              <Td className="text-slate-700">{w.tool_calls}</Td>
-              <Td className="text-slate-500">
-                {w.duration != null ? fmtDuration(w.duration) : timeAgo(w.ts)}
-              </Td>
-            </tr>
-          ))
-        )}
-      </Table>
-    </Panel>
+    <div className="space-y-6">
+      {/* Summary boxes: how many workflows are running / completed / terminated. */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <StatCard label="Running" value={c.running ?? 0} accent="amber" />
+        <StatCard label="Completed" value={c.completed ?? 0} accent="emerald" />
+        <StatCard label="Terminated / Canceled" value={terminatedCanceled} accent="rose" />
+        <StatCard
+          label="Failed"
+          value={failed}
+          accent="rose"
+          sub={c.timed_out ? `incl. ${c.timed_out} timed out` : undefined}
+        />
+      </div>
+
+      <Panel
+        title="Workflows"
+        subtitle="Live from Temporal — real status for every onboarding & task-execution workflow; click an id to open it in Temporal"
+        right={<span className="text-xs text-slate-500">{c.total ?? rows.length} total</span>}
+      >
+        <Table columns={['Workflow ID', 'Type', 'Status', 'Started', 'Duration']}>
+          {loading && !data ? (
+            <EmptyRow colSpan={5}>Loading workflows…</EmptyRow>
+          ) : rows.length === 0 ? (
+            <EmptyRow colSpan={5}>
+              {data?.error ? `Temporal: ${data.error}` : 'No workflows yet.'}
+            </EmptyRow>
+          ) : (
+            rows.map((w) => (
+              <tr key={w.workflow_id} className="hover:bg-slate-50">
+                <Td>
+                  {w.temporal_url ? (
+                    <a
+                      href={w.temporal_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-xs font-semibold text-brand-600 hover:text-brand-700 hover:underline"
+                      title="Open in Temporal"
+                    >
+                      {w.workflow_id} ↗
+                    </a>
+                  ) : (
+                    <span className="font-mono text-xs text-brand-900">{w.workflow_id}</span>
+                  )}
+                </Td>
+                <Td>
+                  <Badge tone={/exec/i.test(w.type) ? 'violet' : 'blue'}>{prettyType(w.type)}</Badge>
+                </Td>
+                <Td>
+                  <StatusBadge value={w.status} />
+                </Td>
+                <Td className="text-slate-500">{w.start_ts ? timeAgo(w.start_ts) : '—'}</Td>
+                <Td className="text-slate-500">
+                  {w.duration != null
+                    ? fmtDuration(w.duration)
+                    : w.status === 'running'
+                      ? 'running…'
+                      : '—'}
+                </Td>
+              </tr>
+            ))
+          )}
+        </Table>
+      </Panel>
+    </div>
   )
 }

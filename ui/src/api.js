@@ -33,6 +33,12 @@ export const getEvents = (limit = 50) => call('GET', `/events?limit=${limit}`)
 export const setAutonomy = (id, profile) =>
   call('POST', `/agents/${encodeURIComponent(id)}/autonomy`, { profile })
 
+// Real Temporal workflow status + per-status counts (running / completed /
+// terminated / canceled / failed), read straight from Temporal — never guessed.
+// Returns { workflows: [...], counts: {...} }.
+export const getWorkflows = (limit = 100) =>
+  call('GET', `/user/workflows?limit=${limit}`)
+
 // ── token monitor (laminar) ──────────────────────────────────────────────────
 export const getUsage = () => call('GET', '/laminar/usage')
 export const getUsageOne = (id) => call('GET', `/laminar/usage/${encodeURIComponent(id)}`)
@@ -77,6 +83,18 @@ export const setBlockThreshold = (threshold) =>
 export const getPolicy = () => call('GET', '/policy')
 export const putPolicy = (policy, updatedBy = 'awcp-ui', note = '') =>
   call('PUT', '/policy', { policy, updated_by: updatedBy, note })
+
+// ── write approvals (the "Approvals" panel) ───────────────────────────────────
+// When an agent pauses on a WRITE action it registers the request with the radar.
+// getApprovals lists them (filter by status: pending | approved | denied);
+// decideApproval records the verdict AND releases the paused agent.
+export const getApprovals = (status = 'pending', limit = 100) =>
+  call('GET', `/approvals?status=${encodeURIComponent(status)}&limit=${limit}`)
+export const decideApproval = (id, decision, decidedBy = 'awcp-ui') =>
+  call('POST', `/approvals/${encodeURIComponent(id)}/decide`, {
+    decision,
+    decided_by: decidedBy,
+  })
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>

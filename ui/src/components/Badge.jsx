@@ -13,7 +13,7 @@ export function toneFor(value) {
   const v = String(value || '').toLowerCase()
   if (/(^|[^a-z])(active|done|ok|complete|completed|allow|allowed|admit|admitted|resumed?)([^a-z]|$)/.test(v))
     return 'green'
-  if (/(quarantin|exhaust|suspend|deny|denied|block|error|fail|stop|hard.?stop|uncontrolled|bypass)/.test(v))
+  if (/(quarantin|exhaust|suspend|deny|denied|block|error|fail|stop|hard.?stop|uncontrolled|bypass|terminat|cancel|timed.?out|aborted)/.test(v))
     return 'red'
   if (/(warn|pending|recommendation|throttl|degrad|trace.?boost|safe.?profile)/.test(v))
     return 'amber'

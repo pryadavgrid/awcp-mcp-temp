@@ -532,6 +532,159 @@ async def approve(agent: str, task_id: str, body: ApproveBody) -> dict:
         return r.json()
 
 
+# The reason stamped on the terminated workflow — shown in the Temporal UI so an
+# operator can see WHY the run ended. Env-overridable, nothing hardcoded into logic.
+STOP_REASON = os.getenv("AWCP_STOP_REASON", "Stopped by the user")
+
+
+@router.post("/stop/{agent}/{task_id}")
+async def stop(agent: str, task_id: str, workflow_id: str | None = None) -> dict:
+    """Stop a running task mid-execution.
+
+    Authoritative action: TERMINATE the task's Temporal workflow with a reason, so
+    Temporal stops the execution immediately and the workflow shows as Terminated
+    with "Stopped by the user" (a plain cancel only *requests* graceful shutdown,
+    so a workflow blocked on signals can keep showing Running — terminate is the
+    hard stop the user expects). Best-effort: also tell the agent to stop the task
+    cooperatively (release any approval wait, skip finalize writes).
+
+    Nothing is hardcoded: the workflow id is the same dynamic
+    `task-{agent_id}-{task_id}` the run was started with — passed by the caller,
+    or re-derived from the agent's live `agent_id` when omitted.
+    """
+    agent_d = fs.find(agent)
+    if not agent_d:
+        raise HTTPException(status_code=404, detail=f"unknown agent '{agent}'")
+    state = await asyncio.to_thread(fs.running_state, agent_d)
+    port = state["port"]
+
+    # Resolve the workflow id dynamically when the caller didn't supply it.
+    wf_id = workflow_id
+    if not wf_id and port:
+        info = await _fetch_info(port)
+        aid = info.get("agent_id")
+        wf_id = f"task-{aid}-{task_id}" if aid else None
+
+    # 1) Hard-stop the Temporal workflow so it stops immediately and shows the
+    #    reason. Terminate is forceful (server-side) and not subject to the
+    #    workflow cooperating; fall back to cancel only if terminate is rejected.
+    temporal_stopped = False
+    temporal_error = None
+    if wf_id:
+        try:
+            client = await _temporal_client()
+            handle = client.get_workflow_handle(wf_id)
+            try:
+                await handle.terminate(reason=STOP_REASON)
+            except Exception:
+                await handle.cancel()
+            temporal_stopped = True
+        except Exception as exc:  # noqa: BLE001 — report, don't crash the stop
+            temporal_error = str(exc)[:200]
+
+    # 2) Best-effort cooperative stop on the agent itself.
+    agent_stopped = False
+    if port:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                r = await c.post(f"{fs.base_url(port)}/tasks/{task_id}/cancel")
+                agent_stopped = r.status_code == 200
+        except Exception:
+            agent_stopped = False
+
+    return {
+        "agent": agent,
+        "task_id": task_id,
+        "workflow_id": wf_id,
+        "temporal_url": _temporal_url(wf_id),
+        "reason": STOP_REASON,
+        "temporal_stopped": temporal_stopped,
+        "agent_stopped": agent_stopped,
+        "error": temporal_error,
+    }
+
+
+# Temporal status name (visibility query value) per UI bucket. Counting is done
+# straight from Temporal's visibility store so the numbers are authoritative, not
+# reconstructed from the token ledger.
+_WF_QUERY_STATUS = {
+    "running": "Running",
+    "completed": "Completed",
+    "terminated": "Terminated",
+    "canceled": "Canceled",
+    "failed": "Failed",
+    "timed_out": "TimedOut",
+}
+
+
+async def _workflow_counts(client: Client) -> dict:
+    """Per-status workflow counts straight from Temporal visibility (one cheap
+    COUNT per status). Returns {} if the visibility store can't COUNT, so the
+    caller falls back to counting the scanned page."""
+    out: dict = {}
+    try:
+        for key, name in _WF_QUERY_STATUS.items():
+            res = await client.count_workflows(f'ExecutionStatus = "{name}"')
+            out[key] = int(getattr(res, "count", 0) or 0)
+        out["total"] = sum(out.values())
+        return out
+    except Exception:  # noqa: BLE001 — visibility may not support COUNT; caller falls back
+        return {}
+
+
+@router.get("/workflows")
+async def workflows(limit: int = 100) -> dict:
+    """Recent Temporal workflow executions with their REAL status, read straight
+    from Temporal — so the UI shows Terminated/Canceled/Completed/Running exactly
+    as Temporal has them (never guessed from timestamps), plus authoritative
+    per-status counts. Fully dynamic; nothing hardcoded or reconstructed."""
+    try:
+        client = await _temporal_client()
+    except Exception as exc:  # noqa: BLE001
+        return {"workflows": [], "counts": {}, "error": f"temporal unavailable: {type(exc).__name__}"}
+
+    counts = await _workflow_counts(client)
+
+    # Most-recent first when the visibility store supports ORDER BY; otherwise the
+    # default order, sorted client-side as a fallback.
+    cap = max(1, min(limit, 500))
+    try:
+        it = client.list_workflows("ORDER BY StartTime DESC", limit=cap)
+        items_raw = [wf async for wf in it]
+    except Exception:  # noqa: BLE001 — ORDER BY unsupported on this store
+        try:
+            it = client.list_workflows(limit=cap)
+            items_raw = [wf async for wf in it]
+        except Exception as exc:  # noqa: BLE001
+            return {"workflows": [], "counts": counts, "error": str(exc)[:200]}
+
+    fallback = {"running": 0, "completed": 0, "terminated": 0, "canceled": 0,
+                "failed": 0, "timed_out": 0, "total": 0}
+    items = []
+    for wf in items_raw:
+        status = (getattr(getattr(wf, "status", None), "name", "") or "unknown").lower()
+        if not counts:
+            fallback[status] = fallback.get(status, 0) + 1
+            fallback["total"] += 1
+        start = getattr(wf, "start_time", None)
+        close = getattr(wf, "close_time", None)
+        start_ts = start.timestamp() if start else None
+        close_ts = close.timestamp() if close else None
+        wid = getattr(wf, "id", "") or ""
+        items.append({
+            "workflow_id": wid,
+            "type": getattr(wf, "workflow_type", "") or "",
+            "status": status,
+            "start_ts": start_ts,
+            "close_ts": close_ts,
+            "duration": (close_ts - start_ts) if (start_ts and close_ts) else None,
+            "temporal_url": _temporal_url(wid),
+        })
+
+    items.sort(key=lambda w: w.get("start_ts") or 0, reverse=True)
+    return {"workflows": items[:cap], "counts": counts or fallback}
+
+
 @router.post("/ask")
 async def ask(req: AskRequest) -> dict:
     """Run the chosen agent on the prompt, BLOCK until it settles, return result.

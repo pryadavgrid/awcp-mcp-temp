@@ -509,6 +509,12 @@ def list_runtime_tools() -> str:
                 # writes (and need operator approval) before it calls execute_tool.
                 "risk": get_tool_risk(name),
                 "scope": get_tool_scope(name),
+                # Explicit, authoritative write/read classification (the SAME rule
+                # the gate uses: is_write_risk over the tool's risk tier). Agents
+                # filter on this so a read-only tool (web_search, search_arxiv …)
+                # is never declared as a write_scope, and the approval UI only
+                # holds genuine writes. Reads run ungated.
+                "write": is_write_risk(get_tool_risk(name)),
             }
         )
 

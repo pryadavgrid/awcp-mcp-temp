@@ -1,6 +1,7 @@
 const ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'radar', label: 'Radar', icon: '◎' },
+  { id: 'approvals', label: 'Approvals', icon: '✋' },
   { id: 'workflow', label: 'Workflow', icon: '⤳' },
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
   { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
