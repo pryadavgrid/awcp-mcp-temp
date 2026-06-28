@@ -2492,6 +2492,28 @@ def events_audit(agent_id: str = "", since: float = 0.0,
     }
 
 
+# OPA (Rego) reachability for the health/UI indicator. Cached so the 4s health
+# poll doesn't ping OPA every time. "connected" means AWCP_OPA_URL is set AND the
+# OPA server answers /health; otherwise the gate is on the policy.py fallback.
+_OPA_PING = {"ts": 0.0, "connected": False}
+
+
+def _opa_connected() -> bool:
+    if not opa.enabled():
+        return False
+    now = time.time()
+    if now - _OPA_PING["ts"] < 10:
+        return _OPA_PING["connected"]
+    ok = False
+    try:
+        r = httpx.get(f"{opa.OPA_URL.rstrip('/')}/health", timeout=1.0)
+        ok = r.status_code == 200
+    except Exception:  # noqa: BLE001 — unreachable ⇒ not connected
+        ok = False
+    _OPA_PING.update({"ts": now, "connected": ok})
+    return ok
+
+
 @router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
@@ -2510,6 +2532,10 @@ def healthz() -> dict:
         "temporal_connected": STATE["temporal"],
         "otel_enabled": _OTEL_ENABLED,
         "laminar": _laminar.status_summary() if _LAMINAR else {"enabled": False},
+        # OPA Rego engine: enabled = AWCP_OPA_URL set; connected = it answers.
+        # When not connected the gate runs on the policy.py fallback.
+        "opa": {"enabled": opa.enabled(), "connected": _opa_connected(),
+                "url": opa.OPA_URL or None},
     }
 
 

@@ -12,6 +12,7 @@ export function Sidebar({ active, onSelect, health }) {
   const temporal = health?.temporal_connected
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
+  const opa = health?.opa?.connected
 
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
@@ -49,6 +50,7 @@ export function Sidebar({ active, onSelect, health }) {
         <ConnRow label="Temporal" ok={temporal} />
         <ConnRow label="OTel" ok={otel} />
         <ConnRow label="Laminar" ok={laminar} />
+        <ConnRow label="OPA" ok={opa} />
       </div>
     </aside>
   )
