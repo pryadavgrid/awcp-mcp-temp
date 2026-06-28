@@ -209,12 +209,35 @@ except Exception:
 PY
 }
 
+# Resolve an `opa` binary: a system install, else a cached ./.bin/opa, else
+# download the official static binary for this platform. Sets OPA_BIN; returns
+# non-zero (so the caller falls back to policy.py) if none can be obtained.
+OPA_BIN=""
+ensure_opa(){
+  if command -v opa >/dev/null 2>&1; then OPA_BIN="$(command -v opa)"; return 0; fi
+  local cached="$ROOT/.bin/opa"
+  if [ -x "$cached" ]; then OPA_BIN="$cached"; return 0; fi
+  local os arch url; os="$(uname -s)"; arch="$(uname -m)"
+  case "$os/$arch" in
+    Darwin/arm64)               url="https://openpolicyagent.org/downloads/latest/opa_darwin_arm64_static" ;;
+    Darwin/x86_64)              url="https://openpolicyagent.org/downloads/latest/opa_darwin_amd64" ;;
+    Linux/x86_64)               url="https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static" ;;
+    Linux/aarch64|Linux/arm64)  url="https://openpolicyagent.org/downloads/latest/opa_linux_arm64_static" ;;
+    *) warn "No OPA binary mapping for $os/$arch — install 'opa' manually."; return 1 ;;
+  esac
+  mkdir -p "$ROOT/.bin"
+  say "Downloading OPA ($os/$arch) → .bin/opa (first run only)…"
+  if curl -fsSL "$url" -o "$cached" && chmod +x "$cached"; then OPA_BIN="$cached"; return 0; fi
+  warn "OPA download failed — gate will use the Python fallback."; return 1
+}
+
 cleanup(){
   echo
   say "Shutting down…"
-  [ -n "$UI_PID" ]       && kill "$UI_PID"       2>/dev/null || true
-  [ -n "$OPA_PID" ]      && kill "$OPA_PID"      2>/dev/null || true
-  [ -n "$MCP_PID" ]      && kill "$MCP_PID"      2>/dev/null || true
+  [ -n "$UI_PID" ]         && kill "$UI_PID"         2>/dev/null || true
+  [ -n "$OPA_PID" ]        && kill "$OPA_PID"        2>/dev/null || true
+  [ -n "$OPA_SERVER_PID" ] && kill "$OPA_SERVER_PID" 2>/dev/null || true
+  [ -n "$MCP_PID" ]        && kill "$MCP_PID"        2>/dev/null || true
   [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
   [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
   say "Stopped the gateway (+ Temporal/MCP/Ollama/UI if this script started them)."
@@ -350,6 +373,29 @@ else
   MCP_PID=$!
 fi
 
+# ── 5a. OPA policy engine (Rego PDP, :OPA_SERVER_PORT) ────────────────────────
+# Serves policies/awcp/gate.rego + tools.rego so the write-action gate and the
+# tool-tier gate evaluate through OPA (engine="opa") instead of the Python
+# fallback. AWCP_OPA_URL (default :8181, also set in .env) points the gate at it.
+# If the opa binary can't be found/downloaded the gate transparently falls back to
+# policy.py — governance never breaks, it just runs in-process.
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
+OPA_SERVER_PORT="${OPA_SERVER_PORT:-$(printf '%s' "$AWCP_OPA_URL" | sed -E 's#.*:([0-9]+).*#\1#')}"
+[ -z "$OPA_SERVER_PORT" ] && OPA_SERVER_PORT=8181
+if [ "${SKIP_OPA_SERVER:-0}" = "1" ]; then
+  warn "SKIP_OPA_SERVER=1 — not starting the OPA Rego server (gate uses policy.py)."
+elif [ -n "$(port_open "$OPA_SERVER_PORT")" ]; then
+  say "OPA policy engine already on :${OPA_SERVER_PORT} — reusing it."
+elif ensure_opa; then
+  say "Starting OPA policy engine (Rego PDP) on :${OPA_SERVER_PORT} — gate.rego + tools.rego…"
+  nohup "$OPA_BIN" run --server --addr ":${OPA_SERVER_PORT}" \
+    "$ROOT/policies/awcp/gate.rego" "$ROOT/policies/awcp/tools.rego" \
+    > "$LOGDIR/opa-server.log" 2>&1 &
+  OPA_SERVER_PID=$!
+else
+  warn "OPA policy engine not started — gate falls back to policy.py (engine=policy)."
+fi
+
 # ── 5b. OPA agent (:OPA_AGENT_PORT) — hidden SLM tool-call PDP, background ─────
 # Lives INSIDE this repo (src/awcp/opa_agent) and runs on the repo's venv (which
 # already has fastapi/uvicorn/httpx). Launched here so the radar/gateway can consult
@@ -436,10 +482,10 @@ echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
-if [ -n "${AWCP_OPA_URL:-}" ]; then
-echo "     OPA policy engine      : ${AWCP_OPA_URL}   (gate PDP — ${AWCP_OPA_SHADOW:-false} shadow)"
+if [ -n "${OPA_SERVER_PID:-}" ] || [ -n "$(port_open "${OPA_SERVER_PORT:-8181}")" ]; then
+echo "     OPA policy engine      : ${AWCP_OPA_URL}   (Rego PDP — gate.rego/tools.rego, engine=opa; ${AWCP_OPA_SHADOW:-false} shadow)"
 else
-echo "     OPA policy engine      : http://localhost:8181   (running; gate uses policy.py until AWCP_OPA_URL is set — see README)"
+echo "     OPA policy engine      : not running   (gate uses policy.py fallback — see $LOGDIR/opa-server.log)"
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
 if [ "${SKIP_OPA:-0}" != "1" ]; then
