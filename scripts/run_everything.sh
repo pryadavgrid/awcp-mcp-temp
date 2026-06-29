@@ -422,9 +422,10 @@ PY
     OPENSANDBOX_INSECURE_SERVER=YES nohup uvx "opensandbox-server@${SANDBOX_VERSION}" \
       --config "$SANDBOX_CONFIG" > "$LOGDIR/opensandbox.log" 2>&1 &
     SANDBOX_PID=$!
-    for i in $(seq 1 60); do [ -n "$(port_open 8080)" ] && break; sleep 1; done
+    # Up to ~120s: the very first run also has uvx download the package.
+    for i in $(seq 1 120); do [ -n "$(port_open 8080)" ] && break; sleep 1; done
     [ -n "$(port_open 8080)" ] && say "OpenSandbox runtime is up." \
-      || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running?)."
+      || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running? is uvx installed?)."
   fi
 fi
 
