@@ -1040,6 +1040,40 @@ router = APIRouter()
 from awcp.radar.llm_gateway import gateway_router  # noqa: E402
 router.include_router(gateway_router)
 
+# Context graph (the governed-step trail): /agents/{id}/checkpoint + /context-graph/*.
+# Additive and fail-open — it writes the resume_pointer/context_hash lineage into
+# evidence.ledger that nothing populated before. Mounted here so it is served on
+# every surface the radar router is (the port the MCP server posts checkpoints to).
+from awcp.context_graph.api import router as context_graph_router  # noqa: E402
+router.include_router(context_graph_router)
+
+
+def _cg_record_llm(agent_id: str, task_id: str, event: dict) -> None:
+    """Record one ``llm_called`` execution event as a context-graph node
+    (step ``llm:<model>``) carrying its token usage, so the audit trail shows WHICH
+    model was called — not only which tools ran. Every agent emits these events, so
+    this covers them all uniformly. Shares workflow_id=task_id with the tool
+    checkpoints, so the LLM call and the tool steps chain into one timeline. Skips
+    mislabeled token rollups (``model`` like ``tool:*``). Best-effort; never raises."""
+    model = str(event.get("model") or "").strip()
+    if not model or model.startswith("tool:"):
+        return
+    extra = event.get("extra") or {}
+    tin = int(extra.get("input_tokens", 0) or 0)
+    tout = int(extra.get("output_tokens", 0) or 0)
+    try:
+        from awcp.context_graph import store as _cg_store
+        _cg_store.record_checkpoint(
+            agent_id=agent_id, step=f"llm:{model}", task_id=task_id,
+            workflow_id=task_id, actor=agent_id,
+            resume_pointer=f"{task_id or 'task'}:after:llm:{model}",
+            context={"model": model},
+            payload={"kind": "llm", "model": model, "outcome": "succeeded",
+                     "decision": "allow", "input_tokens": tin, "output_tokens": tout},
+        )
+    except Exception as exc:  # noqa: BLE001 — recording must never break an event
+        log.debug("context_graph.llm_checkpoint failed agent=%s err=%r", agent_id, exc)
+
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
 # The laminar package never imports radar internals; the radar injects the
@@ -2252,6 +2286,10 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         # observed in execution (the magazine's third onboarding hook).
         if _event_has_flags(event):
             _observe_flags(agent_id)
+        # Context graph: record the LLM call as a step so the trail shows which model
+        # was called (+ its tokens), not only which tools ran. All agents emit these.
+        if event.get("type") == "llm_called":
+            _cg_record_llm(agent_id, task_id, event)
 
     # Agent-hooks: surface this step. STEP fires for every event; the specific
     # kind (LLM_CALL / TOOL_CALL / WEB_SEARCH / SYNTHESIZE) fires too so hooks can
@@ -2514,6 +2552,40 @@ def _opa_connected() -> bool:
     return ok
 
 
+# The sandbox singleton lives in the MCP server's own process (port 8002), not
+# here, so reporting its status means asking that process directly. Derived
+# from the same AWCP_MCP_URL agents already use to reach the SSE endpoint.
+_MCP_BASE_URL = os.getenv("AWCP_MCP_URL", "http://localhost:8002/sse").removesuffix("/sse")
+_MCP_STATUS_URL = _MCP_BASE_URL + "/sandbox/status"
+_MCP_EVENTS_URL = _MCP_BASE_URL + "/sandbox/events"
+_MCP_STATUS_TIMEOUT = float(os.getenv("AWCP_MCP_STATUS_TIMEOUT", "2"))
+
+
+def _sandbox_status() -> dict:
+    """Fail-safe sandbox status: an unreachable MCP server is reported as
+    'unreachable', never raised — this must never break /healthz."""
+    try:
+        resp = httpx.get(_MCP_STATUS_URL, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "unreachable", "reason": f"HTTP {resp.status_code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unreachable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/sandbox/events")
+def sandbox_events(limit: int = 50) -> dict:
+    """Proxies the MCP server's sandbox event timeline (lifecycle + tool calls)
+    for the UI's Sandbox page. Fail-safe like /healthz's sandbox field."""
+    try:
+        resp = httpx.get(_MCP_EVENTS_URL, params={"limit": limit}, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return {"reachable": True, "events": resp.json()}
+        return {"reachable": False, "reason": f"HTTP {resp.status_code}", "events": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"reachable": False, "reason": f"{type(exc).__name__}: {exc}", "events": []}
+
+
 @router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
@@ -2536,6 +2608,7 @@ def healthz() -> dict:
         # When not connected the gate runs on the policy.py fallback.
         "opa": {"enabled": opa.enabled(), "connected": _opa_connected(),
                 "url": opa.OPA_URL or None},
+        "sandbox": _sandbox_status(),
     }
 
 

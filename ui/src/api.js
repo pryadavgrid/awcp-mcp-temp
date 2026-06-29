@@ -26,6 +26,9 @@ async function call(method, path, body) {
 
 // ── registry / radar ────────────────────────────────────────────────────────
 export const getHealth = () => call('GET', '/healthz')
+// Sandbox lifecycle + tool-call timeline, proxied from the MCP server's own
+// process. health.sandbox (from getHealth) already carries the live status.
+export const getSandboxEvents = (limit = 50) => call('GET', `/sandbox/events?limit=${limit}`)
 export const getAgents = () => call('GET', '/agents')
 // The bundle agents + their live tool catalogs (folder id, registry agent_id, tools).
 export const getUserAgents = () => call('GET', '/user/agents')
@@ -38,6 +41,25 @@ export const setAutonomy = (id, profile) =>
 // Returns { workflows: [...], counts: {...} }.
 export const getWorkflows = (limit = 100) =>
   call('GET', `/user/workflows?limit=${limit}`)
+
+// ── context graph (governed-step trail) ──────────────────────────────────────
+// Every governed step (tool call, route, generate) recorded as a tamper-chained
+// node in evidence.ledger. The global feed drives the Context Graph view; the
+// per-run / per-agent endpoints are available for drill-downs.
+export const getContextFeed = (limit = 200) => call('GET', `/context-graph?limit=${limit}`)
+export const getWorkflowGraph = (wf) =>
+  call('GET', `/context-graph/${encodeURIComponent(wf)}`)
+export const getAgentGraph = (id) =>
+  call('GET', `/agents/${encodeURIComponent(id)}/context-graph`)
+// Whole-ledger hash-chain verification (re-hash + linkage). {enabled:false} when
+// the durable ledger (Postgres) is off — nothing persisted to verify.
+export const getChainVerify = () => call('GET', '/context-graph/verify')
+
+// Neo4j graph projection (additive read-model). {enabled:false} when Neo4j is off.
+export const getNeo4jStatus = () => call('GET', '/context-graph/neo4j/status')
+export const getNeo4jGraph = (workflow) =>
+  call('GET', `/context-graph/neo4j/graph${workflow ? `?workflow=${encodeURIComponent(workflow)}` : ''}`)
+export const backfillNeo4j = () => call('POST', '/context-graph/neo4j/backfill')
 
 // ── token monitor (laminar) ──────────────────────────────────────────────────
 export const getUsage = () => call('GET', '/laminar/usage')

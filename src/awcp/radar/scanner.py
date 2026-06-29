@@ -2,15 +2,61 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import threading
 import time
 
 from awcp.radar.detectors import scan_all
+from awcp.radar.models import AgentEntry
 from awcp.radar.store import REGISTRY
 from awcp.radar.telemetry import get_radar_metrics, radar_span, log
 
 SCAN_INTERVAL = float(os.getenv("AGENT_RADAR_SCAN_INTERVAL", "30"))
+# Run the OS process enumeration in a SUBPROCESS with a hard timeout so a wedged
+# macOS process table (psutil.process_iter stuck in a syscall that never releases
+# the GIL) can be killed instead of freezing the gateway — keeping uvicorn able to
+# bind :8000 no matter what the OS is doing. Off-switch falls back to in-process.
+SCAN_SUBPROCESS = os.getenv("AGENT_RADAR_SCAN_SUBPROCESS", "true").lower() == "true"
+SCAN_TIMEOUT = float(os.getenv("AGENT_RADAR_SCAN_TIMEOUT", "20"))
+# .../src/awcp/radar/scanner.py -> .../src  (so the child can import awcp)
+_SRC_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def scan_all_safe() -> list[AgentEntry]:
+    """Enumerate running agent processes WITHOUT risk of freezing this process.
+
+    Delegates the psutil scan to ``python -m awcp.radar.detectors`` and waits on it
+    with a hard timeout. If the OS process table wedges, the child is killed and we
+    return [] (skip this cycle, try again next interval) — the gateway stays up and
+    serves the dashboard. Set AGENT_RADAR_SCAN_SUBPROCESS=false to scan in-process.
+    """
+    if not SCAN_SUBPROCESS:
+        return list(scan_all())
+    env = dict(os.environ)
+    env["PYTHONPATH"] = _SRC_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "awcp.radar.detectors"],
+            capture_output=True, text=True, timeout=SCAN_TIMEOUT, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("radar.scan.subprocess timed out after %.0fs — OS process table "
+                    "may be wedged; skipping cycle (gateway stays up)", SCAN_TIMEOUT)
+        return []
+    except Exception as exc:  # noqa: BLE001 — a scan hiccup must never crash the loop
+        log.warning("radar.scan.subprocess failed error=%r — skipping cycle", exc)
+        return []
+    out = (proc.stdout or "").strip()
+    if not out:
+        return []
+    try:
+        return [AgentEntry.model_validate(d) for d in json.loads(out)]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.scan.subprocess parse failed error=%r — skipping cycle", exc)
+        return []
 # Passive AgentCard discovery on scan-sourced entries (additive enrichment). Each
 # entry is attempted at most once (the `not entry.card` guard), with a short
 # timeout so it can't stall the scan cycle. Env-gated off-switch; SSRF-guarded, so
@@ -73,8 +119,9 @@ class Scanner:
             error = False
             try:
                 with radar_span("radar.scan.cycle", {"interval_s": self.interval}) as span:
-                    # Detect: enumerate all running agent processes
-                    detected = list(scan_all())
+                    # Detect: enumerate all running agent processes (in a subprocess
+                    # with a timeout, so a wedged OS scan can't freeze the gateway).
+                    detected = scan_all_safe()
                     found = len(detected)
                     span.set_attribute("agents.detected", found)
 
