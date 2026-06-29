@@ -13,6 +13,7 @@ default localhost:8080) to already be running, e.g.:
 import asyncio
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -160,29 +161,66 @@ async def _run_command_async(command: str) -> str:
     return f"STDOUT:\n{stdout}\nSTDERR:\n{stderr}"
 
 
+# Shown in place of a raw "file not found" / "no such file or directory" failure.
+# Inside the sandbox that error also covers the "path is outside the workspace"
+# case (the container can only see /workspace). Phrased in the first person and
+# LEADING with the access fact so the agent's LLM relays it in its final reply
+# (it was paraphrasing the old wording down to just "the file does not exist").
+_NOT_FOUND_MSG = (
+    "I do not have access to this file or folder (it is outside the sandbox "
+    "workspace, which is the only area I can access), or no such file or "
+    "directory exists."
+)
+
+
+def _is_not_found(text: str) -> bool:
+    low = text.lower()
+    return ("no such file or directory" in low
+            or "file_not_found" in low
+            or "file not found" in low
+            or "permission denied" in low)
+
+
+def _rewrite_not_found(text: str) -> str:
+    """Rewrite a not-found phrase in place, keeping any command/context prefix
+    (e.g. 'rm: /path: …'). Case-insensitive, single pass (re.sub does NOT re-scan
+    the replacement, so the phrase inside _NOT_FOUND_MSG can't re-trigger it).
+    Non-matching output is returned unchanged."""
+    return re.sub(
+        r"no such file or directory",
+        lambda _m: _NOT_FOUND_MSG,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def read_file_sync(path: str) -> str:
     if ".." in path or path.startswith("/"):
         record_event("read_file_blocked", detail=path)
-        return "Error: Invalid path."
+        return f"Error: {_NOT_FOUND_MSG}"
     try:
         content = run_sandbox_sync(_read_file_async(path))
         record_event("read_file", detail=path)
         return content
     except Exception as e:  # noqa: BLE001
         record_event("read_file_error", detail=f"{path}: {e}"[:200])
+        if _is_not_found(str(e)):
+            return f"Error reading file: {_NOT_FOUND_MSG}"
         return f"Error reading file: {str(e)}"
 
 
 def write_file_sync(path: str, content: str) -> str:
     if ".." in path or path.startswith("/"):
         record_event("write_file_blocked", detail=path)
-        return "Error: Invalid path."
+        return f"Error: {_NOT_FOUND_MSG}"
     try:
         run_sandbox_sync(_write_file_async(path, content))
         record_event("write_file", detail=f"{path} ({len(content)} bytes)")
         return f"Successfully wrote to {path}"
     except Exception as e:  # noqa: BLE001
         record_event("write_file_error", detail=f"{path}: {e}"[:200])
+        if _is_not_found(str(e)):
+            return f"Error writing file: {_NOT_FOUND_MSG}"
         return f"Error writing file: {str(e)}"
 
 
@@ -190,10 +228,10 @@ def run_command_sync(command: str) -> str:
     try:
         out = run_sandbox_sync(_run_command_async(command))
         record_event("run_command", detail=command[:200])
-        return out
+        return _rewrite_not_found(out)
     except Exception as e:  # noqa: BLE001
         record_event("run_command_error", detail=f"{command}: {e}"[:200])
-        return f"Error executing command: {str(e)}"
+        return _rewrite_not_found(f"Error executing command: {str(e)}")
 
 
 def sandbox_status() -> dict:

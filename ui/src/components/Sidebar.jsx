@@ -1,3 +1,5 @@
+import logoUrl from '../assets/awcp-logo.png'
+
 const ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: '▦' },
   { id: 'radar', label: 'Radar', icon: '◎' },
@@ -20,9 +22,7 @@ export function Sidebar({ active, onSelect, health, approvalsCount = 0 }) {
   return (
     <aside className="flex w-60 shrink-0 flex-col bg-brand-800 text-brand-100">
       <div className="flex items-center gap-2.5 px-5 py-5">
-        <span className="grid h-9 w-9 place-items-center rounded-lg bg-brand-500 text-lg text-white shadow-sm">
-          ◆
-        </span>
+        <img src={logoUrl} alt="AWCP" className="h-9 w-9 shrink-0" />
         <div>
           <div className="text-sm font-bold leading-tight text-white">AWCP</div>
           <div className="text-[11px] leading-tight text-brand-200">Control Plane</div>

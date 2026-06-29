@@ -69,6 +69,10 @@ if [ -f "$ROOT/.env" ]; then
     case "$line" in *=*) ;; *) continue ;; esac     # skip lines without '='
     key="$(printf '%s' "$key" | tr -d '[:space:]')"
     case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    # Trim whitespace around the value (so `KEY = "v"` with spaces around = parses),
+    # THEN strip one layer of surrounding matching quotes. Without the trim a
+    # leading space hides the opening quote, leaving it stuck on the value.
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
     [ -z "${!key:-}" ] && export "$key=$val"
   done < "$ROOT/.env"
@@ -362,69 +366,90 @@ else
   warn "Ollama not found — install it and 'ollama pull llama3.1:8b gemma2:2b', else agents fail (https://ollama.com)."
 fi
 
-# ── 4b. OpenSandbox runtime (:8080) — backend for the MCP workspace tools ──────
+# ── 4b. OpenSandbox runtime — backend for the MCP workspace tools ──────────────
 # The MCP server's read_file/write_file/run_command tools run inside an
 # OpenSandbox-managed container; this is the control-plane the SDK talks to. We
 # start it here so the WHOLE stack comes up from one script (no separate terminal).
 #
-# Fully portable — nothing is hardcoded to one machine:
-#   • the bind-mounted workspace dir is AWCP_WORKSPACE_DIR (set it in .env to move
-#     it; otherwise it defaults to <repo>/workspace),
-#   • the dir is created if missing,
-#   • the config (~/.sandbox.toml) is generated on first run, and
-#   • the runtime's allowed_host_paths allowlist is updated to include the
-#     workspace automatically (an EMPTY list means deny-all, despite the comment
-#     the generator writes).
-# Set SKIP_SANDBOX=1 to leave it off; OPENSANDBOX_VERSION / OPENSANDBOX_CONFIG
-# override the pinned version and the config path.
+# Fully portable & self-healing — on a new machine you set ONE thing in .env
+# (AWCP_WORKSPACE_DIR) and everything else is automatic:
+#   • the workspace dir is created if missing,
+#   • the config (~/.sandbox.toml) is generated if missing OR unparseable
+#     (a corrupted file is backed up and regenerated — no manual init-config),
+#   • the [server] port and [storage] allowed_host_paths are (re)written every
+#     run, so they can never drift or stay corrupted, and
+#   • the MCP server is pointed at the same port via OPEN_SANDBOX_DOMAIN.
+# Port is configurable (AWCP_SANDBOX_PORT, default 8090 — :8080 is often taken by
+# Adminer/Docker). Set SKIP_SANDBOX=1 to leave it off; OPENSANDBOX_VERSION /
+# OPENSANDBOX_CONFIG override the pinned version and the config path.
 SANDBOX_VERSION="${OPENSANDBOX_VERSION:-0.1.13}"
 SANDBOX_CONFIG="${OPENSANDBOX_CONFIG:-$HOME/.sandbox.toml}"
-# Read from .env (loaded above) or auto-detect; exported so the MCP server (step 5)
-# bind-mounts the SAME dir the allowlist authorizes.
-export AWCP_WORKSPACE_DIR="${AWCP_WORKSPACE_DIR:-$ROOT/workspace}"
+SANDBOX_PORT="${AWCP_SANDBOX_PORT:-8090}"
+# Sanitize then export the workspace dir (strip any stray surrounding space/quotes
+# a .env value might carry) so the MCP server (step 5) bind-mounts the SAME dir the
+# allowlist authorizes; point the MCP SDK at the SAME port the runtime listens on.
+AWCP_WORKSPACE_DIR="${AWCP_WORKSPACE_DIR:-$ROOT/workspace}"
+AWCP_WORKSPACE_DIR="$(printf '%s' "$AWCP_WORKSPACE_DIR" | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
+export AWCP_WORKSPACE_DIR
+export OPEN_SANDBOX_DOMAIN="127.0.0.1:${SANDBOX_PORT}"
 if [ "${SKIP_SANDBOX:-0}" = "1" ]; then
   warn "SKIP_SANDBOX=1 — not starting the OpenSandbox runtime (sandbox tools will report unreachable)."
 elif ! command -v uvx >/dev/null 2>&1; then
   warn "uvx (uv) not found — can't start the OpenSandbox runtime (install: brew install uv). Sandbox tools will be unreachable."
 else
   mkdir -p "$AWCP_WORKSPACE_DIR"
+  # If the config exists but is no longer valid TOML, back it up and regenerate.
+  if [ -f "$SANDBOX_CONFIG" ] && ! python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$SANDBOX_CONFIG" 2>/dev/null; then
+    warn "$SANDBOX_CONFIG is invalid TOML — backing it up and regenerating."
+    mv "$SANDBOX_CONFIG" "${SANDBOX_CONFIG}.bak.$(date +%s)" 2>/dev/null || true
+  fi
   if [ ! -f "$SANDBOX_CONFIG" ]; then
-    say "Generating OpenSandbox config → $SANDBOX_CONFIG (first run only)…"
+    say "Generating OpenSandbox config → $SANDBOX_CONFIG…"
     uvx "opensandbox-server@${SANDBOX_VERSION}" init-config "$SANDBOX_CONFIG" --example docker \
       || warn "init-config failed — the sandbox may not start (see above)."
   fi
-  # Idempotently ensure the workspace dir is on allowed_host_paths (merge, don't
-  # clobber any paths already there). Portable: the path comes from this repo.
+  # Deterministically set the port + workspace allowlist (OVERWRITE — this both
+  # configures and self-heals any corrupted line; the path comes from .env/repo).
   if [ -f "$SANDBOX_CONFIG" ]; then
-    AWCP_WORKSPACE_DIR="$AWCP_WORKSPACE_DIR" SANDBOX_CONFIG="$SANDBOX_CONFIG" python3 - <<'PY' || warn "couldn't update allowed_host_paths automatically — check $SANDBOX_CONFIG."
+    AWCP_WORKSPACE_DIR="$AWCP_WORKSPACE_DIR" SANDBOX_CONFIG="$SANDBOX_CONFIG" SANDBOX_PORT="$SANDBOX_PORT" python3 - <<'PY' || warn "couldn't update $SANDBOX_CONFIG — check it by hand."
 import os, re
-cfg = os.environ["SANDBOX_CONFIG"]; ws = os.environ["AWCP_WORKSPACE_DIR"]
+cfg  = os.environ["SANDBOX_CONFIG"]
+ws   = os.environ["AWCP_WORKSPACE_DIR"].strip().strip('"').strip("'").strip().replace('"', '')
+port = os.environ["SANDBOX_PORT"]
 text = open(cfg).read()
-m = re.search(r'(?m)^[ \t]*allowed_host_paths[ \t]*=[ \t]*\[(.*?)\]', text)
-if m:
-    existing = re.findall(r'"([^"]*)"', m.group(1))
-    if ws in existing:
-        print("  allowed_host_paths already includes the workspace — ok")
-    else:
-        merged = existing + [ws]
-        line = 'allowed_host_paths = [' + ', '.join('"%s"' % p for p in merged) + ']'
-        open(cfg, "w").write(text[:m.start()] + line + text[m.end():])
-        print("  added workspace to allowed_host_paths")
+
+# allowed_host_paths -> exactly our workspace (overwrite the whole line; repairs
+# any earlier corruption). Quoting keeps it valid TOML.
+allow = 'allowed_host_paths = ["%s"]' % ws
+if re.search(r'(?m)^[ \t]*allowed_host_paths[ \t]*=.*$', text):
+    text = re.sub(r'(?m)^[ \t]*allowed_host_paths[ \t]*=.*$', allow, text, count=1)
+elif re.search(r'(?m)^\[storage\][ \t]*$', text):
+    text = re.sub(r'(?m)^\[storage\][ \t]*$', '[storage]\n' + allow, text, count=1)
 else:
-    open(cfg, "a").write('\n[storage]\nallowed_host_paths = ["%s"]\n' % ws)
-    print("  added [storage] allowed_host_paths")
+    text = text.rstrip() + '\n\n[storage]\n' + allow + '\n'
+
+# [server] port -> our port (the first `port =` line is [server]'s).
+if re.search(r'(?m)^[ \t]*port[ \t]*=.*$', text):
+    text = re.sub(r'(?m)^[ \t]*port[ \t]*=.*$', 'port = %s' % port, text, count=1)
+elif re.search(r'(?m)^\[server\][ \t]*$', text):
+    text = re.sub(r'(?m)^\[server\][ \t]*$', '[server]\nhost = "127.0.0.1"\nport = %s' % port, text, count=1)
+else:
+    text = '[server]\nhost = "127.0.0.1"\nport = %s\n\n' % port + text
+
+open(cfg, "w").write(text)
+print('  config set: port=%s, allowed_host_paths=["%s"]' % (port, ws))
 PY
   fi
-  if [ -n "$(port_open 8080)" ]; then
-    say "OpenSandbox runtime already on :8080 — reusing it."
+  if [ -n "$(port_open "$SANDBOX_PORT")" ]; then
+    say "OpenSandbox runtime already on :${SANDBOX_PORT} — reusing it."
   else
-    say "Starting OpenSandbox runtime on :8080 (workspace: $AWCP_WORKSPACE_DIR)…"
+    say "Starting OpenSandbox runtime on :${SANDBOX_PORT} (workspace: $AWCP_WORKSPACE_DIR)…"
     OPENSANDBOX_INSECURE_SERVER=YES nohup uvx "opensandbox-server@${SANDBOX_VERSION}" \
       --config "$SANDBOX_CONFIG" > "$LOGDIR/opensandbox.log" 2>&1 &
     SANDBOX_PID=$!
     # Up to ~120s: the very first run also has uvx download the package.
-    for i in $(seq 1 120); do [ -n "$(port_open 8080)" ] && break; sleep 1; done
-    [ -n "$(port_open 8080)" ] && say "OpenSandbox runtime is up." \
+    for i in $(seq 1 120); do [ -n "$(port_open "$SANDBOX_PORT")" ] && break; sleep 1; done
+    [ -n "$(port_open "$SANDBOX_PORT")" ] && say "OpenSandbox runtime is up." \
       || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running? is uvx installed?)."
   fi
 fi
@@ -557,7 +582,7 @@ echo "     OPA policy engine      : not running   (gate uses policy.py fallback 
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
 if [ "${SKIP_SANDBOX:-0}" != "1" ]; then
-echo "     OpenSandbox runtime    : http://localhost:8080   (sandbox backend; workspace: $AWCP_WORKSPACE_DIR)"
+echo "     OpenSandbox runtime    : http://localhost:${SANDBOX_PORT}   (sandbox backend; workspace: $AWCP_WORKSPACE_DIR)"
 fi
 if [ "${SKIP_OPA:-0}" != "1" ]; then
 echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden SLM PDP, model ${OPA_SLM_MODEL}; tier bars on Radar)"
