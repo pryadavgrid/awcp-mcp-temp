@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard.jsx'
 import Radar from './pages/Radar.jsx'
 import Approvals from './pages/Approvals.jsx'
 import Workflows from './pages/Workflows.jsx'
+import ContextGraph from './pages/ContextGraph.jsx'
 import TokenMonitor from './pages/TokenMonitor.jsx'
 import Hooks from './pages/Hooks.jsx'
 import Policy from './pages/Policy.jsx'
@@ -17,6 +18,7 @@ const TITLES = {
   radar: 'Radar',
   approvals: 'Approvals',
   workflow: 'Workflow',
+  context: 'Context Graph',
   tokens: 'Token Monitor',
   hooks: 'Agent Hooks',
   policy: 'Operator Policy',
@@ -142,6 +144,7 @@ export default function App() {
           {active === 'radar' && <Radar />}
           {active === 'approvals' && <Approvals />}
           {active === 'workflow' && <Workflows />}
+          {active === 'context' && <ContextGraph />}
           {active === 'tokens' && <TokenMonitor />}
           {active === 'hooks' && <Hooks />}
           {active === 'policy' && <Policy />}

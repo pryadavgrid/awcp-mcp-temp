@@ -45,6 +45,12 @@ psutil>=5.9.0
 # Fail-open: the radar runs without these if no DB is reachable.
 SQLAlchemy>=2.0.0
 psycopg[binary]>=3.1.0   # Postgres driver (postgresql+psycopg://)
+neo4j>=5.0.0             # context-graph projection (bolt://); fail-open if absent
+# Letta long-term memory for the context-graph MANAGER is OPTIONAL and reached over
+# its REST API via httpx (already a dep) — no package import is required. Run a
+# Letta server and set AWCP_LETTA_AGENT_ID to enable; otherwise recall is a no-op.
+# tiktoken makes the manager's context-window token budgeting exact (else chars/4):
+tiktoken>=0.5.0          # context-graph token budgeting; fail-open heuristic if absent
 
 # --- OpenTelemetry (observability) ---
 # Pinned for Python 3.14 compatibility (protobuf C-ext is broken on 3.14 below these)

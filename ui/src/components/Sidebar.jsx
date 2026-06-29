@@ -3,6 +3,7 @@ const ITEMS = [
   { id: 'radar', label: 'Radar', icon: '◎' },
   { id: 'approvals', label: 'Approvals', icon: '✋' },
   { id: 'workflow', label: 'Workflow', icon: '⤳' },
+  { id: 'context', label: 'Context Graph', icon: '◈' },
   { id: 'tokens', label: 'Token Monitor', icon: '◔' },
   { id: 'hooks', label: 'Agent Hooks', icon: '⚓' },
   { id: 'policy', label: 'Operator Policy', icon: '⚖' },
