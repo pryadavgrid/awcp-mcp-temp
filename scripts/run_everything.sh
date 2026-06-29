@@ -404,7 +404,7 @@ else
     mv "$SANDBOX_CONFIG" "${SANDBOX_CONFIG}.bak.$(date +%s)" 2>/dev/null || true
   fi
   if [ ! -f "$SANDBOX_CONFIG" ]; then
-    say "Generating OpenSandbox config → $SANDBOX_CONFIG…"
+    say "Generating OpenSandbox config → $SANDBOX_CONFIG"
     uvx "opensandbox-server@${SANDBOX_VERSION}" init-config "$SANDBOX_CONFIG" --example docker \
       || warn "init-config failed — the sandbox may not start (see above)."
   fi
