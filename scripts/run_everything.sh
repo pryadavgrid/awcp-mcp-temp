@@ -69,6 +69,10 @@ if [ -f "$ROOT/.env" ]; then
     case "$line" in *=*) ;; *) continue ;; esac     # skip lines without '='
     key="$(printf '%s' "$key" | tr -d '[:space:]')"
     case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+    # Trim whitespace around the value (so `KEY = "v"` with spaces around = parses),
+    # THEN strip one layer of surrounding matching quotes. Without the trim a
+    # leading space hides the opening quote, leaving it stuck on the value.
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
     val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
     [ -z "${!key:-}" ] && export "$key=$val"
   done < "$ROOT/.env"
@@ -88,12 +92,12 @@ export LMNR_OTLP_ENDPOINT="${LMNR_OTLP_ENDPOINT:-http://localhost:8881}"
 GATEWAY_PORT="${GATEWAY_PORT:-8000}"
 UI_PORT="${UI_PORT:-5173}"
 LOGDIR="${TMPDIR:-/tmp}/awcp-everything-run"; mkdir -p "$LOGDIR"
-TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""
+TEMPORAL_PID=""; MCP_PID=""; OLLAMA_PID=""; UI_PID=""; OPA_PID=""; SANDBOX_PID=""; OPA_SERVER_PID=""
 
 # The external agent bundle the gateway runs via /user/ask. Agents launched from
 # here are told to report to THIS gateway (root), so the
 # agent -> radar -> Temporal/OTel pipeline is wired end to end.
-export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/ssrivastava/Desktop/capstone-awcp/awcp-agents}"
+export AWCP_AGENTS_DIR="${AWCP_AGENTS_DIR:-/Users/pchandra/CAPSTONE/DEMO2/awcp-agents}"
 export AWCP_AGENT_RADAR_URL="${AWCP_AGENT_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 # The MCP control server (started in step 5) is the write-action firewall: it
 # calls the radar gate at AGENT_RADAR_URL before running a governed tool. The
@@ -209,12 +213,36 @@ except Exception:
 PY
 }
 
+# Resolve an `opa` binary: a system install, else a cached ./.bin/opa, else
+# download the official static binary for this platform. Sets OPA_BIN; returns
+# non-zero (so the caller falls back to policy.py) if none can be obtained.
+OPA_BIN=""
+ensure_opa(){
+  if command -v opa >/dev/null 2>&1; then OPA_BIN="$(command -v opa)"; return 0; fi
+  local cached="$ROOT/.bin/opa"
+  if [ -x "$cached" ]; then OPA_BIN="$cached"; return 0; fi
+  local os arch url; os="$(uname -s)"; arch="$(uname -m)"
+  case "$os/$arch" in
+    Darwin/arm64)               url="https://openpolicyagent.org/downloads/latest/opa_darwin_arm64_static" ;;
+    Darwin/x86_64)              url="https://openpolicyagent.org/downloads/latest/opa_darwin_amd64" ;;
+    Linux/x86_64)               url="https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static" ;;
+    Linux/aarch64|Linux/arm64)  url="https://openpolicyagent.org/downloads/latest/opa_linux_arm64_static" ;;
+    *) warn "No OPA binary mapping for $os/$arch — install 'opa' manually."; return 1 ;;
+  esac
+  mkdir -p "$ROOT/.bin"
+  say "Downloading OPA ($os/$arch) → .bin/opa (first run only)…"
+  if curl -fsSL "$url" -o "$cached" && chmod +x "$cached"; then OPA_BIN="$cached"; return 0; fi
+  warn "OPA download failed — gate will use the Python fallback."; return 1
+}
+
 cleanup(){
   echo
   say "Shutting down…"
-  [ -n "$UI_PID" ]       && kill "$UI_PID"       2>/dev/null || true
-  [ -n "$OPA_PID" ]      && kill "$OPA_PID"      2>/dev/null || true
-  [ -n "$MCP_PID" ]      && kill "$MCP_PID"      2>/dev/null || true
+  [ -n "$UI_PID" ]         && kill "$UI_PID"         2>/dev/null || true
+  [ -n "$OPA_PID" ]        && kill "$OPA_PID"        2>/dev/null || true
+  [ -n "$OPA_SERVER_PID" ] && kill "$OPA_SERVER_PID" 2>/dev/null || true
+  [ -n "$MCP_PID" ]        && kill "$MCP_PID"        2>/dev/null || true
+  [ -n "$SANDBOX_PID" ]    && kill "$SANDBOX_PID"    2>/dev/null || true
   [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
   [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
   say "Stopped the gateway (+ Temporal/MCP/Ollama/UI if this script started them)."
@@ -338,6 +366,94 @@ else
   warn "Ollama not found — install it and 'ollama pull llama3.1:8b gemma2:2b', else agents fail (https://ollama.com)."
 fi
 
+# ── 4b. OpenSandbox runtime — backend for the MCP workspace tools ──────────────
+# The MCP server's read_file/write_file/run_command tools run inside an
+# OpenSandbox-managed container; this is the control-plane the SDK talks to. We
+# start it here so the WHOLE stack comes up from one script (no separate terminal).
+#
+# Fully portable & self-healing — on a new machine you set ONE thing in .env
+# (AWCP_WORKSPACE_DIR) and everything else is automatic:
+#   • the workspace dir is created if missing,
+#   • the config (~/.sandbox.toml) is generated if missing OR unparseable
+#     (a corrupted file is backed up and regenerated — no manual init-config),
+#   • the [server] port and [storage] allowed_host_paths are (re)written every
+#     run, so they can never drift or stay corrupted, and
+#   • the MCP server is pointed at the same port via OPEN_SANDBOX_DOMAIN.
+# Port is configurable (AWCP_SANDBOX_PORT, default 8090 — :8080 is often taken by
+# Adminer/Docker). Set SKIP_SANDBOX=1 to leave it off; OPENSANDBOX_VERSION /
+# OPENSANDBOX_CONFIG override the pinned version and the config path.
+SANDBOX_VERSION="${OPENSANDBOX_VERSION:-0.1.13}"
+SANDBOX_CONFIG="${OPENSANDBOX_CONFIG:-$HOME/.sandbox.toml}"
+SANDBOX_PORT="${AWCP_SANDBOX_PORT:-8090}"
+# Sanitize then export the workspace dir (strip any stray surrounding space/quotes
+# a .env value might carry) so the MCP server (step 5) bind-mounts the SAME dir the
+# allowlist authorizes; point the MCP SDK at the SAME port the runtime listens on.
+AWCP_WORKSPACE_DIR="${AWCP_WORKSPACE_DIR:-$ROOT/workspace}"
+AWCP_WORKSPACE_DIR="$(printf '%s' "$AWCP_WORKSPACE_DIR" | sed -e 's/^[[:space:]"'\'']*//' -e 's/[[:space:]"'\'']*$//')"
+export AWCP_WORKSPACE_DIR
+export OPEN_SANDBOX_DOMAIN="127.0.0.1:${SANDBOX_PORT}"
+if [ "${SKIP_SANDBOX:-0}" = "1" ]; then
+  warn "SKIP_SANDBOX=1 — not starting the OpenSandbox runtime (sandbox tools will report unreachable)."
+elif ! command -v uvx >/dev/null 2>&1; then
+  warn "uvx (uv) not found — can't start the OpenSandbox runtime (install: brew install uv). Sandbox tools will be unreachable."
+else
+  mkdir -p "$AWCP_WORKSPACE_DIR"
+  # If the config exists but is no longer valid TOML, back it up and regenerate.
+  if [ -f "$SANDBOX_CONFIG" ] && ! python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$SANDBOX_CONFIG" 2>/dev/null; then
+    warn "$SANDBOX_CONFIG is invalid TOML — backing it up and regenerating."
+    mv "$SANDBOX_CONFIG" "${SANDBOX_CONFIG}.bak.$(date +%s)" 2>/dev/null || true
+  fi
+  if [ ! -f "$SANDBOX_CONFIG" ]; then
+    say "Generating OpenSandbox config → $SANDBOX_CONFIG"
+    uvx "opensandbox-server@${SANDBOX_VERSION}" init-config "$SANDBOX_CONFIG" --example docker \
+      || warn "init-config failed — the sandbox may not start (see above)."
+  fi
+  # Deterministically set the port + workspace allowlist (OVERWRITE — this both
+  # configures and self-heals any corrupted line; the path comes from .env/repo).
+  if [ -f "$SANDBOX_CONFIG" ]; then
+    AWCP_WORKSPACE_DIR="$AWCP_WORKSPACE_DIR" SANDBOX_CONFIG="$SANDBOX_CONFIG" SANDBOX_PORT="$SANDBOX_PORT" python3 - <<'PY' || warn "couldn't update $SANDBOX_CONFIG — check it by hand."
+import os, re
+cfg  = os.environ["SANDBOX_CONFIG"]
+ws   = os.environ["AWCP_WORKSPACE_DIR"].strip().strip('"').strip("'").strip().replace('"', '')
+port = os.environ["SANDBOX_PORT"]
+text = open(cfg).read()
+
+# allowed_host_paths -> exactly our workspace (overwrite the whole line; repairs
+# any earlier corruption). Quoting keeps it valid TOML.
+allow = 'allowed_host_paths = ["%s"]' % ws
+if re.search(r'(?m)^[ \t]*allowed_host_paths[ \t]*=.*$', text):
+    text = re.sub(r'(?m)^[ \t]*allowed_host_paths[ \t]*=.*$', allow, text, count=1)
+elif re.search(r'(?m)^\[storage\][ \t]*$', text):
+    text = re.sub(r'(?m)^\[storage\][ \t]*$', '[storage]\n' + allow, text, count=1)
+else:
+    text = text.rstrip() + '\n\n[storage]\n' + allow + '\n'
+
+# [server] port -> our port (the first `port =` line is [server]'s).
+if re.search(r'(?m)^[ \t]*port[ \t]*=.*$', text):
+    text = re.sub(r'(?m)^[ \t]*port[ \t]*=.*$', 'port = %s' % port, text, count=1)
+elif re.search(r'(?m)^\[server\][ \t]*$', text):
+    text = re.sub(r'(?m)^\[server\][ \t]*$', '[server]\nhost = "127.0.0.1"\nport = %s' % port, text, count=1)
+else:
+    text = '[server]\nhost = "127.0.0.1"\nport = %s\n\n' % port + text
+
+open(cfg, "w").write(text)
+print('  config set: port=%s, allowed_host_paths=["%s"]' % (port, ws))
+PY
+  fi
+  if [ -n "$(port_open "$SANDBOX_PORT")" ]; then
+    say "OpenSandbox runtime already on :${SANDBOX_PORT} — reusing it."
+  else
+    say "Starting OpenSandbox runtime on :${SANDBOX_PORT} (workspace: $AWCP_WORKSPACE_DIR)…"
+    OPENSANDBOX_INSECURE_SERVER=YES nohup uvx "opensandbox-server@${SANDBOX_VERSION}" \
+      --config "$SANDBOX_CONFIG" > "$LOGDIR/opensandbox.log" 2>&1 &
+    SANDBOX_PID=$!
+    # Up to ~120s: the very first run also has uvx download the package.
+    for i in $(seq 1 120); do [ -n "$(port_open "$SANDBOX_PORT")" ] && break; sleep 1; done
+    [ -n "$(port_open "$SANDBOX_PORT")" ] && say "OpenSandbox runtime is up." \
+      || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running? is uvx installed?)."
+  fi
+fi
+
 # ── 5. MCP control server (:8002, SSE) — background ───────────────────
 if [ "${SKIP_MCP:-0}" = "1" ]; then
   warn "SKIP_MCP=1 — not starting the MCP server."
@@ -348,6 +464,29 @@ else
   nohup ./.venv/bin/uvicorn awcp.mcp.server:app --host 0.0.0.0 --port 8002 \
     > "$LOGDIR/mcp.log" 2>&1 &
   MCP_PID=$!
+fi
+
+# ── 5a. OPA policy engine (Rego PDP, :OPA_SERVER_PORT) ────────────────────────
+# Serves policies/awcp/gate.rego + tools.rego so the write-action gate and the
+# tool-tier gate evaluate through OPA (engine="opa") instead of the Python
+# fallback. AWCP_OPA_URL (default :8181, also set in .env) points the gate at it.
+# If the opa binary can't be found/downloaded the gate transparently falls back to
+# policy.py — governance never breaks, it just runs in-process.
+export AWCP_OPA_URL="${AWCP_OPA_URL:-http://localhost:8181}"
+OPA_SERVER_PORT="${OPA_SERVER_PORT:-$(printf '%s' "$AWCP_OPA_URL" | sed -E 's#.*:([0-9]+).*#\1#')}"
+[ -z "$OPA_SERVER_PORT" ] && OPA_SERVER_PORT=8181
+if [ "${SKIP_OPA_SERVER:-0}" = "1" ]; then
+  warn "SKIP_OPA_SERVER=1 — not starting the OPA Rego server (gate uses policy.py)."
+elif [ -n "$(port_open "$OPA_SERVER_PORT")" ]; then
+  say "OPA policy engine already on :${OPA_SERVER_PORT} — reusing it."
+elif ensure_opa; then
+  say "Starting OPA policy engine (Rego PDP) on :${OPA_SERVER_PORT} — gate.rego + tools.rego…"
+  nohup "$OPA_BIN" run --server --addr ":${OPA_SERVER_PORT}" \
+    "$ROOT/policies/awcp/gate.rego" "$ROOT/policies/awcp/tools.rego" \
+    > "$LOGDIR/opa-server.log" 2>&1 &
+  OPA_SERVER_PID=$!
+else
+  warn "OPA policy engine not started — gate falls back to policy.py (engine=policy)."
 fi
 
 # ── 5b. OPA agent (:OPA_AGENT_PORT) — hidden SLM tool-call PDP, background ─────
@@ -436,12 +575,15 @@ echo "     API docs (all groups)  : http://localhost:${GATEWAY_PORT}/docs"
 echo "     Temporal UI (workflows): ${TEMPORAL_UI}   (queues: $AGENT_RADAR_TASK_QUEUE, $AGENT_EXEC_TASK_QUEUE)"
 echo "     Grafana (traces/metrics/logs): http://localhost:3000   (admin / awcp1234)"
 echo "     Prometheus             : http://localhost:9090"
-if [ -n "${AWCP_OPA_URL:-}" ]; then
-echo "     OPA policy engine      : ${AWCP_OPA_URL}   (gate PDP — ${AWCP_OPA_SHADOW:-false} shadow)"
+if [ -n "${OPA_SERVER_PID:-}" ] || [ -n "$(port_open "${OPA_SERVER_PORT:-8181}")" ]; then
+echo "     OPA policy engine      : ${AWCP_OPA_URL}   (Rego PDP — gate.rego/tools.rego, engine=opa; ${AWCP_OPA_SHADOW:-false} shadow)"
 else
-echo "     OPA policy engine      : http://localhost:8181   (running; gate uses policy.py until AWCP_OPA_URL is set — see README)"
+echo "     OPA policy engine      : not running   (gate uses policy.py fallback — see $LOGDIR/opa-server.log)"
 fi
 echo "     MCP server             : http://localhost:8002   (SSE)"
+if [ "${SKIP_SANDBOX:-0}" != "1" ]; then
+echo "     OpenSandbox runtime    : http://localhost:${SANDBOX_PORT}   (sandbox backend; workspace: $AWCP_WORKSPACE_DIR)"
+fi
 if [ "${SKIP_OPA:-0}" != "1" ]; then
 echo "     OPA agent (tool tiers) : ${AWCP_OPA_AGENT_URL}   (hidden SLM PDP, model ${OPA_SLM_MODEL}; tier bars on Radar)"
 fi

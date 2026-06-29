@@ -26,12 +26,40 @@ async function call(method, path, body) {
 
 // ── registry / radar ────────────────────────────────────────────────────────
 export const getHealth = () => call('GET', '/healthz')
+// Sandbox lifecycle + tool-call timeline, proxied from the MCP server's own
+// process. health.sandbox (from getHealth) already carries the live status.
+export const getSandboxEvents = (limit = 50) => call('GET', `/sandbox/events?limit=${limit}`)
 export const getAgents = () => call('GET', '/agents')
 // The bundle agents + their live tool catalogs (folder id, registry agent_id, tools).
 export const getUserAgents = () => call('GET', '/user/agents')
 export const getEvents = (limit = 50) => call('GET', `/events?limit=${limit}`)
 export const setAutonomy = (id, profile) =>
   call('POST', `/agents/${encodeURIComponent(id)}/autonomy`, { profile })
+
+// Real Temporal workflow status + per-status counts (running / completed /
+// terminated / canceled / failed), read straight from Temporal — never guessed.
+// Returns { workflows: [...], counts: {...} }.
+export const getWorkflows = (limit = 100) =>
+  call('GET', `/user/workflows?limit=${limit}`)
+
+// ── context graph (governed-step trail) ──────────────────────────────────────
+// Every governed step (tool call, route, generate) recorded as a tamper-chained
+// node in evidence.ledger. The global feed drives the Context Graph view; the
+// per-run / per-agent endpoints are available for drill-downs.
+export const getContextFeed = (limit = 200) => call('GET', `/context-graph?limit=${limit}`)
+export const getWorkflowGraph = (wf) =>
+  call('GET', `/context-graph/${encodeURIComponent(wf)}`)
+export const getAgentGraph = (id) =>
+  call('GET', `/agents/${encodeURIComponent(id)}/context-graph`)
+// Whole-ledger hash-chain verification (re-hash + linkage). {enabled:false} when
+// the durable ledger (Postgres) is off — nothing persisted to verify.
+export const getChainVerify = () => call('GET', '/context-graph/verify')
+
+// Neo4j graph projection (additive read-model). {enabled:false} when Neo4j is off.
+export const getNeo4jStatus = () => call('GET', '/context-graph/neo4j/status')
+export const getNeo4jGraph = (workflow) =>
+  call('GET', `/context-graph/neo4j/graph${workflow ? `?workflow=${encodeURIComponent(workflow)}` : ''}`)
+export const backfillNeo4j = () => call('POST', '/context-graph/neo4j/backfill')
 
 // ── token monitor (laminar) ──────────────────────────────────────────────────
 export const getUsage = () => call('GET', '/laminar/usage')
@@ -77,6 +105,18 @@ export const setBlockThreshold = (threshold) =>
 export const getPolicy = () => call('GET', '/policy')
 export const putPolicy = (policy, updatedBy = 'awcp-ui', note = '') =>
   call('PUT', '/policy', { policy, updated_by: updatedBy, note })
+
+// ── write approvals (the "Approvals" panel) ───────────────────────────────────
+// When an agent pauses on a WRITE action it registers the request with the radar.
+// getApprovals lists them (filter by status: pending | approved | denied);
+// decideApproval records the verdict AND releases the paused agent.
+export const getApprovals = (status = 'pending', limit = 100) =>
+  call('GET', `/approvals?status=${encodeURIComponent(status)}&limit=${limit}`)
+export const decideApproval = (id, decision, decidedBy = 'awcp-ui') =>
+  call('POST', `/approvals/${encodeURIComponent(id)}/decide`, {
+    decision,
+    decided_by: decidedBy,
+  })
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>

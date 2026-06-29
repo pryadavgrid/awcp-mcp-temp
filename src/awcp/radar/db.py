@@ -250,6 +250,7 @@ def init() -> bool:
             ensure_partitions()
             ensure_workflow_events_table()
             ensure_operator_policy_table()
+            ensure_write_approvals_table()
         return ok
 
 
@@ -965,4 +966,149 @@ def load_operator_policy() -> dict | None:
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.db.load_operator_policy failed error=%r", exc)
+        return None
+
+
+# ── write approvals (the AWCP UI "Approvals" panel) ───────────────────────────
+# One row per WRITE action an agent paused on, awaiting an operator's approve/deny
+# in the AWCP UI. A dedicated table (NOT governance.approval_tokens, which models
+# expiring cryptographic gate tokens with scopes/uses) because this is a simple,
+# human-facing task-level pause: {who, what, status}. Same fail-open "ensure"
+# pattern as the operator-policy table; with no DB the radar keeps these in memory
+# only (see api.py), so the feature still works without Postgres.
+def ensure_write_approvals_table() -> None:
+    """Create governance.write_approvals (IF NOT EXISTS) via the admin connection."""
+    url = DB_ADMIN_URL
+    if not url:
+        return
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS governance.write_approvals ("
+        " id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        " ts timestamptz NOT NULL DEFAULT now(),"
+        " agent_id text,"
+        " agent_name text,"
+        " task_id text,"
+        " action text,"
+        " detail text,"
+        " risk text,"
+        " status text NOT NULL DEFAULT 'pending',"
+        " decided_by text,"
+        " decided_at timestamptz)"
+    )
+    index = ("CREATE INDEX IF NOT EXISTS idx_write_approvals_status_ts "
+             "ON governance.write_approvals (status, ts DESC)")
+    grants = (
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON governance.write_approvals TO awcp_app",
+        "GRANT SELECT ON governance.write_approvals TO awcp_ro",
+    )
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url, connect_args={"connect_timeout": 3}
+                            if url.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text(ddl))
+            c.execute(text(index))
+        for g in grants:
+            try:
+                with eng.begin() as c:
+                    c.execute(text(g))
+            except Exception:  # noqa: BLE001 — roles may not exist; default privs cover it
+                pass
+        eng.dispose()
+        log.info("radar.db governance.write_approvals ensured (write-approval store)")
+    except Exception as exc:  # noqa: BLE001 — maintenance is best-effort
+        log.warning("radar.db ensure_write_approvals_table failed (%r) — write approvals "
+                    "kept in memory only until the table exists", exc)
+
+
+_WA_COLS = ("id, extract(epoch FROM ts) AS ts, agent_id, agent_name, task_id, action, "
+            "detail, risk, status, decided_by, extract(epoch FROM decided_at) AS decided_at")
+
+
+def _wa_row(r) -> dict:
+    return {
+        "id": int(r["id"]), "ts": float(r["ts"]) if r["ts"] is not None else None,
+        "agent_id": r["agent_id"], "agent_name": r["agent_name"], "task_id": r["task_id"],
+        "action": r["action"], "detail": r["detail"], "risk": r["risk"],
+        "status": r["status"], "decided_by": r["decided_by"],
+        "decided_at": float(r["decided_at"]) if r["decided_at"] is not None else None,
+    }
+
+
+def create_write_approval(agent_id: str, task_id: str, action: str, detail: str = "",
+                          risk: str = "", agent_name: str = "") -> dict | None:
+    """Insert a pending write-approval row. Returns the stored row, or None when
+    the DB is unavailable (caller keeps an in-memory fallback)."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "INSERT INTO governance.write_approvals "
+                "(agent_id, agent_name, task_id, action, detail, risk) "
+                "VALUES (:agent_id, :agent_name, :task_id, :action, :detail, :risk) "
+                "RETURNING " + _WA_COLS
+            ), {
+                "agent_id": agent_id or None, "agent_name": agent_name or None,
+                "task_id": task_id or None, "action": action or None,
+                "detail": detail or None, "risk": risk or None,
+            }).mappings().first()
+        return _wa_row(row)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.create_write_approval failed error=%r", exc)
+        return None
+
+
+def list_write_approvals(status: str = "", limit: int = 100) -> list[dict] | None:
+    """Write-approval rows (newest first), optionally filtered by status. Returns
+    None when the DB is unavailable so the caller can fall back to memory."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.connect() as c:
+            rows = c.execute(_text(
+                "SELECT " + _WA_COLS + " FROM governance.write_approvals "
+                "WHERE (CAST(:status AS text) IS NULL OR status = :status) "
+                "ORDER BY ts DESC LIMIT :limit"
+            ), {"status": status or None, "limit": max(1, min(limit, 500))}).mappings().all()
+        return [_wa_row(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.list_write_approvals failed error=%r", exc)
+        return None
+
+
+def get_write_approval(approval_id: int) -> dict | None:
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.connect() as c:
+            row = c.execute(_text(
+                "SELECT " + _WA_COLS + " FROM governance.write_approvals WHERE id = :id"
+            ), {"id": int(approval_id)}).mappings().first()
+        return _wa_row(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.get_write_approval failed error=%r", exc)
+        return None
+
+
+def decide_write_approval(approval_id: int, decision: str,
+                          decided_by: str = "") -> dict | None:
+    """Mark a PENDING approval approved/denied. Returns the updated row, or None
+    when the DB is unavailable or the row is not pending."""
+    if not _enabled or _engine is None:
+        return None
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "UPDATE governance.write_approvals "
+                "SET status = :status, decided_by = :decided_by, decided_at = now() "
+                "WHERE id = :id AND status = 'pending' "
+                "RETURNING " + _WA_COLS
+            ), {
+                "status": "approved" if decision == "approve" else "denied",
+                "decided_by": decided_by or None, "id": int(approval_id),
+            }).mappings().first()
+        return _wa_row(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.decide_write_approval failed error=%r", exc)
         return None

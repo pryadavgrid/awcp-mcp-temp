@@ -1040,6 +1040,40 @@ router = APIRouter()
 from awcp.radar.llm_gateway import gateway_router  # noqa: E402
 router.include_router(gateway_router)
 
+# Context graph (the governed-step trail): /agents/{id}/checkpoint + /context-graph/*.
+# Additive and fail-open — it writes the resume_pointer/context_hash lineage into
+# evidence.ledger that nothing populated before. Mounted here so it is served on
+# every surface the radar router is (the port the MCP server posts checkpoints to).
+from awcp.context_graph.api import router as context_graph_router  # noqa: E402
+router.include_router(context_graph_router)
+
+
+def _cg_record_llm(agent_id: str, task_id: str, event: dict) -> None:
+    """Record one ``llm_called`` execution event as a context-graph node
+    (step ``llm:<model>``) carrying its token usage, so the audit trail shows WHICH
+    model was called — not only which tools ran. Every agent emits these events, so
+    this covers them all uniformly. Shares workflow_id=task_id with the tool
+    checkpoints, so the LLM call and the tool steps chain into one timeline. Skips
+    mislabeled token rollups (``model`` like ``tool:*``). Best-effort; never raises."""
+    model = str(event.get("model") or "").strip()
+    if not model or model.startswith("tool:"):
+        return
+    extra = event.get("extra") or {}
+    tin = int(extra.get("input_tokens", 0) or 0)
+    tout = int(extra.get("output_tokens", 0) or 0)
+    try:
+        from awcp.context_graph import store as _cg_store
+        _cg_store.record_checkpoint(
+            agent_id=agent_id, step=f"llm:{model}", task_id=task_id,
+            workflow_id=task_id, actor=agent_id,
+            resume_pointer=f"{task_id or 'task'}:after:llm:{model}",
+            context={"model": model},
+            payload={"kind": "llm", "model": model, "outcome": "succeeded",
+                     "decision": "allow", "input_tokens": tin, "output_tokens": tout},
+        )
+    except Exception as exc:  # noqa: BLE001 — recording must never break an event
+        log.debug("context_graph.llm_checkpoint failed agent=%s err=%r", agent_id, exc)
+
 # ----------------------------------------------------------------------
 # Token monitoring & control (awcp.laminar — OPTIONAL, self-contained).
 # The laminar package never imports radar internals; the radar injects the
@@ -1824,21 +1858,19 @@ def set_autonomy(agent_id: str, req: AutonomyRequest) -> dict:
     return {"agent_id": agent_id, "autonomy_profile": updated.autonomy_profile}
 
 
-@router.post("/agents/{agent_id}/approve")
-def approve(agent_id: str) -> dict:
-    """Operator action — clear a pending re-approval gate (hardening gap #5).
-    After an agent was held for adding write_scopes, the operator approves the
-    new grants here; the approval gate lifts and the SAME onboarding hook check
-    decides whether it returns to active."""
-    e = _require(agent_id)
-    if e.approval_state != "pending":
-        return {"agent_id": agent_id, "approval_state": e.approval_state,
-                "status": e.status, "note": "no pending approval"}
+def _approve_agent(agent_id: str) -> dict | None:
+    """Clear a pending scope-change re-approval gate for an agent: lift the gate,
+    re-run the onboarding hook check to decide if it returns to active, and persist
+    the approved scope set so a later re-register with the same scopes does NOT
+    re-arm the gate (this is what stops the scope_added quarantine from looping on
+    every restart). Returns the updated summary, or None when there is no pending
+    approval to clear. Shared by the operator's /agents/{id}/approve action AND the
+    write-approval flow, so approving a write also frees the agent to perform it."""
+    e = REGISTRY.get(agent_id)
+    if not e or e.approval_state != "pending":
+        return None
     probe = e.model_copy(update={"approval_state": "approved", "approval_reason": None})
     status, reason = onboarding.decide_status(probe)
-    # Record the approved scope set (union with any previously approved) so a later
-    # re-register with these same scopes does NOT re-arm the gate — this is what
-    # stops the scope_added quarantine from looping on every agent restart.
     approved_scopes = sorted(set(e.write_scopes or []) | set(e.approved_scopes or []))
     updated = REGISTRY.patch(agent_id, approval_state="approved", approval_reason=None,
                              status=status, quarantine_reason=reason,
@@ -1852,6 +1884,20 @@ def approve(agent_id: str) -> dict:
              agent_id, status, list(updated.write_scopes or []))
     return {"agent_id": agent_id, "approval_state": "approved",
             "status": updated.status, "write_scopes": list(updated.write_scopes or [])}
+
+
+@router.post("/agents/{agent_id}/approve")
+def approve(agent_id: str) -> dict:
+    """Operator action — clear a pending re-approval gate (hardening gap #5).
+    After an agent was held for adding write_scopes, the operator approves the
+    new grants here; the approval gate lifts and the SAME onboarding hook check
+    decides whether it returns to active."""
+    e = _require(agent_id)
+    res = _approve_agent(agent_id)
+    if res is None:
+        return {"agent_id": agent_id, "approval_state": e.approval_state,
+                "status": e.status, "note": "no pending approval"}
+    return res
 
 
 # ── Per-action approval tokens (magazine Scenario B) ──────────────────────────
@@ -1901,6 +1947,152 @@ def deny_token(agent_id: str, token_id: str, req: TokenDecisionRequest) -> dict:
                   token_id=token_id, decided_by=req.decided_by or None)
     log.info("radar.token.denied agent_id=%s token_id=%s", agent_id, token_id)
     return {"agent_id": agent_id, "token_id": token_id, "status": "denied"}
+
+
+# ── write approvals (the AWCP UI "Approvals" panel) ───────────────────────────
+# When a bundle agent pauses on a WRITE action it POSTs /approvals here so the
+# operator sees "agent X wants to do Y — approve?" in the AWCP UI and the request
+# is persisted (governance.write_approvals). Deciding it records the verdict AND
+# calls the agent back at its /tasks/{id}/approve endpoint to release the pause.
+# Fail-open: with no DB these live in this in-memory mirror, so the panel still
+# works without Postgres.
+_WA_LOCK = threading.Lock()
+_WA_MEM: dict[int, dict] = {}
+_WA_NEXT = [1]
+
+
+def _wa_mem_create(rec: dict) -> dict:
+    with _WA_LOCK:
+        i = _WA_NEXT[0]
+        _WA_NEXT[0] += 1
+        rec = {**rec, "id": i}
+        _WA_MEM[i] = rec
+        return dict(rec)
+
+
+async def _release_agent_write(agent_id: str, task_id: str, decision: str) -> bool:
+    """Release a paused write by calling the agent's own task-approve endpoint
+    (the agent blocks on a local event there). Best-effort — the decision is
+    already persisted regardless of whether the agent is still reachable."""
+    ent = REGISTRY.get(agent_id) if agent_id else None
+    endpoint = (getattr(ent, "endpoint", "") or "") if ent else ""
+    if not (endpoint and task_id):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.post(f"{endpoint.rstrip('/')}/tasks/{task_id}/approve",
+                             json={"decision": decision})
+            return r.status_code == 200
+    except Exception as exc:  # noqa: BLE001 — release is best-effort
+        log.warning("radar.approval.release_failed agent_id=%s task_id=%s error=%r",
+                    agent_id, task_id, exc)
+        return False
+
+
+class WriteApprovalRequest(BaseModel):
+    agent_id: str = ""
+    task_id: str = ""
+    action: str = ""        # the tool/action the agent wants to run
+    detail: str = ""        # human-readable description for the operator
+    risk: str = ""          # the action's risk tier (medium | high | …)
+
+
+class ApprovalDecisionRequest(BaseModel):
+    decision: str = "approve"   # approve | deny
+    decided_by: str = ""
+
+
+@router.post("/approvals")
+def create_approval(req: WriteApprovalRequest) -> dict:
+    """An agent registers a WRITE action it paused on, awaiting operator approval
+    in the AWCP UI. Persisted to governance.write_approvals (in-memory fallback)."""
+    ent = REGISTRY.get(req.agent_id) if req.agent_id else None
+    agent_name = (getattr(ent, "name", "") or "") if ent else ""
+    rec = _events_db.create_write_approval(
+        agent_id=req.agent_id, task_id=req.task_id, action=req.action,
+        detail=req.detail, risk=req.risk, agent_name=agent_name)
+    if rec is None:
+        rec = _wa_mem_create({
+            "ts": time.time(), "agent_id": req.agent_id, "agent_name": agent_name,
+            "task_id": req.task_id, "action": req.action, "detail": req.detail,
+            "risk": req.risk, "status": "pending", "decided_by": None,
+            "decided_at": None})
+    _record_event("approval_requested", req.agent_id,
+                  f"write {req.action!r} awaiting operator approval",
+                  action=req.action, task_id=req.task_id, risk=req.risk)
+    if _HOOKS:
+        _hook(_HT.APPROVAL_REQUIRED, agent_id=req.agent_id, task_id=req.task_id,
+              action=req.action, risk=req.risk)
+    log.info("radar.approval.requested agent_id=%s task_id=%s action=%s id=%s",
+             req.agent_id, req.task_id, req.action, rec.get("id"))
+    return rec
+
+
+@router.get("/approvals")
+def list_approvals(status: str = "", limit: int = 100) -> list[dict]:
+    """Write-approval requests (newest first), optionally filtered by status
+    (pending | approved | denied). The AWCP UI polls this for its panel."""
+    rows = _events_db.list_write_approvals(status, limit)
+    if rows is not None:
+        return rows
+    with _WA_LOCK:
+        items = sorted(_WA_MEM.values(), key=lambda r: r.get("ts") or 0, reverse=True)
+    if status:
+        items = [r for r in items if r.get("status") == status]
+    return [dict(r) for r in items[: max(1, min(limit, 500))]]
+
+
+@router.get("/approvals/{approval_id}")
+def get_approval(approval_id: int) -> dict:
+    rec = _events_db.get_write_approval(approval_id)
+    if rec is None:
+        with _WA_LOCK:
+            mem = _WA_MEM.get(approval_id)
+            rec = dict(mem) if mem else None
+    if not rec:
+        raise HTTPException(status_code=404, detail="approval not found")
+    return rec
+
+
+@router.post("/approvals/{approval_id}/decide")
+async def decide_approval_ep(approval_id: int, req: ApprovalDecisionRequest) -> dict:
+    """Operator approves/denies a pending write. Records the verdict (durable) and
+    releases the paused agent by calling its task-approve endpoint."""
+    decision = "approve" if req.decision == "approve" else "deny"
+    rec = _events_db.decide_write_approval(approval_id, decision, req.decided_by)
+    if rec is None:
+        with _WA_LOCK:
+            m = _WA_MEM.get(approval_id)
+            if m and m.get("status") == "pending":
+                m["status"] = "approved" if decision == "approve" else "denied"
+                m["decided_by"] = req.decided_by or None
+                m["decided_at"] = time.time()
+                rec = dict(m)
+    if not rec:
+        raise HTTPException(status_code=409,
+                            detail="approval not found or already decided")
+
+    # Approving the WRITE also clears any scope-change quarantine on the agent —
+    # otherwise the write would be released from its pause only to be DENIED by the
+    # quarantine admission gate (a quarantined agent may perform no writes). The
+    # operator approving "agent X wants to do <write>" IS authorizing the agent to
+    # write, so we lift the gate here. No-op when the agent isn't pending approval.
+    agent_cleared = None
+    if decision == "approve":
+        try:
+            agent_cleared = _approve_agent(rec.get("agent_id"))
+        except Exception as exc:  # noqa: BLE001 — never fail the decision on this
+            log.warning("radar.approval.clear_quarantine_failed agent_id=%s error=%r",
+                        rec.get("agent_id"), exc)
+
+    released = await _release_agent_write(rec.get("agent_id"), rec.get("task_id"), decision)
+    _record_event(f"approval_{rec['status']}", rec.get("agent_id") or "",
+                  f"operator {rec['status']} write {rec.get('action')!r}",
+                  action=rec.get("action"), task_id=rec.get("task_id"),
+                  decided_by=req.decided_by or None)
+    log.info("radar.approval.decided id=%s status=%s released=%s agent_cleared=%s",
+             approval_id, rec["status"], released, bool(agent_cleared))
+    return {**rec, "released": released, "agent_cleared": bool(agent_cleared)}
 
 
 class RiskRequest(BaseModel):
@@ -2094,6 +2286,10 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         # observed in execution (the magazine's third onboarding hook).
         if _event_has_flags(event):
             _observe_flags(agent_id)
+        # Context graph: record the LLM call as a step so the trail shows which model
+        # was called (+ its tokens), not only which tools ran. All agents emit these.
+        if event.get("type") == "llm_called":
+            _cg_record_llm(agent_id, task_id, event)
 
     # Agent-hooks: surface this step. STEP fires for every event; the specific
     # kind (LLM_CALL / TOOL_CALL / WEB_SEARCH / SYNTHESIZE) fires too so hooks can
@@ -2334,6 +2530,62 @@ def events_audit(agent_id: str = "", since: float = 0.0,
     }
 
 
+# OPA (Rego) reachability for the health/UI indicator. Cached so the 4s health
+# poll doesn't ping OPA every time. "connected" means AWCP_OPA_URL is set AND the
+# OPA server answers /health; otherwise the gate is on the policy.py fallback.
+_OPA_PING = {"ts": 0.0, "connected": False}
+
+
+def _opa_connected() -> bool:
+    if not opa.enabled():
+        return False
+    now = time.time()
+    if now - _OPA_PING["ts"] < 10:
+        return _OPA_PING["connected"]
+    ok = False
+    try:
+        r = httpx.get(f"{opa.OPA_URL.rstrip('/')}/health", timeout=1.0)
+        ok = r.status_code == 200
+    except Exception:  # noqa: BLE001 — unreachable ⇒ not connected
+        ok = False
+    _OPA_PING.update({"ts": now, "connected": ok})
+    return ok
+
+
+# The sandbox singleton lives in the MCP server's own process (port 8002), not
+# here, so reporting its status means asking that process directly. Derived
+# from the same AWCP_MCP_URL agents already use to reach the SSE endpoint.
+_MCP_BASE_URL = os.getenv("AWCP_MCP_URL", "http://localhost:8002/sse").removesuffix("/sse")
+_MCP_STATUS_URL = _MCP_BASE_URL + "/sandbox/status"
+_MCP_EVENTS_URL = _MCP_BASE_URL + "/sandbox/events"
+_MCP_STATUS_TIMEOUT = float(os.getenv("AWCP_MCP_STATUS_TIMEOUT", "2"))
+
+
+def _sandbox_status() -> dict:
+    """Fail-safe sandbox status: an unreachable MCP server is reported as
+    'unreachable', never raised — this must never break /healthz."""
+    try:
+        resp = httpx.get(_MCP_STATUS_URL, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "unreachable", "reason": f"HTTP {resp.status_code}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unreachable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/sandbox/events")
+def sandbox_events(limit: int = 50) -> dict:
+    """Proxies the MCP server's sandbox event timeline (lifecycle + tool calls)
+    for the UI's Sandbox page. Fail-safe like /healthz's sandbox field."""
+    try:
+        resp = httpx.get(_MCP_EVENTS_URL, params={"limit": limit}, timeout=_MCP_STATUS_TIMEOUT)
+        if resp.status_code == 200:
+            return {"reachable": True, "events": resp.json()}
+        return {"reachable": False, "reason": f"HTTP {resp.status_code}", "events": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"reachable": False, "reason": f"{type(exc).__name__}: {exc}", "events": []}
+
+
 @router.get("/healthz")
 def healthz() -> dict:
     agents = REGISTRY.all()
@@ -2352,6 +2604,11 @@ def healthz() -> dict:
         "temporal_connected": STATE["temporal"],
         "otel_enabled": _OTEL_ENABLED,
         "laminar": _laminar.status_summary() if _LAMINAR else {"enabled": False},
+        # OPA Rego engine: enabled = AWCP_OPA_URL set; connected = it answers.
+        # When not connected the gate runs on the policy.py fallback.
+        "opa": {"enabled": opa.enabled(), "connected": _opa_connected(),
+                "url": opa.OPA_URL or None},
+        "sandbox": _sandbox_status(),
     }
 
 

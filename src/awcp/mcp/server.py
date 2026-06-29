@@ -1,14 +1,17 @@
-import asyncio
 import arxiv
+import asyncio
+import contextlib
 import inspect
 import json
 import logging
 
 import os
 import sys
+from datetime import timedelta
 from typing import Annotated, Any
 
 import httpx
+from opensandbox.models.execd import RunCommandOpts
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import HTMLResponse
@@ -27,6 +30,18 @@ from awcp.runtime.tool_runtime import (
 )
 from awcp.runtime.ollama_client import ask_ollama
 from awcp.runtime.config import SEARCH_MODEL
+from awcp.runtime.sandbox import (
+    SANDBOX_MOUNT_PATH,
+    close_sandbox,
+    get_sandbox,
+    read_file_sync,
+    record_event as record_sandbox_event,
+    run_command_sync,
+    sandbox_events,
+    sandbox_status,
+    write_file_sync,
+)
+from awcp.context_graph.client import record_checkpoint as _cg_record
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
@@ -113,6 +128,37 @@ def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
         logger.debug("mcp.meter.failed tool=%s error=%r", tool_name, exc)
 
 
+def _record_checkpoint(agent_id: str, task_id: str, tool_name: str,
+                       tool_input: dict, gate: dict, eff_risk: str,
+                       outcome: str, error: str = "") -> None:
+    """Record this tool call as a node in the context graph (the governed-step
+    trail). `outcome` is "succeeded" (the tool ran), "blocked" (the gate denied it
+    before it ran), or "error" (the tool ran but raised) — all are part of the
+    trail. Best-effort HTTP to the radar; never breaks a tool call. The
+    resume_pointer marks where the run continues from; the context is the tool
+    input (so equal inputs get an equal context_hash)."""
+    if not agent_id:
+        return
+    marker = {"blocked": "blocked-at", "error": "errored-at"}.get(outcome, "after")
+    payload = {"tool": tool_name, "risk": eff_risk, "outcome": outcome,
+               "decision": gate.get("decision", "allow"),
+               "mode": gate.get("mode", ""),
+               "reason": error or gate.get("reason", "")}
+    if error:
+        payload["error"] = error[:500]
+    _cg_record(
+        RADAR_URL, agent_id,
+        step=f"tool:{tool_name}",
+        task_id=task_id,
+        workflow_id=task_id,
+        actor=agent_id,
+        resume_pointer=f"{task_id or 'task'}:{marker}:tool:{tool_name}",
+        context=tool_input or {},
+        payload=payload,
+        timeout=GATE_TIMEOUT,
+    )
+
+
 def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
     """Ask the radar's write-action gate. Returns the radar's decision dict.
     On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a missing
@@ -165,49 +211,33 @@ def _govern_span(name: str, trace_context: dict | None):
 # Workspace tools
 # ======================================================================
 
-@mcp.tool(description="Read the contents of a file in the workspace.")
-def read_file(
+# These static tools (for direct MCP clients / the Inspector) and the runtime
+# @tool versions in awcp.tools.sandbox_tools (for agents, via execute_tool) both
+# delegate to the same sync wrappers in awcp.runtime.sandbox, which own the path
+# guard, the event recording, and the bridge onto the dedicated sandbox loop. We
+# run them via asyncio.to_thread so the blocking bridge call never freezes this
+# (async) server's event loop.
+
+@mcp.tool(description="Read the contents of a file in the workspace sandbox.")
+async def read_file(
     path: Annotated[str, Field(description="Relative path to the file")],
 ) -> str:
-    if ".." in path or path.startswith("/"):
-        return "Error: Invalid path."
-    try:
-        with open(path, "r") as f:
-            return f.read()
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
+    return await asyncio.to_thread(read_file_sync, path)
 
 
-@mcp.tool(description="Write or overwrite a file in the workspace.")
-def write_file(
+@mcp.tool(description="Write or overwrite a file in the workspace sandbox.")
+async def write_file(
     path: Annotated[str, Field(description="Relative path to the file")],
     content: Annotated[str, Field(description="Content to write")],
 ) -> str:
-    if ".." in path or path.startswith("/"):
-        return "Error: Invalid path."
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
-        return f"Successfully wrote to {path}"
-    except Exception as e:
-        return f"Error writing file: {str(e)}"
+    return await asyncio.to_thread(write_file_sync, path, content)
 
 
-@mcp.tool(description="Execute a shell command in the workspace.")
+@mcp.tool(description="Execute a shell command in the workspace sandbox.")
 async def run_command(
     command: Annotated[str, Field(description="The shell command to run")],
 ) -> str:
-    try:
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        return f"STDOUT:\n{stdout.decode()}\nSTDERR:\n{stderr.decode()}"
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
+    return await asyncio.to_thread(run_command_sync, command)
 
 
 @mcp.tool(description="Search academic papers on arXiv.")
@@ -420,6 +450,9 @@ def execute_tool(
                 "mcp.execute.blocked agent_id=%s tool=%s risk=%s mode=%s reason=%s",
                 agent_id, tool_name, eff_risk, gate.get("mode"), gate.get("reason"),
             )
+            # Record the blocked attempt as a node too — a denial is part of the trail.
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "blocked")
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
@@ -435,6 +468,9 @@ def execute_tool(
             result = run_tool(tool_name, tool_input or {})
             # Meter the call's real input+output tokens into Laminar (best-effort).
             _meter_tool_tokens(agent_id, task_id, tool_name, tool_input or {}, result)
+            # Record the step in the context graph (governed-step trail, best-effort).
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "succeeded")
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
@@ -454,6 +490,9 @@ def execute_tool(
                 except Exception:  # noqa: BLE001
                     pass
             logger.warning("mcp.execute.error tool=%s error=%r", tool_name, e)
+            # Record the failed step as an error node in the context graph.
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "error", error=str(e))
             return json.dumps({
                 "status": "error",
                 "output": f"Error executing tool '{tool_name}': {str(e)}",
@@ -509,6 +548,12 @@ def list_runtime_tools() -> str:
                 # writes (and need operator approval) before it calls execute_tool.
                 "risk": get_tool_risk(name),
                 "scope": get_tool_scope(name),
+                # Explicit, authoritative write/read classification (the SAME rule
+                # the gate uses: is_write_risk over the tool's risk tier). Agents
+                # filter on this so a read-only tool (web_search, search_arxiv …)
+                # is never declared as a write_scope, and the approval UI only
+                # holds genuine writes. Reads run ungated.
+                "write": is_write_risk(get_tool_risk(name)),
             }
         )
 
@@ -850,11 +895,40 @@ async def get_index(request):
     return HTMLResponse(_DASHBOARD_HTML)
 
 
+async def get_sandbox_status(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse(sandbox_status())
+
+
+async def get_sandbox_events(request):
+    from starlette.responses import JSONResponse
+    limit = int(request.query_params.get("limit", "50"))
+    return JSONResponse(sandbox_events(limit))
+
+
 # FastMCP builds the Starlette SSE app (routes: GET /sse, POST /messages/).
 # We attach the human-facing dashboard at GET / on the same app. This is the
 # object uvicorn serves: `uvicorn awcp.mcp.server:app`.
 app = mcp.sse_app()
 app.router.routes.append(Route("/", endpoint=get_index, methods=["GET"]))
+app.router.routes.append(Route("/sandbox/status", endpoint=get_sandbox_status, methods=["GET"]))
+app.router.routes.append(Route("/sandbox/events", endpoint=get_sandbox_events, methods=["GET"]))
+
+# Starlette dropped add_event_handler()/on_shutdown in favor of the lifespan
+# context manager, so we wrap FastMCP's default lifespan to also tear down
+# the sandbox container when uvicorn shuts the server down.
+_inner_lifespan = app.router.lifespan_context
+
+
+@contextlib.asynccontextmanager
+async def _lifespan_with_sandbox_cleanup(app_):
+    async with _inner_lifespan(app_) as state:
+        yield state
+    # close_sandbox() blocks on the dedicated sandbox loop; run it off this loop.
+    await asyncio.to_thread(close_sandbox)
+
+
+app.router.lifespan_context = _lifespan_with_sandbox_cleanup
 
 
 if __name__ == "__main__":
