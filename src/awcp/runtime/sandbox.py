@@ -24,20 +24,67 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import Host, Volume
 
+from awcp.runtime import sandbox_db
+
 logger = logging.getLogger(__name__)
 
 # Recent sandbox lifecycle + tool-call events, newest first — the UI's "Sandbox"
-# page renders this as a timeline. In-memory only (mirrors the radar's _EVENTS
-# ring buffer pattern); resets when the MCP server process restarts.
+# page renders this as a timeline. The in-memory ring keeps the live view fast;
+# every event is ALSO written through to Postgres (ops.sandbox_events) so the
+# timeline survives an MCP server restart — without the DB the ring alone resets
+# when the process exits and the Sandbox page goes blank after Ctrl+C. Fail-open:
+# when no DB is configured/reachable this degrades to the old in-memory behaviour.
 _EVENTS: deque = deque(maxlen=int(os.getenv("AWCP_SANDBOX_EVENTS_MAX", "200")))
+
+# Lazy one-shot DB init guarded by a cheap flag so the hot record_event path
+# doesn't take sandbox_db's lock on every call. sandbox_db.init() is itself
+# idempotent; this just avoids re-entering it. The MCP server also calls
+# sandbox_db.init() at startup, so this is belt-and-suspenders for other entry
+# points (stdio mode, tests).
+_db_inited = False
+
+
+def _ensure_db() -> None:
+    global _db_inited
+    if not _db_inited:
+        _db_inited = True
+        try:
+            sandbox_db.init()
+        except Exception:  # noqa: BLE001 — persistence is best-effort, never fatal
+            logger.debug("sandbox_db.init() failed — events stay in-memory only", exc_info=True)
 
 
 def record_event(kind: str, detail: str = "", **extra) -> None:
-    _EVENTS.appendleft({"ts": time.time(), "kind": kind, "detail": detail, **extra})
+    _ensure_db()
+    ts = time.time()
+    _EVENTS.appendleft({"ts": ts, "kind": kind, "detail": detail, **extra})
+    # Write-through to Postgres so the timeline outlives the process. No-op when
+    # the DB is unavailable (the in-memory ring above is the fallback).
+    sandbox_db.record(kind, detail=detail, event_ts=ts, payload=extra or None)
 
 
 def sandbox_events(limit: int = 50) -> list[dict]:
-    return list(_EVENTS)[: max(1, min(limit, _EVENTS.maxlen or 200))]
+    """Newest-first timeline. Durable Postgres history is the source of truth when
+    the DB is enabled; the in-memory ring is merged in (and is the sole fallback
+    when the DB is unavailable) so an event whose write-through hiccupped is never
+    dropped from the live view."""
+    _ensure_db()
+    limit = max(1, min(limit, _EVENTS.maxlen or 200))
+    mem = list(_EVENTS)
+    db_rows = sandbox_db.recent(limit) if sandbox_db.enabled() else None
+    if not db_rows:
+        return mem[:limit]
+    # Merge durable history + live ring, dedup on the (near-unique) event ts plus
+    # kind/detail, newest first. Both stores share the same event shape.
+    seen: set = set()
+    merged: list[dict] = []
+    for e in sorted([*db_rows, *mem], key=lambda x: x.get("ts") or 0.0, reverse=True):
+        key = (e.get("ts"), e.get("kind"), e.get("detail"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(e)
+    return merged[:limit]
 
 WORKSPACE_HOST_DIR = os.getenv(
     "AWCP_WORKSPACE_DIR",

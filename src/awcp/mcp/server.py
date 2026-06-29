@@ -922,6 +922,11 @@ _inner_lifespan = app.router.lifespan_context
 
 @contextlib.asynccontextmanager
 async def _lifespan_with_sandbox_cleanup(app_):
+    # Bring up the durable sandbox-event store (Postgres) before serving so the
+    # Sandbox page's timeline survives a restart. Fail-open: a no-op when no DB is
+    # configured/reachable — the in-memory ring still works exactly as before.
+    from awcp.runtime import sandbox_db
+    await asyncio.to_thread(sandbox_db.init)
     async with _inner_lifespan(app_) as state:
         yield state
     # close_sandbox() blocks on the dedicated sandbox loop; run it off this loop.
