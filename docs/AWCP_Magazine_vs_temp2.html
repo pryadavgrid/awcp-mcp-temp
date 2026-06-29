@@ -151,18 +151,18 @@
     <span class="lg"><span class="badge t" style="font-size:10px;padding:1px 7px">★ new</span> Added this session</span>
   </div>
   <div style="background:var(--card);border:1px solid var(--hair);border-left:6px solid var(--green);border-radius:14px;padding:18px 22px;margin:22px 0 10px;box-shadow:var(--shadow);display:flex;align-items:center;gap:24px;flex-wrap:wrap">
-    <div style="font-size:48px;font-weight:800;color:var(--green);line-height:1">≈59%</div>
+    <div style="font-size:48px;font-weight:800;color:var(--green);line-height:1">≈70%</div>
     <div style="flex:1;min-width:240px">
       <div style="font-weight:700;font-size:15px">of the AWCP magazine is built in temp2 so far</div>
-      <div style="font-size:12px;color:var(--ink2);margin-top:4px">Mean of the six Operating-Model steps (100 · 65 · 45 · 100 · 40 · 0). The governance spine is done; the magazine's distinctive <strong>Step 03</strong> (OPA + expiring approval tokens), <strong>Step 05</strong> (durable Evidence Ledger), and <strong>Step 06</strong> (patch generation) are the bulk of what remains. Extensions beyond the magazine are not counted toward this score.</div>
-      <div class="bar" style="margin-top:9px;height:9px"><i class="g" style="width:59%"></i></div>
+      <div style="font-size:12px;color:var(--ink2);margin-top:4px">Mean of the six Operating-Model steps (100 · 65 · 85 · 100 · 70 · 0). The governance spine is done, and the magazine's two distinctive capabilities have since landed: <strong>Step 03</strong> now has the OPA gate adapter, <strong>expiring approval tokens</strong> and policy-as-code (the operator policy), and <strong>Step 05</strong> now has a durable, hash-chained <strong>Evidence Ledger</strong> in Postgres. What remains is <strong>Step 06</strong> (patch generation), ingesting in-flight foreign workflows (Step 02), and checkpoint/safe-resume replay (Step 05). Extensions beyond the magazine are not counted toward this score.</div>
+      <div class="bar" style="margin-top:9px;height:9px"><i class="g" style="width:70%"></i></div>
     </div>
   </div>
   <div class="score">
-    <div class="scard g"><div class="n">2</div><div class="l">Steps done</div></div>
-    <div class="scard a"><div class="n">3</div><div class="l">Steps partial</div></div>
+    <div class="scard g"><div class="n">3</div><div class="l">Steps done</div></div>
+    <div class="scard a"><div class="n">2</div><div class="l">Steps partial</div></div>
     <div class="scard r"><div class="n">1</div><div class="l">Step missing</div></div>
-    <div class="scard t"><div class="n">8</div><div class="l">Major extensions</div></div>
+    <div class="scard t"><div class="n">11</div><div class="l">Major extensions</div></div>
   </div>
 </div></header>
 
@@ -176,12 +176,12 @@
       <div class="pct">100%</div><div class="bar"><i class="g" style="width:100%"></i></div></div>
     <div class="stage a"><div class="step">STEP 02</div><h4>Orchestrate Workflows</h4><span class="badge a">Partial</span>
       <div class="pct">~65%</div><div class="bar"><i class="a" style="width:65%"></i></div></div>
-    <div class="stage a"><div class="step">STEP 03</div><h4>Gate Write Actions</h4><span class="badge a">Partial</span>
-      <div class="pct">~45%</div><div class="bar"><i class="a" style="width:45%"></i></div></div>
+    <div class="stage g"><div class="step">STEP 03</div><h4>Gate Write Actions</h4><span class="badge g">Built <span class="badge t" style="font-size:8px;padding:1px 5px">★ new</span></span>
+      <div class="pct">~85%</div><div class="bar"><i class="g" style="width:85%"></i></div></div>
     <div class="stage g"><div class="step">STEP 04</div><h4>Degrade Autonomy Gracefully</h4><span class="badge g">Complete +Ext</span>
       <div class="pct">100%</div><div class="bar"><i class="g" style="width:100%"></i></div></div>
-    <div class="stage a"><div class="step">STEP 05</div><h4>Replay &amp; Recover</h4><span class="badge a">Partial</span>
-      <div class="pct">~40%</div><div class="bar"><i class="a" style="width:40%"></i></div></div>
+    <div class="stage a"><div class="step">STEP 05</div><h4>Replay &amp; Recover</h4><span class="badge a">Ledger built <span class="badge t" style="font-size:8px;padding:1px 5px">★ new</span></span>
+      <div class="pct">~70%</div><div class="bar"><i class="a" style="width:70%"></i></div></div>
     <div class="stage r"><div class="step">STEP 06</div><h4>Generate Instrumentation Patches</h4><span class="badge r">Not built</span>
       <div class="pct">~0%</div><div class="bar"><i class="r" style="width:4%"></i></div></div>
   </div>
@@ -212,20 +212,25 @@
       <div class="lbl"><b>② Control Plane — Agent Radar :8090</b><span>the governance core</span></div>
       <div class="arow c4">
         <div class="anode g"><h5>Detection<span class="st g">built</span></h5><p>scanner (psutil / lsof), framework-agnostic</p></div>
-        <div class="anode g"><h5>Registry + Persistence<span class="st g">built</span></h5><p>in-memory + JSON, scan reconcile, prune</p></div>
-        <div class="anode g"><h5>Onboarding &amp; Quarantine<span class="st g">built</span></h5><p>3 hooks observed-in-execution · scope-gated (Step 01)</p></div>
+        <div class="anode g"><h5>Registry + Persistence<span class="st g">built</span></h5><p>in-memory + <strong>Postgres</strong> (no JSON) · scan reconcile · <strong>scan/self dedup</strong> <span class="badge t" style="font-size:8px">★ new</span></p></div>
+        <div class="anode g"><h5>Onboarding &amp; Quarantine<span class="st g">built</span></h5><p>3 hooks observed-in-execution · scope-gated · <strong>AgentCard fetch</strong> step <span class="badge t" style="font-size:8px">★ new</span></p></div>
         <div class="anode g"><h5>Write-Action Gate<span class="st g">built</span></h5><p>quarantine · declared-scope · ladder position</p></div>
       </div>
       <div class="arow c4" style="margin-top:8px">
         <div class="anode g"><h5>Degradation Ladder<span class="st g">built</span></h5><p>6 rungs + live directives, by risk (Step 04)</p></div>
         <div class="anode g"><h5>Token Control · Laminar<span class="st g">built</span></h5><p>ledger · budget · breach → degrade</p></div>
-        <div class="anode r"><h5>OPA + Approval Tokens<span class="st r">left</span></h5><p>policy-as-code &amp; expiring tokens (Step 03)</p></div>
-        <div class="anode r"><h5>Evidence Ledger<span class="st r">left</span></h5><p>durable replay ledger + checkpoints (Step 05)</p></div>
+        <div class="anode g"><h5>OPA + Approval Tokens<span class="st g">built</span> <span class="badge t" style="font-size:8px">★ new</span></h5><p>OPA gate adapter · <strong>expiring approval tokens</strong> · 4-value gate (Step 03)</p></div>
+        <div class="anode g"><h5>Evidence Ledger<span class="st g">built</span> <span class="badge t" style="font-size:8px">★ new</span></h5><p>durable <strong>hash-chained</strong> ledger + policy_decisions / degradation / token ledgers in Postgres (Step 05)</p></div>
       </div>
-      <div class="arow c3" style="margin-top:8px">
+      <div class="arow c4" style="margin-top:8px">
+        <div class="anode g"><h5>Operator Policy<span class="st g">built</span> <span class="badge t" style="font-size:8px">★ new</span></h5><p>JSON policy-as-code: per-agent / tool / skill allow·deny + risk override (Step 03)</p></div>
+        <div class="anode g"><h5>AgentCard (A2A)<span class="st t">ext</span> <span class="badge t" style="font-size:8px">★ new</span></h5><p>self-published skills manifest → registry enrichment + skill-based policy</p></div>
         <div class="anode t"><h5>Hard-Stop Enforcement<span class="st t">ext</span></h5><p>SIGSTOP · remote webhook · crash-recovery journal</p></div>
-        <div class="anode g"><h5>Events / Audit Log<span class="st g">built</span></h5><p>recent governance-decisions ring</p></div>
+        <div class="anode g"><h5>Events / Audit Log<span class="st g">built</span></h5><p>recent ring + durable mirror to canonical schema</p></div>
+      </div>
+      <div class="arow c2" style="margin-top:8px">
         <div class="anode r"><h5>Instrumentation Patches<span class="st r">left</span></h5><p>auto telemetry/flag/policy PRs (Step 06)</p></div>
+        <div class="anode a"><h5>Checkpoints / safe-resume replay<span class="st a">partial</span></h5><p>ledger has context_hash / resume / rollback columns; replay-resume logic not wired (Step 05)</p></div>
       </div>
     </div>
     <div class="aflow">▼ drives governed execution</div>
@@ -338,27 +343,29 @@
   <h2 class="section"><span class="n">3</span>Gate Write Actions</h2>
   <p class="lead">The gate already stops quarantined and degraded agents from making writes. What the magazine adds on top of that is a narrower, time-limited permission system for high-risk actions. Even a fully trusted, fully onboarded agent should not be able to make a high-risk write without also holding a specific short-lived token issued for that exact action, at that exact point in the workflow, that expires after a few minutes and can only be used once. This prevents an agent from accumulating permissions, replaying an old approval for a different action, or using a legitimate token for something broader than it was issued for. OPA (Open Policy Agent) is the magazine's proposed engine for writing those policy rules as code, so they can be changed without redeploying the radar.</p>
   <div class="detail">
-    <div class="head"><span class="num a">03</span><h3>Write-action gate · Approval tokens</h3><span class="pills">OPA · Approval Tokens · Tool Policies</span></div>
+    <div class="head"><span class="num g">03</span><h3>Write-action gate · Approval tokens · Policy-as-code</h3><span class="pills">OPA · Approval Tokens · Tool Policies</span></div>
     <div class="body">
       <div class="col">
         <h5>Magazine asks</h5>
         <div class="mag">Evaluate every state-changing tool call against policy. High-risk actions pause until a <strong>narrow, expiring approval token</strong> is issued for the relevant workflow step and branch.</div>
-        <h5>Built in temp2</h5>
+        <h5>Built in temp2 <span class="badge g" style="font-size:9px">now built</span></h5>
         <ul class="chk">
-          <li class="done"><strong>Write-action gate</strong> — <code>policy.evaluate_action</code>: reads allowed, writes denied for quarantined / degraded / out-of-position agents.</li>
+          <li class="done"><strong>Write-action gate</strong> — <code>policy.evaluate_action</code>: reads allowed, writes denied for quarantined / degraded / out-of-position / out-of-scope agents.</li>
           <li class="done"><strong>Position-based ladder gating</strong> — deny logic keyed on the agent's autonomy rung, by risk, nothing hardcoded.</li>
+          <li class="done"><strong>OPA gate adapter</strong> <span class="badge t" style="font-size:8px">★ new</span> — <code>radar/opa.py</code> is the Policy Decision Point: when <code>AWCP_OPA_URL</code> is set the gate consults OPA (<code>data.awcp.gate</code>); any OPA error/timeout falls back fail-secure to <code>policy.evaluate_action</code>. Decisions carry the magazine's 4-value vocabulary (<code>auto_authorized · awaiting_token · awaiting_operator · denied</code>).</li>
+          <li class="done"><strong>Expiring approval tokens</strong> <span class="badge t" style="font-size:8px">★ new</span> — <code>radar/tokens.py</code> + <code>governance.approval_tokens</code>: a high-risk / token-tiered write returns <code>awaiting_token</code> and issues a narrow, branch-scoped, single-use, expiring token; the agent presents it back at the gate where it is verified &amp; consumed (<code>verify_and_consume</code>). <code>awaiting_operator</code> holds for human sign-off (<code>decide_gate_token</code>).</li>
+          <li class="done"><strong>Per-tool policies (SLM PDP)</strong> <span class="badge t" style="font-size:8px">★ new</span> — the hidden <strong>OPA agent</strong> (<code>opa_agent/</code>) tiers every tool call (low·medium·high·severe) and blocks at/above an operator-set threshold; Rego under <code>opa_agent/policies/awcp</code>.</li>
+          <li class="done"><strong>Operator policy (policy-as-code)</strong> <span class="badge t" style="font-size:8px">★ new</span> — a JSON document (Radar Policy tab → <code>governance.operator_policy</code>) sets per-agent / per-tool / per-skill <code>allow·deny</code> + <code>risk</code> overrides, applied live at the gate without redeploying. Editable as text, exactly the OPA spirit.</li>
         </ul>
       </div>
       <div class="col">
         <h5>Left to build</h5>
         <ul class="chk">
-          <li class="miss"><strong>OPA / policy-as-code</strong> — the gate is imperative; no Rego policy engine. (A separate <code>awcp-opa</code> prototype exists but is NOT integrated.)</li>
-          <li class="miss"><strong>Expiring approval tokens</strong> — the magazine's signature mechanism for high-risk writes is absent; no human-approval token flow.</li>
-          <li class="miss"><strong>Per-tool policies</strong> — no fine-grained per-tool / per-scope policy rules.</li>
-          <li class="miss"><strong>Human-approval surface</strong> — no operator approval issuance for new write scopes / cross-system writes.</li>
+          <li class="part"><strong>Deeper Rego authoring</strong> — OPA enforcement is env-gated (off ⇒ the Python PDP decides); the shipped Rego covers the gate + tool tiers, but rich per-scope rule sets are thin.</li>
+          <li class="part"><strong>Operator-approval UI</strong> — the <code>awaiting_operator</code> token flow + decide endpoints exist; a dedicated operator approval surface is API-level, not a polished UI.</li>
         </ul>
-        <div class="files">radar/policy.py (evaluate_action) · radar/api.py (/agents/&#123;id&#125;/gate) &nbsp;|&nbsp; gap: OPA + approval-token issuer/validator</div>
-        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: today a gate response of "allowed" means the agent is free to proceed with any write it has declared in its scope. The approval-token layer adds a second check on top: even an agent in good standing must present a narrow, expiring pass for that specific write. An approval token is just a short-lived signed string — the gate issues it, the agent sends it with the write request, and the gate validates it hasn't expired or been used before. OPA would let operators edit those policy rules in a text file without touching the Python code.</p>
+        <div class="files">radar/policy.py (evaluate_action) · radar/opa.py (OPA PDP + 4-value gate) · radar/tokens.py · radar/db.py (issue/verify/decide gate tokens) · radar/api.py (gate, _resolve_approval, /approve) · radar/operator_policy.py · opa_agent/* · governance.approval_tokens / operator_policy / tool_tiers</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: a gate "allowed" is no longer the end of the story. A high-risk write now returns <em>awaiting_token</em> — the gate mints a short-lived, single-use, branch-scoped pass; the agent presents it back and the gate verifies it hasn't expired or been re-used. Operators shape the rules behind all this as data: the OPA Rego policies, and the JSON operator policy (allow/deny + risk per agent, tool, or declared skill) — both editable without touching Python.</p>
       </div>
     </div>
   </div>
@@ -406,24 +413,24 @@
       <div class="col">
         <h5>Magazine asks</h5>
         <div class="mag">A replayable ledger with step history, context hashes, degradation state, and safe resume points, so failed branches recover without restarting the full workflow. Evidence = workflow identity, actor, policy result, approval token, tool call, context-snapshot hash, degradation state, replay trace, rollback pointer.</div>
-        <h5>Built in temp2</h5>
+        <h5>Built in temp2 <span class="badge g" style="font-size:9px">ledger now built</span></h5>
         <ul class="chk">
-          <li class="done"><strong>Temporal history</strong> — full, replayable workflow/activity event history.</li>
-          <li class="done"><strong>Recent-decisions log</strong> — in-memory ring of governance events (onboard/gate/degrade/token/telemetry).</li>
-          <li class="part"><strong>Laminar JSONL trail</strong> — optional per-call token evidence (when <code>LMNR_LEDGER_PATH</code> set).</li>
+          <li class="done"><strong>Durable, hash-chained Evidence Ledger</strong> <span class="badge t" style="font-size:8px">★ new</span> — <code>evidence.ledger</code> in Postgres: append-only, tamper-evident (<code>prev_hash</code>/<code>row_hash</code> sha256 chain), with workflow id, actor, event type, policy result, degradation state, and a payload per row. <code>radar/db.py</code> mirrors the audit-worthy subset of every governance decision here on the live path.</li>
+          <li class="done"><strong>Canonical decision + economics tables</strong> <span class="badge t" style="font-size:8px">★ new</span> — gate denials → <code>governance.policy_decisions</code>; autonomy changes → <code>governance.degradation_events</code>; token spend → <code>evidence.token_ledger</code>; approvals → <code>governance.approval_tokens</code> — all in the magazine's canonical schema, monthly-partitioned.</li>
+          <li class="done"><strong>Temporal history + workflow mirror</strong> — full replayable Temporal history, plus a durable app-side copy of every activity in <code>ops.workflow_events</code> / <code>ops.onboarding_runs</code>.</li>
+          <li class="done"><strong>Recent-decisions log</strong> — in-memory ring of governance events (live audit view over the durable ledger).</li>
           <li class="ext"><strong>Crash-recovery journal</strong> — durable record of applied stops, replayed on restart.</li>
         </ul>
       </div>
       <div class="col">
         <h5>Left to build</h5>
         <ul class="chk">
-          <li class="miss"><strong>Unified Evidence Ledger</strong> — no single durable ledger tying identity + actor + policy result + approval token + tool call + context-hash + degradation state + replay trace + rollback pointer. Today these live in fragments.</li>
-          <li class="miss"><strong>Context-snapshot hashes</strong> — not captured.</li>
-          <li class="miss"><strong>Checkpoints / safe resume points</strong> — no branch-level checkpoint or rollback-pointer system.</li>
-          <li class="miss"><strong>Evidence packets / export</strong> — no operator-facing evidence bundle.</li>
+          <li class="part"><strong>Context-snapshot hashes at checkpoints</strong> — <code>evidence.ledger</code> has the <code>context_hash</code> / <code>resume_pointer</code> / <code>rollback_pointer</code> columns, but they aren't yet populated per workflow checkpoint.</li>
+          <li class="part"><strong>Safe-resume / branch checkpoints</strong> — the ledger records the timeline, but there's no resume-from-step-N replay or branch-level rollback logic yet.</li>
+          <li class="miss"><strong>Evidence packets / export</strong> — no operator-facing evidence-bundle export (the data is now queryable in one schema, but not packaged).</li>
         </ul>
-        <div class="files">Temporal UI/history · radar/api.py (/events ring) · laminar/ledger.py (JSONL) &nbsp;|&nbsp; gap: durable unified Evidence Ledger + checkpoints</div>
-        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: if an audit today asks "show me every action agent X took last Thursday, prove what the policy said at each step, and confirm it is safe to re-run from step three" — you would have to manually cross-reference Temporal's workflow history UI, the in-memory events ring on the radar, and optionally some JSONL log files. The Evidence Ledger puts all of that in one place with a cryptographic proof (the context hash) that the state at each checkpoint is exactly what it was when the agent ran it.</p>
+        <div class="files">observability/init-db/02-schema.sql (evidence.ledger · policy_decisions · degradation_events · token_ledger) · radar/db.py (record + hash chain + routing) · radar/api.py (/events) &nbsp;|&nbsp; gap: checkpoint hashes + resume replay + export</div>
+        <p style="font-size:12px;color:var(--ink2);margin-top:10px">In plain terms: the "show me every action agent X took, with the policy decision at each step" half is now real — it's one hash-chained ledger in Postgres, not scattered fragments. What's left is the "safe to re-run from step three" half: populating a context hash at each checkpoint and wiring resume/rollback so a failed branch recovers without restarting the whole workflow.</p>
       </div>
     </div>
   </div>
@@ -459,11 +466,11 @@
   <h2 class="section"><span class="n">◆</span>Core stack discipline — component status</h2>
   <p class="lead">Beneath the six operating-model steps, the magazine defines a set of fundamental building blocks that any AWCP implementation must have. These are not steps in a sequence — they are permanent infrastructure. Think of the six steps as the workflow the platform runs, and these as the structural components the workflow depends on. If one of these is missing or partial, every step that relies on it is limited.</p>
   <div class="grid">
-    <div class="gcard g"><h4>Identity <span class="badge g">Done</span></h4><p>Registry, owner, agent_id, runtime, version.</p></div>
-    <div class="gcard a"><h4>Policy <span class="badge a">Partial</span></h4><p>Imperative gate present; OPA / policy-as-code absent.</p></div>
-    <div class="gcard r"><h4>Expiring approval tokens <span class="badge r">Missing</span></h4><p>Not built — the magazine's high-risk-write mechanism.</p></div>
+    <div class="gcard g"><h4>Identity <span class="badge g">Done</span></h4><p>Registry, owner, agent_id, runtime, version, + AgentCard skills.</p></div>
+    <div class="gcard g"><h4>Policy <span class="badge g">Done</span></h4><p>Gate + OPA adapter + JSON operator policy-as-code (agent/tool/skill).</p></div>
+    <div class="gcard g"><h4>Expiring approval tokens <span class="badge g">Done</span></h4><p>Narrow, single-use, expiring tokens — issue · verify · operator-decide.</p></div>
     <div class="gcard g"><h4>Durable orchestration <span class="badge g">Done</span></h4><p>Temporal workflows, activities, workers, queues.</p></div>
-    <div class="gcard r"><h4>Evidence ledger <span class="badge r">Missing</span></h4><p>Fragments only (Temporal history, events ring, JSONL).</p></div>
+    <div class="gcard a"><h4>Evidence ledger <span class="badge a">Built · checkpoints left</span></h4><p>Durable hash-chained ledger in Postgres; resume/rollback replay pending.</p></div>
     <div class="gcard g"><h4>Observability hooks <span class="badge g">Done</span></h4><p>OTel traces/metrics/logs + laminar token/cost spans.</p></div>
   </div>
 
@@ -482,19 +489,24 @@
       <li class="ext"><strong>Self-hosted Laminar observability platform</strong> <span class="badge t">★ new</span> — full lmnr.ai stack (Postgres · ClickHouse · Quickwit · query-engine · app-server · Next.js frontend) added to <code>observability/docker-compose.yml</code> alongside the existing Grafana/Tempo/Loki services on the shared <code>awcp-obs</code> network; host ports remapped to avoid conflicts. OTLP gRPC ingestion at :8881; web UI at :5667. Span export from <code>awcp.laminar</code> is now fully end-to-end to the local platform.</li>
       <li class="ext"><strong>One-command stack runner</strong> <span class="badge t">★ new</span> — <code>bash scripts/run_everything.sh</code> (the single launcher) brings the whole platform up behind one port (the gateway, <code>:8000</code>) in dependency order: venv → Docker telemetry stack + Postgres → Temporal → Ollama → MCP → React UI → gateway (which runs the onboarding/execution workers in-process), with graceful Ctrl+C shutdown of everything it started.</li>
       <li class="ext"><strong>Radar Laminar key panel</strong> <span class="badge t">★ new</span> — secure in-browser API-key entry in the Agent Radar UI (:8090). Key stored in <code>sessionStorage</code> only, never sent to the server, never shown in plain text after entry. Hides the input after saving and shows an "Open Laminar UI →" button; "change key" restores the form.</li>
+      <li class="ext"><strong>AgentCard (A2A) description layer</strong> <span class="badge t">★ new</span> — agents publish a standard <code>/.well-known/agent.json</code> with a typed <strong>skills</strong> list; the radar fetches it (onboarding step 1 · scanner · <code>register-card</code> · refresh), stores it on the agent (Postgres columns, self-applied migration), and exposes <code>?skill=</code> filtering + <code>card_summary</code>. Governance-safe: card-declared scopes/risk are advisory only, never enforced. Not in the magazine — pure registry enrichment.</li>
+      <li class="ext"><strong>Skill-based operator policy</strong> <span class="badge t">★ new</span> — the operator policy can match agents by a card-declared <strong>skill</strong> (tighten-only: deny or raise risk, never whitelist), linking the AgentCard layer to the gate.</li>
+      <li class="ext"><strong>SLM tool-tier PDP (OPA agent)</strong> <span class="badge t">★ new</span> — a hidden service (<code>opa_agent/</code>, :8105) that uses a small language model to reason each tool call's risk tier and block at/above an operator slider — a temp2 take on per-tool policy beyond the magazine's static rules.</li>
+      <li class="ext"><strong>Scan/self de-duplication</strong> <span class="badge t">★ new</span> — a scanned process row is folded into its self-registered agent (matched by pid, else shared endpoint / card URL), so one running agent shows as one registry row instead of two.</li>
     </ul>
   </div>
 
   <div class="note" style="margin-bottom:14px">
-    <strong>What is still missing — in plain terms.</strong> The three biggest gaps follow a natural build order. First, the approval-token gate (Step 3) — this is self-contained and can be built without waiting for anything else. An approval token is a short-lived signed string: the gate issues it, the agent sends it with the write, the gate validates it has not expired and has not already been used. OPA makes the rules behind that decision editable as text files. Second, the Evidence Ledger (Step 5) — most of the raw data already exists across Temporal history, the events ring, and optional JSONL files; the work is joining those sources into one queryable record and recording a context hash at each step so replay is safe. Third, instrumentation-patch generation (Step 6) — the hardest to automate, and the one that benefits most from the ledger already existing, since the ledger tells you exactly which hooks fired and which didn't. The teal extensions (gateway, pre-execution check, SIGSTOP, Laminar platform) are all working and do not block any of these three gaps from being closed.
+    <strong>What is still missing — in plain terms.</strong> Two of the three former big gaps have since closed. <strong>Step 3</strong> now has the OPA gate adapter, expiring single-use approval tokens, and policy-as-code (OPA Rego + the JSON operator policy over agents/tools/skills). <strong>Step 5</strong> now has a durable, hash-chained Evidence Ledger in Postgres tying identity · actor · policy result · tool call · degradation state together (with the canonical policy_decisions / degradation / token tables). What remains: <strong>(a)</strong> instrumentation-patch generation (Step 6) — still entirely unbuilt; <strong>(b)</strong> the replay half of Step 5 — populating a context hash at each checkpoint and wiring resume/rollback so a failed branch recovers without restarting; and <strong>(c)</strong> adopting in-flight workflows from foreign runtimes (Step 2). The teal extensions are all working and don't block any of these.
   </div>
   <div class="note">
-    <strong>Reading the scorecard.</strong> The <em>governance spine</em> the magazine cares about — register/quarantine (1), durable orchestration (2), graceful degradation (4) — is largely <span style="color:var(--green);font-weight:700">done</span>. The biggest <span style="color:var(--red);font-weight:700">gaps</span> are the magazine's two most distinctive capabilities: <strong>expiring approval tokens + OPA (Step 3)</strong> and a <strong>durable Evidence Ledger + checkpoints (Step 5)</strong>, plus <strong>instrumentation-patch generation (Step 6)</strong>. Most recent effort went into a forceful token-enforcement layer that is genuinely useful but sits <span style="color:var(--teal);font-weight:700">beyond</span> the magazine's prescribed, cooperative, policy-based model.
+    <strong>Reading the scorecard.</strong> The <em>governance spine</em> — register/quarantine (1), durable orchestration (2), graceful degradation (4) — and now the magazine's two distinctive capabilities, <strong>OPA gate + expiring approval tokens (Step 3)</strong> and a <strong>durable hash-chained Evidence Ledger (Step 5)</strong>, are <span style="color:var(--green);font-weight:700">built</span>. The remaining <span style="color:var(--red);font-weight:700">gaps</span> are <strong>instrumentation-patch generation (Step 6)</strong>, <strong>checkpoint/safe-resume replay (the rest of Step 5)</strong>, and <strong>ingesting existing foreign workflows (Step 2)</strong>. Recent effort also added a policy-injection + AgentCard layer and a forceful token-enforcement layer that sit partly <span style="color:var(--teal);font-weight:700">beyond</span> the magazine's cooperative model.
   </div>
 
   <footer>
-    AWCP Magazine ⟷ awcp-mcp-temp2 build audit · derived from docs/Agent-Workforce-Control-Plane-Magazine.html and the live src/awcp tree · percentages are directional estimates, not measured coverage
-    <br>Session additions flagged <span style="color:var(--teal);font-weight:700">★ new</span>: pre-execution budget pre-check · self-hosted Laminar platform (:5667) · one-command stack runner · radar API key panel · extensions count: 4 → 8
+    AWCP Magazine ⟷ awcp-mcp-temp build audit · derived from docs/Agent-Workforce-Control-Plane-Magazine.html and the live src/awcp tree · percentages are directional estimates, not measured coverage
+    <br>Now built since the prior snapshot: OPA gate + <span style="color:var(--green);font-weight:700">expiring approval tokens</span> (Step 3) · durable <span style="color:var(--green);font-weight:700">hash-chained Evidence Ledger</span> in Postgres (Step 5) · Postgres-only persistence · score ≈59% → <span style="color:var(--green);font-weight:700">≈70%</span>
+    <br>Extensions flagged <span style="color:var(--teal);font-weight:700">★ new</span> now include: AgentCard (A2A) · skill-based operator policy · SLM tool-tier PDP · scan/self dedup · pre-execution budget pre-check · self-hosted Laminar (:5667) · one-command runner · radar API key panel — extensions count: 8 → 11
   </footer>
 </div>
 </body>

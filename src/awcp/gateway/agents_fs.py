@@ -132,3 +132,4 @@ def start(agent: dict) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
