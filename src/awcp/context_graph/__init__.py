@@ -14,7 +14,11 @@ Public surface:
   * ``client.record_checkpoint(...)`` — record a node over HTTP (other processes)
   * ``router``                  — the FastAPI APIRouter to mount on the radar
   * ``graph_for_workflow(...)`` / ``nodes_for_agent(...)`` / ``recent_nodes(...)`` — reads
-  * models: ``ContextNode``, ``ContextGraph``, ``CheckpointRequest``
+  * ``manager``                 — the smart-memory layer (relevance / staleness /
+    token-budget working set) reasoning over the trail
+  * ``memory``                  — optional Letta long-term recall backend (fail-open)
+  * models: ``ContextNode``, ``ContextGraph``, ``CheckpointRequest``,
+    ``ScoredNode``, ``WorkingSet``, ``StaleReport``, ``RelevanceReport``
 """
 
 from __future__ import annotations
@@ -25,6 +29,12 @@ from awcp.context_graph.models import (
     CheckpointRequest,
     ContextGraph,
     ContextNode,
+    MemoryRecallRequest,
+    MemoryStatus,
+    RelevanceReport,
+    ScoredNode,
+    StaleReport,
+    WorkingSet,
 )
 from awcp.context_graph.store import (
     graph_for_workflow,
@@ -33,7 +43,7 @@ from awcp.context_graph.store import (
     recent_nodes,
 )
 from awcp.context_graph.verify import verify_chain
-from awcp.context_graph import graph_store
+from awcp.context_graph import graph_store, manager, memory
 
 __all__ = [
     "router",
@@ -43,8 +53,16 @@ __all__ = [
     "recent_nodes",
     "verify_chain",
     "graph_store",
+    "manager",
+    "memory",
     "CheckpointRequest",
     "ContextGraph",
     "ContextNode",
     "ChainVerification",
+    "ScoredNode",
+    "WorkingSet",
+    "StaleReport",
+    "RelevanceReport",
+    "MemoryStatus",
+    "MemoryRecallRequest",
 ]

@@ -97,6 +97,11 @@ execute_tool()
 | `GET  /context-graph/neo4j/graph`      | node-link graph (nodes+edges) for visualization |
 | `POST /context-graph/neo4j/backfill`   | mirror existing ledger checkpoints into Neo4j (+ A2A skills) |
 | `POST /context-graph/neo4j/sync-cards` | project agents' A2A AgentCard skills into the graph |
+| `GET  /context-graph/{workflow_id}/relevance`   | every node scored for relevance (`?focus=`) |
+| `GET  /context-graph/{workflow_id}/stale`       | which nodes are stale (aged/superseded/dead branch) |
+| `GET  /context-graph/{workflow_id}/working-set` | budget-fitted recovery context (`?budget=&focus=`) |
+| `GET  /context-graph/memory/status`    | Letta long-term-memory connection status |
+| `POST /context-graph/memory/recall`    | recall durable cross-run memories for a query |
 | `GET  /context-graph/{workflow_id}`    | one run's ordered nodes **+ edges** |
 | `GET  /context-graph`                  | recent steps across all runs (global feed) |
 
@@ -285,6 +290,91 @@ MATCH p=(:Step)-[:NEXT*]->(:Step) RETURN p LIMIT 25;       // lineage chains
 | `store.py`   | write (Postgres + ring) and read; the `resume_pointer` fix lives here |
 | `verify.py`  | whole-ledger chain verification (`GET /context-graph/verify`) |
 | `graph_store.py` | Neo4j projection — mirror checkpoints + graph queries (fail-open) |
+| `manager.py` | the **smart-memory layer**: relevance scoring, stale-context detection, token-budget working set |
+| `memory.py`  | optional **Letta** long-term-memory recall backend (REST, fail-open) |
 | `api.py`     | the FastAPI `APIRouter` (mounted into the radar router) |
 | `client.py`  | HTTP recorder for the MCP process |
 | `__init__.py`| public exports |
+
+---
+
+## 11. Context Graph Manager (the smart-memory layer)
+
+Sections 1–10 are the **receipt book** — a tamper-evident record of *what
+happened*. `manager.py` is the **Context Graph Manager**: it *reasons* over that
+trail instead of just storing it. It answers the three questions a recovering
+workflow actually has, and it writes nothing (pure reads over `store`, fail-open):
+
+1. **Relevance scoring** — `GET /context-graph/{wf}/relevance?focus=<text>`.
+   Each node gets a 0–1 score from four explainable components, normalised over
+   whichever apply:
+   - **recency** — exponential decay on age (half-life `AWCP_CTX_RECENCY_HALFLIFE_S`, 30 min);
+   - **step** — how much context a step carries (`generate`/`synthesize` > `tool` > `route` > `checkpoint`);
+   - **outcome** — blocked/denied/errored steps are down-weighted;
+   - **focus** — lexical overlap with an optional focus query (the current task).
+   The response includes the per-node `components` so a score is always explainable.
+
+2. **Stale-context detection** — `GET /context-graph/{wf}/stale`. A node is stale
+   (and must **not** seed recovery as if it were live state) when it is:
+   - **aged** — older than `AWCP_CTX_STALE_MAX_AGE_S` (1 h) relative to the newest step;
+   - **superseded** — a later *state-producing* step (`route`/`generate`/`synthesize`)
+     in the same task replaced this snapshot (tool calls are never "superseded" —
+     two searches with different queries are both valid);
+   - **dead_branch** — the step was blocked, denied, or errored, so its action never
+     took effect.
+   Each stale node carries its `stale_reasons`.
+
+3. **Token-budget management** — `GET /context-graph/{wf}/working-set?budget=<tokens>&focus=<text>`.
+   This is the headline output: the relevance-ranked, staleness-filtered slice of
+   context that actually **fits a context window**, plus the **resume anchor**. It:
+   1. scores + flags every node; 2. keeps only **fresh** nodes; 3. always seats the
+   newest fresh node first (the resume point); 4. greedily adds the rest by
+   relevance until the next would bust the budget; 5. spends any leftover budget on
+   Letta long-term recall (§12); 6. returns the selection in chronological order
+   with `used_tokens`, `dropped`, `excluded_stale`, and `resume_pointer`.
+   Token counts use **tiktoken** when present, else a chars/4 heuristic — so it
+   degrades, never breaks. The default budget is `AWCP_CTX_TOKEN_BUDGET` (4000).
+
+   > This is the *context-window* sibling of laminar's *spend* budget
+   > (`laminar/budget.py`): laminar caps how many tokens an agent may **spend** per
+   > window; the manager picks which context tokens to **carry** into a recovery.
+   > One mental model, two budgets.
+
+All weights/half-lives/thresholds are env-tunable (`AWCP_CTX_W_RECENCY`,
+`AWCP_CTX_W_STEP`, `AWCP_CTX_W_OUTCOME`, `AWCP_CTX_W_FOCUS`, …) so nothing is
+hardcoded, matching `radar/policy.py` / `laminar/budget.py`.
+
+```bash
+# what should a recovering run carry forward, in 2000 tokens, for this task?
+curl -s "localhost:8000/context-graph/<wf>/working-set?budget=2000&focus=gold%20price" | jq
+# why is some context being dropped?
+curl -s "localhost:8000/context-graph/<wf>/stale" | jq
+```
+
+## 12. Letta long-term memory (optional, fail-open)
+
+`memory.py` adds the **durable, cross-run** memory the brochure names as a partner:
+**Letta** (formerly MemGPT). Postgres stays the per-run trail and Neo4j the graph
+view; Letta is the layer that remembers across runs.
+
+- **Remember** — every recorded checkpoint is also pushed into Letta's archival
+  memory (best-effort, from `store.record_checkpoint`, right after the Neo4j mirror).
+- **Recall** — `POST /context-graph/memory/recall` (and automatically, inside
+  `working-set`) pulls the most relevant past memories for a query and folds them in
+  as `source:"memory"` nodes, so recovery can use knowledge from *earlier* runs.
+- **Additive + fail-open + config-driven.** Reached over Letta's **REST API via
+  httpx** (no SDK import to satisfy); if Letta is off, unreachable, or
+  `AWCP_LETTA_AGENT_ID` is unset, every call is a silent no-op / empty result and
+  the rest of the app is unaffected. Letta's REST surface has drifted across
+  versions, so the insert/search/health **paths** are env-overridable — adapting to
+  a new version is a config change, not a code change.
+
+Config (env): `AWCP_LETTA_ENABLED` (`true`), `AWCP_LETTA_BASE_URL`
+(`http://localhost:8283`), `AWCP_LETTA_AGENT_ID` (**required** to enable),
+`AWCP_LETTA_TOKEN`, `AWCP_LETTA_TIMEOUT` (`4`), and the `AWCP_LETTA_*_PATH` knobs.
+
+```bash
+curl -s localhost:8000/context-graph/memory/status | jq          # {enabled,connected,...}
+curl -s -X POST localhost:8000/context-graph/memory/recall \
+  -H 'content-type: application/json' \
+  -d '{"query":"gold price","limit":5}' | jq

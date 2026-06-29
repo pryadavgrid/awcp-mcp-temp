@@ -5,6 +5,7 @@ import { Panel } from '../components/Table.jsx'
 import { Badge, StatusBadge } from '../components/Badge.jsx'
 import { timeAgo } from '../lib/format.js'
 import Neo4jGraph from '../components/Neo4jGraph.jsx'
+import { neo4jBrowserUrl } from '../config.js'
 
 // The context graph = every governed step an agent took, recorded as a node in
 // evidence.ledger (event_type='checkpoint') and chained prev_hash → row_hash. We
@@ -89,93 +90,135 @@ export default function ContextGraph() {
         ))}
       </div>
 
-      {view === 'graph' && (
-        <Panel
-          title="Graph (Neo4j projection)"
-          subtitle="Agent → Step ← Workflow, with NEXT lineage — mirrored from the evidence ledger"
-        >
-          <div className="px-5 py-4">
-            <Neo4jGraph />
-          </div>
-        </Panel>
-      )}
-
-      {view === 'timeline' && (
+      {/* Shared two-column layout: the SAME runs list drives both views —
+          click a task → see its timeline OR its graph on the right. */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[20rem_1fr]">
-        {/* ── runs list ───────────────────────────────────────────────── */}
-        <Panel
-          title="Runs"
-          subtitle="One workflow per task — newest first"
-          right={<span className="text-xs text-slate-500">{runs.length}</span>}
-        >
-          <div className="max-h-[34rem] divide-y divide-slate-100 overflow-y-auto">
-            {loading && !data ? (
-              <p className="px-5 py-8 text-center text-sm text-slate-400">Loading…</p>
-            ) : runs.length === 0 ? (
-              <p className="px-5 py-8 text-center text-sm text-slate-400">
-                {notMounted
-                  ? 'Context graph endpoint not mounted.'
-                  : 'No governed steps recorded yet. Run an agent that calls a tool.'}
-              </p>
-            ) : (
-              runs.map((r) => {
-                const isActive = run && r.workflow_id === run.workflow_id
-                return (
-                  <button
-                    key={r.workflow_id}
-                    onClick={() => setSelected(r.workflow_id)}
-                    className={`flex w-full flex-col items-start gap-1 px-5 py-3 text-left transition ${
-                      isActive ? 'bg-brand-50' : 'hover:bg-slate-50'
-                    }`}
-                  >
-                    <span className="font-mono text-xs font-semibold text-brand-900 break-all">
-                      {r.workflow_id}
-                    </span>
-                    <span className="flex items-center gap-2 text-[11px] text-slate-500">
-                      <span>{r.agent}</span>
-                      <span>·</span>
-                      <span>
-                        {r.steps} step{r.steps === 1 ? '' : 's'}
-                      </span>
-                      <span>·</span>
-                      <span>{timeAgo(r.lastTs)}</span>
-                    </span>
-                  </button>
-                )
-              })
-            )}
-          </div>
-        </Panel>
+        <RunsPanel
+          runs={runs}
+          activeId={run?.workflow_id}
+          loading={loading}
+          hasData={!!data}
+          notMounted={notMounted}
+          onSelect={setSelected}
+        />
 
-        {/* ── selected run's chain ────────────────────────────────────── */}
-        <Panel
-          title={run ? 'Step chain' : 'Context graph'}
-          subtitle={
-            run
-              ? `${run.steps} governed step${run.steps === 1 ? '' : 's'} · tamper-chained prev → row hash`
-              : 'Select a run to see its governed-step trail'
-          }
-          right={
-            run ? (
-              <span className="font-mono text-[11px] text-slate-400 break-all">
-                {run.workflow_id}
-              </span>
-            ) : null
-          }
-        >
-          {!run ? (
-            <p className="px-5 py-12 text-center text-sm text-slate-400">
-              Nothing selected.
-            </p>
-          ) : (
-            <div className="px-5 py-5">
-              <Timeline nodes={run.nodes} />
-            </div>
-          )}
-        </Panel>
+        {view === 'timeline' ? (
+          <Panel
+            title={run ? 'Step chain' : 'Context graph'}
+            subtitle={
+              run
+                ? `${run.steps} governed step${run.steps === 1 ? '' : 's'} · tamper-chained prev → row hash`
+                : 'Select a run to see its governed-step trail'
+            }
+            right={
+              run ? (
+                <span className="font-mono text-[11px] text-slate-400 break-all">
+                  {run.workflow_id}
+                </span>
+              ) : null
+            }
+          >
+            {!run ? (
+              <p className="px-5 py-12 text-center text-sm text-slate-400">Nothing selected.</p>
+            ) : (
+              <div className="px-5 py-5">
+                <Timeline nodes={run.nodes} />
+              </div>
+            )}
+          </Panel>
+        ) : (
+          <Panel
+            title={run ? 'Step graph' : 'Context graph'}
+            subtitle={
+              run
+                ? `${run.steps} step${run.steps === 1 ? '' : 's'} · Agent → Step chain → Tool / Policy (Neo4j projection)`
+                : 'Select a run to see its graph'
+            }
+            right={<Neo4jLinkButton workflow={run?.workflow_id} />}
+          >
+            {!run ? (
+              <p className="px-5 py-12 text-center text-sm text-slate-400">Nothing selected.</p>
+            ) : (
+              <div className="px-5 py-4">
+                {/* keyed on the workflow so the graph fully resets between runs */}
+                <Neo4jGraph key={run.workflow_id} workflow={run.workflow_id} />
+              </div>
+            )}
+          </Panel>
+        )}
       </div>
-      )}
     </div>
+  )
+}
+
+// The runs list — shared verbatim by the Timeline and Graph views, so selecting
+// a task drives whichever right-hand pane is active.
+function RunsPanel({ runs, activeId, loading, hasData, notMounted, onSelect }) {
+  return (
+    <Panel
+      title="Runs"
+      subtitle="One workflow per task — newest first"
+      right={<span className="text-xs text-slate-500">{runs.length}</span>}
+    >
+      <div className="max-h-[34rem] divide-y divide-slate-100 overflow-y-auto">
+        {loading && !hasData ? (
+          <p className="px-5 py-8 text-center text-sm text-slate-400">Loading…</p>
+        ) : runs.length === 0 ? (
+          <p className="px-5 py-8 text-center text-sm text-slate-400">
+            {notMounted
+              ? 'Context graph endpoint not mounted.'
+              : 'No governed steps recorded yet. Run an agent that calls a tool.'}
+          </p>
+        ) : (
+          runs.map((r) => {
+            const isActive = r.workflow_id === activeId
+            return (
+              <button
+                key={r.workflow_id}
+                onClick={() => onSelect(r.workflow_id)}
+                className={`flex w-full flex-col items-start gap-1 px-5 py-3 text-left transition ${
+                  isActive ? 'bg-brand-50' : 'hover:bg-slate-50'
+                }`}
+              >
+                <span className="font-mono text-xs font-semibold text-brand-900 break-all">
+                  {r.workflow_id}
+                </span>
+                <span className="flex items-center gap-2 text-[11px] text-slate-500">
+                  <span>{r.agent}</span>
+                  <span>·</span>
+                  <span>
+                    {r.steps} step{r.steps === 1 ? '' : 's'}
+                  </span>
+                  <span>·</span>
+                  <span>{timeAgo(r.lastTs)}</span>
+                </span>
+              </button>
+            )
+          })
+        )}
+      </div>
+    </Panel>
+  )
+}
+
+// Opens the active run in Neo4j Browser, pre-loading a Cypher scoped to that
+// workflow (URL from config — VITE_NEO4J_URL, never hardcoded).
+function Neo4jLinkButton({ workflow }) {
+  return (
+    <a
+      href={neo4jBrowserUrl(workflow)}
+      target="_blank"
+      rel="noreferrer"
+      title={
+        workflow
+          ? 'Open this run in Neo4j Browser (pre-loads a scoped Cypher query)'
+          : 'Open Neo4j Browser'
+      }
+      className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
+    >
+      <span className="h-2 w-2 rounded-full bg-emerald-500" />
+      Open in Neo4j ↗
+    </a>
   )
 }
 

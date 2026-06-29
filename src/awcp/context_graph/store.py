@@ -111,6 +111,14 @@ def record_checkpoint(*, agent_id: str, step: str, task_id: str = "",
         graph_store.mirror_checkpoint(node)
     except Exception:  # noqa: BLE001 — Neo4j is never required
         pass
+
+    # Remember the step in Letta long-term memory (additive, best-effort, fail-open).
+    # No-op unless AWCP_LETTA_AGENT_ID is set and the server is reachable.
+    try:
+        from awcp.context_graph import memory as _memory
+        _memory.remember(node)
+    except Exception:  # noqa: BLE001 — Letta is never required
+        pass
     return node
 
 

@@ -18,8 +18,8 @@ import logging
 
 from fastapi import APIRouter
 
-from awcp.context_graph import graph_store, store, verify
-from awcp.context_graph.models import CheckpointRequest
+from awcp.context_graph import graph_store, manager, memory, store, verify
+from awcp.context_graph.models import CheckpointRequest, MemoryRecallRequest
 
 log = logging.getLogger("awcp.context_graph")
 
@@ -87,6 +87,72 @@ def neo4j_sync_cards() -> dict:
     """Project registered agents' A2A AgentCard skills into the graph as
     (:Agent)-[:HAS_SKILL]->(:Skill). Idempotent; safe to call anytime."""
     return graph_store.sync_cards()
+
+
+# ── Context Graph MANAGER (smart-memory layer over the trail) ────────────────
+# Declared BEFORE the parameterised /context-graph/{workflow_id} route. These are
+# 3-segment paths so they never collide with the 2-segment catch-all, but keeping
+# them above it makes the precedence obvious. All handlers are fail-open.
+
+@router.get("/context-graph/memory/status")
+def memory_status() -> dict:
+    """Letta long-term-memory connection status. {enabled:false} when off."""
+    try:
+        return memory.status()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.memory_status failed err=%r", exc)
+        return {"enabled": False, "backend": "letta", "connected": False,
+                "note": type(exc).__name__}
+
+
+@router.post("/context-graph/memory/recall")
+def memory_recall(req: MemoryRecallRequest) -> dict:
+    """Recall the most relevant past memories for a query (durable, cross-run)."""
+    try:
+        items = memory.recall(req.query, workflow_id=req.workflow_id,
+                              agent_id=req.agent_id, limit=req.limit)
+        return {"query": req.query, "count": len(items), "items": items}
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.memory_recall failed err=%r", exc)
+        return {"query": req.query, "count": 0, "items": []}
+
+
+@router.get("/context-graph/{workflow_id}/relevance")
+def get_relevance(workflow_id: str, focus: str = "", limit: int = 500) -> dict:
+    """Every node in a workflow, scored for relevance (most-relevant first).
+    Pass ?focus=<text> to score against the current task/query."""
+    try:
+        return manager.relevance(workflow_id, focus=focus, limit=limit).model_dump()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.relevance failed wf=%s err=%r", workflow_id, exc)
+        return {"workflow_id": workflow_id, "focus": focus, "count": 0, "nodes": []}
+
+
+@router.get("/context-graph/{workflow_id}/stale")
+def get_stale(workflow_id: str, limit: int = 500) -> dict:
+    """Which of a workflow's nodes are stale (aged / superseded / dead branch)."""
+    try:
+        return manager.stale(workflow_id, limit=limit).model_dump()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.stale failed wf=%s err=%r", workflow_id, exc)
+        return {"workflow_id": workflow_id, "total": 0, "fresh": 0, "stale": 0, "nodes": []}
+
+
+@router.get("/context-graph/{workflow_id}/working-set")
+def get_working_set(workflow_id: str, budget: int = 0, focus: str = "",
+                    memory_recall: bool = True, limit: int = 500) -> dict:
+    """The relevance-ranked, staleness-filtered, budget-fitted context a recovering
+    workflow should carry forward — plus the resume anchor. ?budget=<tokens> caps
+    the context window; ?focus=<text> steers relevance and long-term recall."""
+    try:
+        ws = manager.working_set(workflow_id, budget_tokens=budget or None,
+                                 focus=focus, include_memory=memory_recall, limit=limit)
+        return ws.model_dump()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("context_graph.working_set failed wf=%s err=%r", workflow_id, exc)
+        return {"workflow_id": workflow_id, "focus": focus, "budget_tokens": budget,
+                "used_tokens": 0, "selected": [], "dropped": 0, "excluded_stale": 0,
+                "resume_pointer": "", "memory": [], "note": type(exc).__name__}
 
 
 @router.get("/context-graph/{workflow_id}")

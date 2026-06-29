@@ -76,3 +76,74 @@ class ChainVerification(BaseModel):
     content_verified: int = 0   # rows whose row_hash re-hashed exactly
     breaks: list[ChainBreak] = Field(default_factory=list)
     note: str = ""
+
+
+# ── Context Graph MANAGER (the smart-memory layer over the trail) ─────────────
+# The trail above is the *receipt book* (what happened). The manager reasons over
+# it: how RELEVANT is each step to the current point, which steps are STALE, and
+# which fit a context-window TOKEN BUDGET for recovery/resume.
+
+class ScoredNode(BaseModel):
+    """One context node enriched with the manager's judgements about it."""
+
+    node: ContextNode
+    relevance: float = 0.0                       # 0..1 combined score
+    components: dict = Field(default_factory=dict)  # explainable score breakdown
+    stale: bool = False
+    stale_reasons: list[str] = Field(default_factory=list)  # e.g. ["aged","superseded"]
+    tokens: int = 0                              # estimated context-window cost
+    source: str = "ledger"                       # "ledger" | "memory" (long-term recall)
+
+
+class RelevanceReport(BaseModel):
+    """Every node in a workflow, scored for relevance (most-relevant first)."""
+
+    workflow_id: str
+    focus: str = ""                              # optional focus query the score was relative to
+    count: int = 0
+    nodes: list[ScoredNode] = Field(default_factory=list)
+
+
+class StaleReport(BaseModel):
+    """Which of a workflow's nodes are stale, and why."""
+
+    workflow_id: str
+    total: int = 0
+    fresh: int = 0
+    stale: int = 0
+    nodes: list[ScoredNode] = Field(default_factory=list)  # the stale ones, with reasons
+
+
+class WorkingSet(BaseModel):
+    """The relevance-ranked, staleness-filtered, budget-fitted slice of context a
+    recovering workflow should actually carry forward."""
+
+    workflow_id: str
+    focus: str = ""
+    budget_tokens: int = 0
+    used_tokens: int = 0
+    selected: list[ScoredNode] = Field(default_factory=list)  # chronological order
+    dropped: int = 0                             # fresh nodes that didn't fit the budget
+    excluded_stale: int = 0                      # nodes left out because they were stale
+    resume_pointer: str = ""                     # anchor to resume from (latest fresh node)
+    memory: list[ScoredNode] = Field(default_factory=list)    # long-term recall folded in
+    note: str = ""
+
+
+class MemoryStatus(BaseModel):
+    """Connection status of the optional Letta long-term-memory backend."""
+
+    enabled: bool = False        # False ⇒ Letta off / unreachable (everything no-ops)
+    backend: str = "letta"
+    connected: bool = False
+    note: str = ""
+    detail: dict = Field(default_factory=dict)
+
+
+class MemoryRecallRequest(BaseModel):
+    """Body for ``POST /context-graph/memory/recall``."""
+
+    query: str
+    workflow_id: str = ""
+    agent_id: str = ""
+    limit: int = 5
