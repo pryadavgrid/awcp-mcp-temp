@@ -30,7 +30,7 @@ export function StatCard({
   const base =
     'group block w-full rounded-2xl p-5 text-left shadow-card transition'
   const skin = featured
-    ? 'bg-gradient-to-br from-brand-500 via-brand-600 to-brand-800 text-white'
+    ? 'bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] text-white'
     : 'border border-slate-100 bg-white'
   const hover = clickable ? ' hover:-translate-y-0.5 hover:shadow-card-hover' : ''
 

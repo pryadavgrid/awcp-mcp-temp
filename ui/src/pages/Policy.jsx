@@ -32,12 +32,26 @@ const TEMPLATE = {
 // palette: property keys, strings, numbers, booleans/null, punctuation. Strings are
 // matched whole (their contents are never re-tokenised), and everything is
 // HTML-escaped first, so this can't break the markup or mis-highlight.
-const _HL = {
-  key: '#1d4ed8',    // blue-700  — property names
+// Two palettes: dark-on-light for the light theme, and bright-on-black for the
+// dark theme (so the editor reads like a real terminal — black background, vivid
+// colour-coded tokens). The active one is chosen at render time from the theme.
+// VS Code-style token colouring: a distinct hue per entry type. Same hue families
+// in both themes (blue keys · green strings · amber numbers · violet literals ·
+// slate punctuation), tuned dark-on-light for the light sheet and bright-on-black
+// for the dark terminal.
+const _HL_LIGHT = {
+  key: '#1d4ed8',    // blue-700 — property names
   str: '#047857',    // emerald-700 — string values
   num: '#b45309',    // amber-700 — numbers
   lit: '#7c3aed',    // violet-600 — true/false/null
   punct: '#64748b',  // slate-500 — { } [ ] , :
+}
+const _HL_DARK = {
+  key: '#4fc1ff',    // bright blue — property names
+  str: '#5fd38d',    // bright green — string values
+  num: '#dcb46a',    // gold — numbers
+  lit: '#c191e8',    // bright violet — true/false/null
+  punct: '#9aa6b2',  // light slate — { } [ ] , :
 }
 
 function escapeHtml(s) {
@@ -46,19 +60,19 @@ function escapeHtml(s) {
 
 // Colour one line of JSON. (Strings never span lines in valid JSON, so a per-line
 // pass is safe and lets us style the error line independently.)
-function highlightLine(line) {
+function highlightLine(line, hl) {
   return escapeHtml(line).replace(
     /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],:])/g,
     (m, str, colon, lit, num, punct) => {
       if (str !== undefined) {
         if (colon !== undefined) {
-          return `<span style="color:${_HL.key}">${str}</span><span style="color:${_HL.punct}">${colon}</span>`
+          return `<span style="color:${hl.key}">${str}</span><span style="color:${hl.punct}">${colon}</span>`
         }
-        return `<span style="color:${_HL.str}">${str}</span>`
+        return `<span style="color:${hl.str}">${str}</span>`
       }
-      if (lit !== undefined) return `<span style="color:${_HL.lit}">${lit}</span>`
-      if (num !== undefined) return `<span style="color:${_HL.num}">${num}</span>`
-      if (punct !== undefined) return `<span style="color:${_HL.punct}">${punct}</span>`
+      if (lit !== undefined) return `<span style="color:${hl.lit}">${lit}</span>`
+      if (num !== undefined) return `<span style="color:${hl.num}">${num}</span>`
+      if (punct !== undefined) return `<span style="color:${hl.punct}">${punct}</span>`
       return m
     },
   )
@@ -71,11 +85,11 @@ const _ERR_STYLE =
   'display:block;background:rgba(239,68,68,0.13);' +
   'text-decoration:underline wavy #ef4444;text-underline-offset:3px;text-decoration-skip-ink:none'
 
-function highlightJsonLines(src, errorLine) {
+function highlightJsonLines(src, errorLine, hl) {
   return src
     .split('\n')
     .map((ln, i) => {
-      const inner = highlightLine(ln) || ' ' // keep empty lines at full row height
+      const inner = highlightLine(ln, hl) || ' ' // keep empty lines at full row height
       const style = i + 1 === errorLine ? _ERR_STYLE : 'display:block'
       return `<span style="${style}">${inner}</span>`
     })
@@ -96,6 +110,22 @@ export default function Policy() {
   const gutterRef = useRef(null)
   const preRef = useRef(null)
 
+  // Track the app's dark theme by watching the `dark` class on <html> (set by the
+  // theme toggle). Used to switch the editor between a light sheet and a black
+  // terminal with bright syntax colours. A MutationObserver keeps it reactive even
+  // though the toggle lives in another component.
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
+  )
+  useEffect(() => {
+    const el = document.documentElement
+    const update = () => setIsDark(el.classList.contains('dark'))
+    update()
+    const obs = new MutationObserver(update)
+    obs.observe(el, { attributes: true, attributeFilter: ['class'] })
+    return () => obs.disconnect()
+  }, [])
+
   // Line numbers for the gutter, derived from the current text.
   const lineCount = text.length ? text.split('\n').length : 1
   const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')
@@ -114,7 +144,11 @@ export default function Policy() {
   }, [text])
 
   // The highlighted HTML for the editor's underlay (colours + red error line).
-  const highlightedHtml = useMemo(() => highlightJsonLines(text, errorLine), [text, errorLine])
+  // Palette follows the theme: bright-on-black in dark mode, dark-on-light in light.
+  const highlightedHtml = useMemo(
+    () => highlightJsonLines(text, errorLine, isDark ? _HL_DARK : _HL_LIGHT),
+    [text, errorLine, isDark],
+  )
 
   // Turn a JSON.parse error into a line/column the operator can jump to. V8's
   // message carries a character "position N"; we map it back to line+col so the
@@ -278,7 +312,13 @@ export default function Policy() {
               textarea handles input/caret/selection; the pre shows the colours). All
               three layers share the same font/size/line-height/padding and no-wrap,
               so colours, caret and line numbers line up exactly and scroll together. */}
-          <div className="flex h-80 overflow-hidden rounded-lg border border-slate-300 bg-slate-50 focus-within:border-brand-500 focus-within:bg-white">
+          <div
+            className={`flex h-80 overflow-hidden rounded-lg border focus-within:border-brand-500 ${
+              isDark
+                ? 'border-[#23302b] bg-[#0c1411]'
+                : 'border-slate-300 bg-slate-50 focus-within:bg-white'
+            }`}
+          >
             <div
               ref={gutterRef}
               aria-hidden="true"
@@ -290,7 +330,9 @@ export default function Policy() {
               <pre
                 ref={preRef}
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-slate-800"
+                className={`pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed ${
+                  isDark ? 'text-[#cfe3d6]' : 'text-slate-800'
+                }`}
                 dangerouslySetInnerHTML={{ __html: highlightedHtml }}
               />
               <textarea
@@ -298,6 +340,11 @@ export default function Policy() {
                 value={text}
                 spellCheck={false}
                 wrap="off"
+                // Keep the typed text invisible so the coloured <pre> underlay shows
+                // through. Inline (not just the text-transparent class) so it beats
+                // the global `.dark textarea { color }` rule, which would otherwise
+                // paint the text opaque white in dark mode and hide the colours.
+                style={{ color: 'transparent' }}
                 onChange={(e) => {
                   setText(e.target.value)
                   setDirty(true)
@@ -312,7 +359,9 @@ export default function Policy() {
                   }
                 }}
                 placeholder={loading ? 'Loading…' : '{ "agents": {...}, "tools": {...} }'}
-                className="absolute inset-0 m-0 resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-transparent caret-slate-800 outline-none placeholder:text-slate-400"
+                className={`absolute inset-0 m-0 resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-transparent outline-none placeholder:text-slate-400 ${
+                  isDark ? 'caret-[#7ee787]' : 'caret-slate-800'
+                }`}
               />
             </div>
           </div>
@@ -352,7 +401,7 @@ export default function Policy() {
             </button>
             {msg && (
               <span
-                className={`font-mono text-xs ${msg.tone === 'green' ? 'text-emerald-600' : 'text-rose-600'}`}
+                className={`font-mono text-xs ${msg.tone === 'green' ? 'text-brand-600' : 'text-rose-600'}`}
               >
                 {msg.text}
               </span>

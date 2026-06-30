@@ -28,6 +28,28 @@ body {
   @apply bg-transparent;
 }
 
+/* ── Theme toggle reveal ──────────────────────────────────────────────────────
+   Toggling the theme runs a View Transition: the new theme radiates out from the
+   toggle button as an expanding circle (a "void" sweeping the screen). The old
+   snapshot stays static underneath while the new one is revealed by an expanding
+   circular clip. Origin (--awcp-tx/ty) and final radius (--awcp-tr) are set on
+   <html> at click time. No effect outside a theme toggle; instant where the API
+   is unsupported. */
+::view-transition-old(root) {
+  animation: none;
+}
+::view-transition-new(root) {
+  animation: awcp-theme-reveal 0.9s ease-in-out;
+}
+@keyframes awcp-theme-reveal {
+  from {
+    clip-path: circle(0 at var(--awcp-tx, 50%) var(--awcp-ty, 50%));
+  }
+  to {
+    clip-path: circle(var(--awcp-tr, 150%) at var(--awcp-tx, 50%) var(--awcp-ty, 50%));
+  }
+}
+
 /* ── Dark theme ───────────────────────────────────────────────────────────────
    Toggled by adding `.dark` to <html> (see useTheme). Rather than sprinkling
    `dark:` variants across every component, we remap the handful of shared palette
@@ -63,6 +85,23 @@ body {
 }
 .dark .bg-brand-100 {
   background-color: rgba(58, 125, 82, 0.2);
+}
+/* Solid green fills (buttons, badges, indicators) must read as a TRUE green —
+   not teal — in BOTH light and dark themes. The brand ramp's mid greens lean
+   blue as large fills, so remap the solid bg fills to brighter, greener values.
+   The `html ` prefix keeps them above the base utility in either theme; gradients,
+   text, and borders still use the brand ramp. */
+html .bg-brand-500 {
+  background-color: #45b06a;
+}
+html .bg-brand-600 {
+  background-color: #34995a;
+}
+html .bg-brand-700 {
+  background-color: #2a8048;
+}
+html .hover\:bg-brand-700:hover {
+  background-color: #2a8048;
 }
 
 /* hover surfaces */

@@ -6,16 +6,19 @@ import { getNeo4jGraph } from '../api.js'
 // start in columns by type (Agent → Workflow → Step → Tool) but can be dragged
 // anywhere; click a node to highlight it + its connections. Edges are curved.
 
+// Brand-aligned palette: entity nodes use shades of the forest-green `brand`
+// ramp (so they read as one family), while the semantic states reuse main's
+// existing accents (slate / amber / rose / red). No off-brand blues/purples.
 const COLORS = {
-  agent: '#6366f1', // indigo
+  agent: '#2f6b45', // brand-600 — the agent (primary entity)
   workflow: '#64748b', // slate
-  step: '#10b981', // emerald (allow)
+  step: '#3a7d52', // brand-500 (allow)
   stepBlocked: '#f43f5e', // rose (blocked/deny)
   tool: '#f59e0b', // amber
-  model: '#0ea5e9', // sky — an LLM the step called (llm:<model>)
-  policy: '#a855f7', // purple — gate rule that blocked a step
+  model: '#4f9d6a', // brand-400 — an LLM the step called (llm:<model>)
+  policy: '#1f4730', // brand-800 — gate rule that blocked a step
   error: '#dc2626', // red — a failed step
-  skill: '#14b8a6', // teal — an A2A AgentCard capability the agent advertises
+  skill: '#7fbd93', // brand-300 — an A2A AgentCard capability the agent advertises
 }
 // workflow kept for safety but not rendered; columns re-spaced without it
 const COLX = { skill: 0.05, agent: 0.19, workflow: 0.19, step: 0.39, tool: 0.55, model: 0.69, policy: 0.83, error: 0.94 }
@@ -156,7 +159,7 @@ export default function Neo4jGraph({ workflow }) {
               <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" />
             </marker>
             <marker id="cg-arrow-hi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0,0 L10,5 L0,10 z" fill="#6366f1" />
+              <path d="M0,0 L10,5 L0,10 z" fill="#2f6b45" />
             </marker>
           </defs>
 
@@ -172,15 +175,15 @@ export default function Neo4jGraph({ workflow }) {
               e.type === 'NEXT' ? '#94a3b8'
               : e.type === 'BLOCKED_BY' ? '#f87171'
               : e.type === 'RAISED' ? '#fb923c'
-              : e.type === 'HAS_SKILL' ? '#5eead4'
-              : e.type === 'USED_MODEL' ? '#7dd3fc'
+              : e.type === 'HAS_SKILL' ? '#7fbd93'
+              : e.type === 'USED_MODEL' ? '#4f9d6a'
               : '#dbe2ea'
             return (
               <path
                 key={i}
                 d={edgePath(a, b)}
                 fill="none"
-                stroke={connected ? '#6366f1' : baseStroke}
+                stroke={connected ? '#2f6b45' : baseStroke}
                 strokeWidth={connected ? 2 : isNext ? 1.6 : 1}
                 opacity={dim ? 0.12 : 1}
                 markerEnd={isNext ? (connected ? 'url(#cg-arrow-hi)' : 'url(#cg-arrow)') : undefined}
@@ -203,7 +206,7 @@ export default function Neo4jGraph({ workflow }) {
                 style={{ cursor: 'grab' }}
                 onPointerDown={(e) => onNodeDown(e, n.id)}
               >
-                {isSel && <circle cx={p.x} cy={p.y} r={r + 6} fill="none" stroke="#6366f1" strokeWidth="2.5" />}
+                {isSel && <circle cx={p.x} cy={p.y} r={r + 6} fill="none" stroke="#2f6b45" strokeWidth="2.5" />}
                 <circle cx={p.x} cy={p.y} r={isSel ? r + 1.5 : r} fill={nodeColor(n)} stroke="#fff" strokeWidth="1.5">
                   <title>{`${n.type}: ${n.label}${n.decision ? ` · ${n.decision}` : ''}`}</title>
                 </circle>

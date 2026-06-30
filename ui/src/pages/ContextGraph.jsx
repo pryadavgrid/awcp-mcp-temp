@@ -216,7 +216,7 @@ function Neo4jLinkButton({ workflow }) {
       }
       className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 shadow-sm transition hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700"
     >
-      <span className="h-2 w-2 rounded-full bg-emerald-500" />
+      <span className="h-2 w-2 rounded-full bg-brand-500" />
       Open in Neo4j ↗
     </a>
   )

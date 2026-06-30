@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Sidebar } from './components/Sidebar.jsx'
+import { Splash } from './components/Splash.jsx'
 import { Icon } from './components/Icons.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Radar from './pages/Radar.jsx'
@@ -72,6 +73,22 @@ const pageFromHash = () => {
 export default function App() {
   const [active, setActive] = useState(pageFromHash)
   const { isDark, toggle: toggleTheme } = useTheme()
+
+  // Boot splash: on a fresh page load, show the animated logo as a loading screen
+  // for a short beat, then fade it out and reveal the dashboard (which mounts and
+  // starts polling underneath the whole time). Only fires on a full page load.
+  const [booting, setBooting] = useState(true)
+  const [splashLeaving, setSplashLeaving] = useState(false)
+  useEffect(() => {
+    const SHOW_MS = 2000
+    const FADE_MS = 500
+    const t1 = setTimeout(() => setSplashLeaving(true), SHOW_MS)
+    const t2 = setTimeout(() => setBooting(false), SHOW_MS + FADE_MS)
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+    }
+  }, [])
 
   // At lg+ the sidebar is a static column; below that it becomes an off-canvas
   // drawer opened by the header hamburger.
@@ -154,6 +171,37 @@ export default function App() {
     navigate(id)
   }
 
+  // Theme toggle with a "radiating void" reveal: the newly-selected theme expands
+  // as a circle out from the toggle button until it covers the screen (View
+  // Transitions API). The origin + final radius are passed to CSS as variables on
+  // <html>. Where the API isn't available (or reduced-motion is set), it just
+  // swaps instantly — same end result, no animation.
+  const handleThemeToggle = (e) => {
+    const root = document.documentElement
+    const r = e.currentTarget.getBoundingClientRect()
+    const cx = r.left + r.width / 2
+    const cy = r.top + r.height / 2
+    const maxR = Math.hypot(
+      Math.max(cx, window.innerWidth - cx),
+      Math.max(cy, window.innerHeight - cy),
+    )
+    root.style.setProperty('--awcp-tx', `${cx}px`)
+    root.style.setProperty('--awcp-ty', `${cy}px`)
+    root.style.setProperty('--awcp-tr', `${maxR}px`)
+    const swap = () => {
+      // Toggle the class synchronously so the View Transition captures the new
+      // theme; toggleTheme() then keeps React state + localStorage in sync.
+      root.classList.toggle('dark', !isDark)
+      toggleTheme()
+    }
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (document.startViewTransition && !reduce) {
+      document.startViewTransition(swap)
+    } else {
+      swap()
+    }
+  }
+
   // Icon-rail collapse only applies on desktop; the mobile drawer is always full.
   const effectiveCollapsed = collapsed && isDesktop
 
@@ -161,6 +209,8 @@ export default function App() {
 
   return (
     <div className="flex h-full overflow-x-hidden bg-[#f3f5f3]">
+      {booting && <Splash leaving={splashLeaving} />}
+
       {/* Backdrop behind the mobile drawer (tap to close). */}
       {mobileOpen && (
         <div
@@ -239,7 +289,7 @@ export default function App() {
               </span>
 
               <button
-                onClick={toggleTheme}
+                onClick={handleThemeToggle}
                 title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
                 aria-label="Toggle theme"
                 className="grid h-10 w-10 place-items-center rounded-xl border border-slate-100 bg-white text-slate-500 transition hover:border-brand-200 hover:text-brand-600"
@@ -261,7 +311,7 @@ export default function App() {
               </button>
 
               <div className="flex items-center gap-2.5 rounded-xl border border-slate-100 py-1.5 pl-1.5 pr-3">
-                <span className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-800 text-xs font-bold text-white">
+                <span className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-[#45b06a] to-[#2f7d4f] text-xs font-bold text-white">
                   AW
                 </span>
                 <div className="hidden leading-tight sm:block">

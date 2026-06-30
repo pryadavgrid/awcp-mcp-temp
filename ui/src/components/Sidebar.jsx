@@ -1,4 +1,6 @@
-import logoUrl from '../assets/awcp-logo.png'
+// Animated brand mark (the recolored, background-removed radar-bot loop). Static
+// awcp-logo.png remains in assets as a fallback/favicon source.
+import logoUrl from '../assets/awcp-logo-anim.webp'
 import { Icon } from './Icons.jsx'
 
 // Two groups, matching the reference dashboard's MENU / GENERAL split. The icon
@@ -56,16 +58,22 @@ export function Sidebar({
             onClick={onToggleCollapse}
             title="Expand sidebar"
             aria-label="Expand sidebar"
-            className="group grid h-10 w-10 place-items-center rounded-xl ring-1 ring-transparent transition hover:ring-brand-200"
+            className="group grid h-[54px] w-[54px] place-items-center rounded-xl ring-1 ring-transparent transition hover:ring-brand-200"
           >
-            <img src={logoUrl} alt="AWCP" className="h-9 w-9 rounded-xl transition group-hover:opacity-80" />
+            <img src={logoUrl} alt="AWCP" className="h-[54px] w-[54px] rounded-xl transition group-hover:opacity-80" />
           </button>
         </div>
       ) : (
         <div className="flex items-center gap-2.5 px-6 py-6">
-          <img src={logoUrl} alt="AWCP" className="h-9 w-9 shrink-0 rounded-xl" />
-          <div className="flex-1 text-[19px] font-extrabold leading-none tracking-tight text-brand-900">
-            AWCP
+          <img src={logoUrl} alt="Agent Workforce Control Plane" className="h-[54px] w-[54px] shrink-0 rounded-xl" />
+          {/* Full name as a stacked wordmark — same font/weight/colour as the old
+              "AWCP", one word per line so it fits the column and its height matches
+              the logo, reading as a natural brand lockup beside it. */}
+          <div className="min-w-0 flex-1 leading-[1.1] tracking-tight text-brand-900">
+            <div className="text-[12px] font-extrabold uppercase">Agent</div>
+            <div className="text-[12px] font-extrabold uppercase">Workforce</div>
+            <div className="text-[12px] font-extrabold uppercase">Control</div>
+            <div className="text-[12px] font-extrabold uppercase">Plane</div>
           </div>
           {/* Desktop: collapse to the icon rail. */}
           <button

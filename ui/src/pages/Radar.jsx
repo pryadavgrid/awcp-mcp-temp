@@ -9,13 +9,13 @@ import { timeAgo } from '../lib/format.js'
 // falls back to a position-based ramp (first = safe/green … last = severe/red) so the
 // bars work for ANY tier list without hardcoding the names.
 const TIER_STYLE = {
-  low: { text: 'text-emerald-600', fill: 'bg-emerald-500' },
+  low: { text: 'text-brand-600', fill: 'bg-brand-500' },
   medium: { text: 'text-amber-600', fill: 'bg-amber-500' },
   high: { text: 'text-orange-600', fill: 'bg-orange-500' },
   severe: { text: 'text-rose-600', fill: 'bg-rose-500' },
 }
 const RAMP = [
-  { text: 'text-emerald-600', fill: 'bg-emerald-500' },
+  { text: 'text-brand-600', fill: 'bg-brand-500' },
   { text: 'text-amber-600', fill: 'bg-amber-500' },
   { text: 'text-orange-600', fill: 'bg-orange-500' },
   { text: 'text-rose-600', fill: 'bg-rose-500' },
@@ -111,7 +111,7 @@ export default function Radar() {
                     <span className="font-medium text-brand-900">{a.name}</span>
                     {a.card_summary && (
                       <span
-                        className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 ring-1 ring-inset ring-violet-600/20"
+                        className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20"
                         title={a.card_summary.description
                           ? `AgentCard: ${a.card_summary.description}`
                           : 'AgentCard published'}
@@ -313,7 +313,7 @@ function ToolTiers({ tierData, onRefresh }) {
                           ⛔ blocked
                         </span>
                       ) : (
-                        <span className="text-xs text-emerald-600">allowed</span>
+                        <span className="text-xs text-brand-600">allowed</span>
                       )}
                     </Td>
                   </tr>

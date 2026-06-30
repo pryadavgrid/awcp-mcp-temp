@@ -207,7 +207,7 @@ export default function Dashboard({ onNavigate }) {
           <div className="flex items-center gap-4">
             <Donut
               segments={[
-                { value: activeAgents, color: '#3a7d52' },
+                { value: activeAgents, color: '#45b06a' },
                 { value: restricted, color: '#7fbd93' },
                 { value: quarantined, color: '#f43f5e' },
               ]}
@@ -215,7 +215,7 @@ export default function Dashboard({ onNavigate }) {
               centerBottom="agents"
             />
             <div className="space-y-2 text-xs">
-              <Legend color="#3a7d52" label="Active" value={activeAgents} />
+              <Legend color="#45b06a" label="Active" value={activeAgents} />
               <Legend color="#7fbd93" label="Restricted" value={restricted} />
               <Legend color="#f43f5e" label="Quarantined" value={quarantined} />
             </div>
@@ -333,7 +333,7 @@ function ApprovalsCard({ approvals, onClick }) {
       onClick={onClick}
       className={`group flex flex-col rounded-2xl p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover ${
         has
-          ? 'bg-gradient-to-br from-brand-500 via-brand-600 to-brand-800 text-white'
+          ? 'bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] text-white'
           : 'border border-slate-100 bg-white'
       }`}
     >
@@ -393,7 +393,7 @@ function SandboxCard({ sandbox, status, onClick }) {
   return (
     <button
       onClick={onClick}
-      className="group relative flex flex-col overflow-hidden rounded-2xl bg-gradient-to-br from-brand-700 via-brand-800 to-brand-900 p-5 text-left text-white shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover"
+      className="group relative flex flex-col overflow-hidden rounded-2xl bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] p-5 text-left text-white shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
