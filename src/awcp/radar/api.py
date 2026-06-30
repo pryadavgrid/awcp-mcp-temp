@@ -1421,6 +1421,10 @@ def register(req: RegisterRequest) -> dict:
                               "new": sorted(req.write_scopes)},
                 requested_by=req.owner,
             )
+            # Surface the quarantine in the operator Approvals panel (governance.
+            # write_approvals) so it's actually approvable from the UI — the durable
+            # token above is the gate, this is the operator-visible request.
+            _ensure_scope_approval(agent_id, saved.name or "", added, saved.risk or "")
             _record_event("scope_added", agent_id,
                           f"new write_scopes {added} -> quarantined (re-approval required)",
                           added=added)
@@ -1970,6 +1974,44 @@ def _wa_mem_create(rec: dict) -> dict:
         return dict(rec)
 
 
+def _ensure_scope_approval(agent_id: str, agent_name: str,
+                           added: list[str], risk: str) -> None:
+    """Surface a scope-change quarantine in the operator Approvals panel.
+
+    The scope_added gate quarantines the agent and records a durable approval
+    token (governance.approval_tokens), but the Approvals panel reads a SEPARATE
+    table (governance.write_approvals) — so without this the operator sees a
+    quarantined agent with no way to approve it from the panel. Create a pending
+    write-approval whose decide path already lifts the quarantine via
+    _approve_agent. Idempotent: skip when one is already pending for this agent,
+    so a re-register can't stack duplicates. DB-first, same in-memory fallback."""
+    action = "scope change"
+    detail = f"agent requests new write scope(s): {', '.join(added)}"
+    # Serialize the whole check-then-create: concurrent UI pollers both call this
+    # via the reconcile, and without the lock both see "no existing pending" and
+    # each insert a row (duplicate). Holding _WA_LOCK across the DB read+write
+    # makes the existence check authoritative for the winner.
+    with _WA_LOCK:
+        existing = _events_db.list_write_approvals("pending", 500)
+        if existing is None:
+            existing = [dict(r) for r in _WA_MEM.values() if r.get("status") == "pending"]
+        if any(r.get("agent_id") == agent_id and r.get("action") == action
+               for r in existing):
+            return
+        rec = _events_db.create_write_approval(
+            agent_id=agent_id, task_id="", action=action,
+            detail=detail, risk=risk or "", agent_name=agent_name)
+        if rec is None:
+            i = _WA_NEXT[0]
+            _WA_NEXT[0] += 1
+            _WA_MEM[i] = {
+                "id": i, "ts": time.time(), "agent_id": agent_id,
+                "agent_name": agent_name, "task_id": "", "action": action,
+                "detail": detail, "risk": risk or "", "status": "pending",
+                "decided_by": None, "decided_at": None}
+    log.info("radar.approval.scope_change_surfaced agent_id=%s added=%s", agent_id, added)
+
+
 async def _release_agent_write(agent_id: str, task_id: str, decision: str) -> bool:
     """Release a paused write by calling the agent's own task-approve endpoint
     (the agent blocks on a local event there). Best-effort — the decision is
@@ -2028,10 +2070,28 @@ def create_approval(req: WriteApprovalRequest) -> dict:
     return rec
 
 
+def _reconcile_scope_approvals() -> None:
+    """Self-heal: ensure every agent currently held on a pending scope-change
+    re-approval has a matching row in the Approvals panel. Catches agents that
+    were quarantined before this surfacing existed (or before a restart), since
+    the scope_added gate only fires on the re-register that ADDS a scope and
+    won't re-fire once the scope is saved. Idempotent via _ensure_scope_approval."""
+    try:
+        for e in REGISTRY.all():
+            if getattr(e, "approval_state", None) == "pending":
+                _ensure_scope_approval(e.id, e.name or "",
+                                       list(e.write_scopes or []) or ["(write scope)"],
+                                       e.risk or "")
+    except Exception as exc:  # noqa: BLE001 — reconcile must never break the panel
+        log.warning("radar.approval.reconcile_failed error=%r", exc)
+
+
 @router.get("/approvals")
 def list_approvals(status: str = "", limit: int = 100) -> list[dict]:
     """Write-approval requests (newest first), optionally filtered by status
     (pending | approved | denied). The AWCP UI polls this for its panel."""
+    if status in ("", "pending"):
+        _reconcile_scope_approvals()
     rows = _events_db.list_write_approvals(status, limit)
     if rows is not None:
         return rows

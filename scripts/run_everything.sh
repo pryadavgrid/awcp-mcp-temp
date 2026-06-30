@@ -452,6 +452,24 @@ PY
     [ -n "$(port_open "$SANDBOX_PORT")" ] && say "OpenSandbox runtime is up." \
       || warn "OpenSandbox runtime didn't come up — see $LOGDIR/opensandbox.log (is Docker running? is uvx installed?)."
   fi
+  # Pre-pull the sandbox image so the FIRST tool call doesn't block on a Docker
+  # pull. The OpenSandbox docker backend inspects-then-fails on a missing image
+  # rather than auto-pulling, so a not-yet-pulled image surfaces only as a create
+  # timeout ("sandbox not working"). Use the SAME image the MCP client resolves
+  # (AWCP_SANDBOX_IMAGE, same default as awcp.runtime.sandbox) and export it, so
+  # the runtime and client can't drift onto different images. Best-effort.
+  SANDBOX_IMAGE="${AWCP_SANDBOX_IMAGE:-python:3.11}"
+  export AWCP_SANDBOX_IMAGE="$SANDBOX_IMAGE"
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if ! docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1; then
+      say "Pulling sandbox image $SANDBOX_IMAGE (first run only)…"
+      docker pull "$SANDBOX_IMAGE" >/dev/null 2>&1 \
+        && say "Sandbox image ready." \
+        || warn "couldn't pull $SANDBOX_IMAGE — sandbox tools will fail until it's pulled (docker pull $SANDBOX_IMAGE)."
+    fi
+  else
+    warn "Docker not available — can't pre-pull $SANDBOX_IMAGE; sandbox tools will be unreachable."
+  fi
 fi
 
 # ── 5. MCP control server (:8002, SSE) — background ───────────────────
