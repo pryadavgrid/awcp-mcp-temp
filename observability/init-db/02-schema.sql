@@ -313,6 +313,24 @@ CREATE INDEX idx_wfevents_wf    ON ops.workflow_events (workflow_id, ts);
 CREATE INDEX idx_wfevents_ts    ON ops.workflow_events (ts DESC);
 CREATE INDEX idx_wfevents_agent ON ops.workflow_events (agent_id, ts);
 
+-- Sandbox lifecycle + tool-call timeline. The MCP server owns a single
+-- OpenSandbox container and records every create/ready/close and
+-- read_file/write_file/run_command into an in-memory ring; this is its durable
+-- mirror so the UI Sandbox page's timeline survives a server restart. event_ts is
+-- the original epoch (ordering matches the ring); payload holds any extra kwargs.
+-- Written best-effort by awcp.runtime.sandbox_db.record from record_event (also
+-- created on an already-initialised volume via sandbox_db._create_table).
+CREATE TABLE ops.sandbox_events (
+    id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts        timestamptz NOT NULL DEFAULT now(),
+    event_ts  double precision NOT NULL,
+    kind      text NOT NULL,
+    detail    text,
+    payload   jsonb NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX idx_sandbox_events_event_ts ON ops.sandbox_events (event_ts DESC);
+
 CREATE TABLE evidence.token_ledger_2026_06 PARTITION OF evidence.token_ledger
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 

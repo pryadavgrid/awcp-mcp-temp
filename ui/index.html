@@ -4,8 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AWCP Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
+    <!-- Apply the saved/system theme BEFORE first paint so there's no light flash. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('awcp-theme')
+          if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          if (t === 'dark') document.documentElement.classList.add('dark')
+        } catch (e) {}
+      })()
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
