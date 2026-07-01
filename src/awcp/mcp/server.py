@@ -110,6 +110,55 @@ GATE_SEND_SCOPE = os.getenv("AWCP_GATE_SEND_SCOPE", "false").lower() == "true"
 # best-effort (a metering hiccup never affects the tool result).
 METER_TOOL_TOKENS = os.getenv("AWCP_METER_TOOL_TOKENS", "true").lower() == "true"
 
+# Surface sandbox tool calls as Temporal activities. The sandbox tools
+# (run_command / write_file / read_file) run *inside* this MCP server — the only
+# place they execute — so unless we report each call to the radar, work an agent
+# does in the sandbox never reaches Temporal; it only shows on the Sandbox page.
+# We emit the same `tool_called` execution event a self-instrumenting bundle
+# agent sends, which the radar turns into an `execution_tool_call` activity on the
+# task's AgentExecutionWorkflow. Scoped to sandbox tools so tools an agent already
+# self-reports aren't double-counted; both the flag and the tool set are
+# env-overridable (set the flag false if your agents already report these).
+EMIT_SANDBOX_EXEC_EVENTS = (
+    os.getenv("AWCP_MCP_EMIT_SANDBOX_EXEC_EVENTS", "true").lower() == "true"
+)
+SANDBOX_EXEC_TOOLS = {
+    t.strip()
+    for t in os.getenv("AWCP_SANDBOX_EXEC_TOOLS", "run_command,write_file,read_file").split(",")
+    if t.strip()
+}
+
+
+def _emit_exec_event(agent_id: str, task_id: str, tool_name: str, eff_risk: str,
+                     gate: dict, outcome: str, output: Any = "") -> None:
+    """Report a sandbox tool call to the radar as a `tool_called` execution event
+    so it appears as an activity in the task's AgentExecutionWorkflow (Temporal).
+
+    No-op unless emission is enabled, the tool is a sandbox tool, and both an
+    agent_id and task_id are present (without a task_id there is no workflow to
+    attach the activity to — the radar replies "no_active_workflow"). The radar
+    only signals an already-running task workflow, so this can add a step but
+    never starts a stray workflow. Best-effort: a reporting hiccup never affects
+    the tool result."""
+    if not (EMIT_SANDBOX_EXEC_EVENTS and agent_id and task_id
+            and tool_name in SANDBOX_EXEC_TOOLS):
+        return
+    try:
+        httpx.post(
+            f"{RADAR_URL}/tasks/execution/{task_id}/event",
+            json={
+                "type": "tool_called",
+                "tool_name": tool_name,
+                "risk": eff_risk,
+                "gate": "blocked" if outcome == "blocked" else gate.get("decision", "allow"),
+                "result_len": len(str(output)) if output else 0,
+                "extra": {"sandbox": True, "outcome": outcome},
+            },
+            timeout=GATE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 — reporting must never break a tool call
+        logger.debug("mcp.exec_event.failed tool=%s error=%r", tool_name, exc)
+
 
 def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
                        tool_input: dict, output: Any) -> None:
@@ -453,6 +502,8 @@ def execute_tool(
             # Record the blocked attempt as a node too — a denial is part of the trail.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "blocked")
+            # Surface a blocked sandbox call on Temporal as well (it's a real step).
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "blocked")
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
@@ -471,6 +522,8 @@ def execute_tool(
             # Record the step in the context graph (governed-step trail, best-effort).
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "succeeded")
+            # Surface a sandbox tool run as a Temporal activity (run_command etc.).
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "succeeded", result)
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
@@ -493,6 +546,8 @@ def execute_tool(
             # Record the failed step as an error node in the context graph.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "error", error=str(e))
+            # Surface a failed sandbox call on Temporal as well.
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "error")
             return json.dumps({
                 "status": "error",
                 "output": f"Error executing tool '{tool_name}': {str(e)}",

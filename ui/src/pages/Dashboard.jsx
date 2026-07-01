@@ -11,6 +11,8 @@ import {
   getPolicy,
 } from '../api.js'
 import { StatCard } from '../components/StatCard.jsx'
+import { DraggableGrid } from '../components/DraggableGrid.jsx'
+import { AreaChart, Gauge } from '../components/Charts.jsx'
 import { StatusBadge, Badge } from '../components/Badge.jsx'
 import { Icon } from '../components/Icons.jsx'
 import { timeAgo, fmtInt, pctCapped, prettyKind, shortId } from '../lib/format.js'
@@ -44,7 +46,6 @@ export default function Dashboard({ onNavigate }) {
   const agents = data?.agents || []
   const wf = data?.workflows
   const wfCounts = wf?.counts || {}
-  const wfRows = wf?.workflows || []
   const approvals = data?.approvals || []
   const usage = data?.usage || []
   const ctxNodes = data?.context?.nodes || []
@@ -66,12 +67,11 @@ export default function Dashboard({ onNavigate }) {
   const recentAgents = [...agents]
     .sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0))
     .slice(0, 4)
-  const topUsage = [...usage]
-    .sort((a, b) => (b.window?.total_tokens || 0) - (a.window?.total_tokens || 0))
-    .slice(0, 3)
-  const activityBuckets = buildBuckets(ctxNodes.map((n) => n.ts), 8)
+  const usageSorted = [...usage].sort(
+    (a, b) => (b.window?.total_tokens || 0) - (a.window?.total_tokens || 0),
+  )
+  const activity = buildActivity(ctxNodes, 8)
   const ctxRuns = new Set(ctxNodes.map((n) => n.workflow_id || 'unknown')).size
-  const recentWf = [...wfRows].slice(0, 3)
 
   const policyAgents = policy?.policy?.agents ? Object.keys(policy.policy.agents).length : 0
   const policyTools = policy?.policy?.tools ? Object.keys(policy.policy.tools).length : 0
@@ -79,10 +79,14 @@ export default function Dashboard({ onNavigate }) {
   const sandbox = health?.sandbox
   const sandboxStatus = sandbox?.status
 
-  return (
-    <div className="space-y-5">
-      {/* ── Row 1 · headline stats (click to drill in) ───────────────────────── */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+  // Every dashboard tile, in its default order. `span` is how many of the four
+  // columns it occupies. DraggableGrid renders these into one reorderable board
+  // (drag to rearrange; the chosen order is remembered per browser).
+  const tiles = [
+    {
+      id: 'agents-running',
+      span: 1,
+      render: () => (
         <StatCard
           featured
           label="Agents Running"
@@ -90,6 +94,12 @@ export default function Dashboard({ onNavigate }) {
           sub={`${activeAgents} active${agentCount ? ` · ${Math.round((activeAgents / agentCount) * 100) || 0}% of fleet` : ''}`}
           onClick={() => go('radar')}
         />
+      ),
+    },
+    {
+      id: 'workflows-running',
+      span: 1,
+      render: () => (
         <StatCard
           label="Workflows Running"
           value={dash ?? workflowsRunning}
@@ -97,6 +107,12 @@ export default function Dashboard({ onNavigate }) {
           sub={`${onboardingRunning} onboarding · ${activeTasks} task exec`}
           onClick={() => go('workflow')}
         />
+      ),
+    },
+    {
+      id: 'tool-calls',
+      span: 1,
+      render: () => (
         <StatCard
           label="Tool Calls (live)"
           value={dash ?? activeTasks}
@@ -104,6 +120,12 @@ export default function Dashboard({ onNavigate }) {
           sub="in-flight governed executions"
           onClick={() => go('tokens')}
         />
+      ),
+    },
+    {
+      id: 'quarantined',
+      span: 1,
+      render: () => (
         <StatCard
           label="Quarantined Agents"
           value={dash ?? quarantined}
@@ -111,22 +133,31 @@ export default function Dashboard({ onNavigate }) {
           sub="held until control hooks observed"
           onClick={() => go('radar')}
         />
-      </div>
-
-      {/* ── Row 2 · activity (wide) · approvals CTA · radar list ──────────────── */}
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+      ),
+    },
+    {
+      id: 'governed-activity',
+      span: 2,
+      render: () => (
         <PreviewCard
           title="Governed Activity"
           subtitle="Recorded governed steps over time"
           onClick={() => go('context')}
-          className="md:col-span-2 xl:col-span-2"
         >
-          <MiniBars counts={activityBuckets} />
+          <AreaChart
+            formatValue={fmtInt}
+            series={[
+              { label: 'steps', color: '#3a7d52', values: activity.steps },
+              { label: 'runs', color: '#f59e0b', values: activity.runs },
+            ]}
+          />
           <div className="mt-4 flex items-center gap-4 text-xs text-slate-400">
-            <span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-[#3a7d52]" />
               <span className="font-bold text-brand-900">{fmtInt(ctxNodes.length)}</span> steps
             </span>
-            <span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full bg-[#f59e0b]" />
               <span className="font-bold text-brand-900">{ctxRuns}</span> runs
             </span>
             <span className="ml-auto inline-flex items-center gap-1 font-medium text-brand-600">
@@ -135,9 +166,17 @@ export default function Dashboard({ onNavigate }) {
             </span>
           </div>
         </PreviewCard>
-
-        <ApprovalsCard approvals={approvals} onClick={() => go('approvals')} />
-
+      ),
+    },
+    {
+      id: 'approvals',
+      span: 1,
+      render: () => <ApprovalsCard approvals={approvals} onClick={() => go('approvals')} />,
+    },
+    {
+      id: 'radar',
+      span: 1,
+      render: () => (
         <PreviewCard
           title="Radar"
           subtitle={`${agentCount} agent${agentCount === 1 ? '' : 's'} on the radar`}
@@ -161,44 +200,44 @@ export default function Dashboard({ onNavigate }) {
             )}
           </div>
         </PreviewCard>
-      </div>
-
-      {/* ── Row 3 · token usage (wide) · fleet donut · sandbox (dark) ─────────── */}
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+      ),
+    },
+    {
+      id: 'token-monitor',
+      span: 2,
+      render: () => (
         <PreviewCard
           title="Token Monitor"
-          subtitle="Top agents by window usage"
+          subtitle="Budget usage per running agent"
           onClick={() => go('tokens')}
-          className="md:col-span-2 xl:col-span-2"
         >
-          <div className="space-y-3.5">
-            {topUsage.length === 0 ? (
-              <Empty>No token usage reported yet.</Empty>
-            ) : (
-              topUsage.map((u) => {
+          {usageSorted.length === 0 ? (
+            <Empty>No token usage reported yet.</Empty>
+          ) : (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {usageSorted.map((u) => {
                 const pct = pctCapped(u.budget?.ratio || 0)
-                const state = u.budget?.state || 'ok'
                 return (
-                  <div key={u.agent_id}>
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="truncate font-medium text-brand-900">{u.name}</span>
-                      <span className="text-slate-400">
-                        {fmtInt(u.window?.total_tokens)} tok · {pct}%
-                      </span>
-                    </div>
-                    <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                      <div
-                        className={`h-full rounded-full ${BAR[state] || BAR.ok}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
+                  <Gauge
+                    key={u.agent_id}
+                    value={pct}
+                    max={100}
+                    display={`${pct}%`}
+                    label={u.name}
+                    sub={`${fmtInt(u.window?.total_tokens)} tok`}
+                    tone={u.budget?.state || 'ok'}
+                  />
                 )
-              })
-            )}
-          </div>
+              })}
+            </div>
+          )}
         </PreviewCard>
-
+      ),
+    },
+    {
+      id: 'fleet-health',
+      span: 1,
+      render: () => (
         <PreviewCard
           title="Fleet Health"
           subtitle="Autonomy distribution"
@@ -221,41 +260,32 @@ export default function Dashboard({ onNavigate }) {
             </div>
           </div>
         </PreviewCard>
-
+      ),
+    },
+    {
+      id: 'sandbox',
+      span: 1,
+      render: () => (
         <SandboxCard sandbox={sandbox} status={sandboxStatus} onClick={() => go('sandbox')} />
-      </div>
-
-      {/* ── Row 4 · workflows · agent hooks · operator policy ─────────────────── */}
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
+      ),
+    },
+    {
+      id: 'workflow',
+      span: 2,
+      render: () => (
         <PreviewCard
           title="Workflow"
           subtitle="Live from Temporal"
           onClick={() => go('workflow')}
-          className="md:col-span-2 xl:col-span-2"
         >
-          <div className="mb-3 flex gap-2">
-            <MiniStat label="Running" value={wfCounts.running ?? 0} tone="amber" />
-            <MiniStat label="Completed" value={wfCounts.completed ?? 0} tone="green" />
-            <MiniStat
-              label="Failed"
-              value={(wfCounts.failed || 0) + (wfCounts.timed_out || 0)}
-              tone="rose"
-            />
-          </div>
-          <div className="space-y-2">
-            {recentWf.length === 0 ? (
-              <Empty>No workflows yet.</Empty>
-            ) : (
-              recentWf.map((w) => (
-                <div key={w.workflow_id} className="flex items-center gap-2 text-xs">
-                  <span className="flex-1 truncate font-mono text-slate-600">{w.workflow_id}</span>
-                  <StatusBadge value={w.status} />
-                </div>
-              ))
-            )}
-          </div>
+          <WorkflowOverview counts={wfCounts} />
         </PreviewCard>
-
+      ),
+    },
+    {
+      id: 'agent-hooks',
+      span: 1,
+      render: () => (
         <PreviewCard
           title="Agent Hooks"
           subtitle="Lifecycle dispatcher"
@@ -275,7 +305,12 @@ export default function Dashboard({ onNavigate }) {
             />
           </div>
         </PreviewCard>
-
+      ),
+    },
+    {
+      id: 'operator-policy',
+      span: 1,
+      render: () => (
         <PreviewCard
           title="Operator Policy"
           subtitle="Allow / risk rules"
@@ -291,15 +326,11 @@ export default function Dashboard({ onNavigate }) {
             <MiniStat label="Tool rules" value={policyTools || '—'} tone="slate" />
           </div>
         </PreviewCard>
-      </div>
-    </div>
-  )
-}
+      ),
+    },
+  ]
 
-const BAR = {
-  exhausted: 'bg-rose-500',
-  warn: 'bg-amber-500',
-  ok: 'bg-brand-500',
+  return <DraggableGrid storageKey="awcp-dashboard-order" tiles={tiles} />
 }
 
 // ── building blocks ──────────────────────────────────────────────────────────
@@ -308,7 +339,7 @@ function PreviewCard({ title, subtitle, onClick, children, className = '' }) {
   return (
     <button
       onClick={onClick}
-      className={`group flex flex-col rounded-2xl border border-slate-100 bg-white p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover ${className}`}
+      className={`group flex h-full w-full flex-col rounded-2xl border border-slate-100 bg-white p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover ${className}`}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -324,6 +355,83 @@ function PreviewCard({ title, subtitle, onClick, children, className = '' }) {
   )
 }
 
+// Temporal run mix as a single proportional status bar + an icon legend —
+// modeled on the "Overall Workflow Overview" reference: Done / Running /
+// Terminated / Pending, each segment sized by its share of the total.
+function WorkflowOverview({ counts }) {
+  const done = counts.completed ?? 0
+  const running = counts.running ?? 0
+  const failed =
+    (counts.terminated || 0) +
+    (counts.canceled || 0) +
+    (counts.failed || 0) +
+    (counts.timed_out || 0)
+  const known = done + running + failed
+  const total = counts.total ?? known
+  const pending = Math.max(0, total - known)
+  const denom = Math.max(1, total)
+  const pct = (v) => Math.round((v / denom) * 100)
+
+  const segs = [
+    { key: 'done', label: 'Done', value: done, color: '#3a7d52', icon: 'check' },
+    { key: 'running', label: 'Running', value: running, color: '#f59e0b', icon: 'refresh' },
+    { key: 'failed', label: 'Terminated', value: failed, color: '#f43f5e', icon: 'close' },
+    { key: 'pending', label: 'Pending', value: pending, color: '#94a3b8', icon: 'clock' },
+  ]
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+          Run overview
+        </span>
+        <span className="text-xs text-slate-500">
+          Total <span className="font-bold text-brand-900">{fmtInt(total)}</span>
+        </span>
+      </div>
+
+      {/* proportional status bar */}
+      <div className="flex h-7 w-full gap-0.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10">
+        {segs
+          .filter((s) => s.value > 0)
+          .map((s) => (
+            <div
+              key={s.key}
+              title={`${s.label}: ${fmtInt(s.value)} · ${pct(s.value)}%`}
+              style={{ width: `${(s.value / denom) * 100}%`, backgroundColor: s.color }}
+              className="flex items-center justify-center transition-all duration-500"
+            >
+              <span className="px-1 text-[10px] font-bold text-white">{pct(s.value)}%</span>
+            </div>
+          ))}
+      </div>
+
+      {/* icon legend (Done / Running / Terminated / Pending) */}
+      <div className="grid grid-cols-2 gap-2">
+        {segs.map((s) => (
+          <div
+            key={s.key}
+            className="flex items-center gap-2 rounded-xl bg-slate-50 px-2.5 py-2 dark:bg-white/5"
+          >
+            <span
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-white"
+              style={{ backgroundColor: s.color }}
+            >
+              <Icon name={s.icon} className="h-4 w-4" strokeWidth={2.4} />
+            </span>
+            <div className="min-w-0">
+              <div className="truncate text-[11px] font-semibold text-brand-900">{s.label}</div>
+              <div className="text-[10px] tabular-nums text-slate-400">
+                {fmtInt(s.value)} · {pct(s.value)}%
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // A green "reminder"-style call-to-action card for the pending approvals queue.
 function ApprovalsCard({ approvals, onClick }) {
   const count = approvals.length
@@ -331,7 +439,7 @@ function ApprovalsCard({ approvals, onClick }) {
   return (
     <button
       onClick={onClick}
-      className={`group flex flex-col rounded-2xl p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover ${
+      className={`group flex h-full w-full flex-col rounded-2xl p-5 text-left shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover ${
         has
           ? 'bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] text-white'
           : 'border border-slate-100 bg-white'
@@ -393,7 +501,7 @@ function SandboxCard({ sandbox, status, onClick }) {
   return (
     <button
       onClick={onClick}
-      className="group relative flex flex-col overflow-hidden rounded-2xl bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] p-5 text-left text-white shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover"
+      className="group relative flex h-full w-full flex-col overflow-hidden rounded-2xl bg-gradient-to-br from-[#45b06a] via-[#348a52] to-[#256b3c] p-5 text-left text-white shadow-card transition hover:-translate-y-0.5 hover:shadow-card-hover"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -421,35 +529,6 @@ function SandboxCard({ sandbox, status, onClick }) {
         )}
       </div>
     </button>
-  )
-}
-
-// Pill-shaped bar chart (reference "Project Analytics"), tallest bar highlighted.
-function MiniBars({ counts }) {
-  const max = Math.max(1, ...counts)
-  const peak = counts.indexOf(Math.max(...counts))
-  return (
-    <div className="flex h-32 items-end gap-2.5">
-      {counts.map((c, i) => {
-        const h = Math.max(10, Math.round((c / max) * 100))
-        const isPeak = c > 0 && i === peak
-        return (
-          <div key={i} className="relative flex flex-1 items-end">
-            {isPeak && (
-              <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-brand-700 shadow-card ring-1 ring-slate-100">
-                {c}
-              </span>
-            )}
-            <div
-              className={`w-full rounded-full transition-all ${
-                c > 0 ? (isPeak ? 'bg-brand-700' : 'bg-brand-400') : 'bg-slate-100'
-              }`}
-              style={{ height: `${h}%` }}
-            />
-          </div>
-        )
-      })}
-    </div>
   )
 }
 
@@ -531,20 +610,27 @@ function Empty({ children }) {
   return <div className="py-4 text-center text-xs text-slate-400">{children}</div>
 }
 
-// Split a list of unix-second timestamps into `bins` equal-time buckets across
-// their own span, returning per-bucket counts (all-zero when there's no data).
-function buildBuckets(tsList, bins = 8) {
-  const ts = tsList.filter(Boolean).map(Number).sort((a, b) => a - b)
-  const counts = Array.from({ length: bins }, () => 0)
-  if (ts.length === 0) return counts
-  const min = ts[0]
-  const max = ts[ts.length - 1]
+// Split context nodes into `bins` equal-time buckets across their own span,
+// returning, per bucket, the step count (nodes) and the run count (distinct
+// workflow ids active in that window). Both series share the same boundaries so
+// the two trend lines line up on the x-axis. All-zero when there's no data.
+function buildActivity(nodes, bins = 8) {
+  const items = nodes
+    .filter((n) => n.ts)
+    .map((n) => ({ ts: Number(n.ts), run: n.workflow_id || 'unknown' }))
+    .sort((a, b) => a.ts - b.ts)
+  const steps = Array.from({ length: bins }, () => 0)
+  const runSets = Array.from({ length: bins }, () => new Set())
+  if (items.length === 0) return { steps, runs: steps.slice() }
+  const min = items[0].ts
+  const max = items[items.length - 1].ts
   const span = Math.max(1, max - min)
-  for (const t of ts) {
-    let idx = Math.floor(((t - min) / span) * bins)
+  for (const it of items) {
+    let idx = Math.floor(((it.ts - min) / span) * bins)
     if (idx >= bins) idx = bins - 1
     if (idx < 0) idx = 0
-    counts[idx]++
+    steps[idx]++
+    runSets[idx].add(it.run)
   }
-  return counts
+  return { steps, runs: runSets.map((s) => s.size) }
 }

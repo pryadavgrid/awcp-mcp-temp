@@ -1,5 +1,6 @@
 // Animated brand mark (the recolored, background-removed radar-bot loop). Static
 // awcp-logo.png remains in assets as a fallback/favicon source.
+import { useState } from 'react'
 import logoUrl from '../assets/awcp-logo-anim.webp'
 import { Icon } from './Icons.jsx'
 
@@ -37,6 +38,16 @@ export function Sidebar({
   mobileOpen = false,
   onCloseMobile,
 }) {
+  // Floating label shown beside an icon while the rail is collapsed. Positioned
+  // `fixed` from the hovered icon's rect so it escapes the nav's clipped overflow.
+  const [tip, setTip] = useState(null)
+  const showTip = (label) => (e) => {
+    if (!collapsed) return
+    const r = e.currentTarget.getBoundingClientRect()
+    setTip({ label, top: r.top + r.height / 2, left: r.right + 12 })
+  }
+  const hideTip = () => setTip(null)
+
   const temporal = health?.temporal_connected
   const otel = health?.otel_enabled
   const laminar = health?.laminar?.enabled
@@ -112,8 +123,13 @@ export function Sidebar({
                 return (
                   <button
                     key={it.id}
-                    onClick={() => onSelect(it.id)}
-                    title={collapsed ? it.label : undefined}
+                    onClick={() => {
+                      hideTip()
+                      onSelect(it.id)
+                    }}
+                    onMouseEnter={showTip(it.label)}
+                    onMouseLeave={hideTip}
+                    aria-label={it.label}
                     className={`group relative flex w-full items-center rounded-xl text-sm transition ${
                       collapsed ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2.5'
                     } ${
@@ -178,6 +194,18 @@ export function Sidebar({
             text={sandboxStatus ? sandboxStatus.replace('_', ' ') : 'offline'}
             title={health?.sandbox?.reason || health?.sandbox?.workspace_dir}
           />
+        </div>
+      )}
+
+      {/* Hover label for the collapsed icon rail — fixed so it isn't clipped by
+          the nav's horizontal overflow. */}
+      {collapsed && tip && (
+        <div
+          className="pointer-events-none fixed z-[70] -translate-y-1/2 whitespace-nowrap rounded-lg bg-brand-900 px-2.5 py-1.5 text-xs font-semibold text-white shadow-card-hover"
+          style={{ top: tip.top, left: tip.left }}
+        >
+          {tip.label}
+          <span className="absolute right-full top-1/2 -translate-y-1/2 border-y-4 border-r-4 border-y-transparent border-r-brand-900" />
         </div>
       )}
     </aside>

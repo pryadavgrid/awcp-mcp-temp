@@ -67,6 +67,19 @@ const PATHS = {
   arrowUpRight: <path d="M7 17L17 7M8 7h9v9" />,
   menu: <path d="M4 6.5h16M4 12h16M4 17.5h16" />,
   close: <path d="M6 6l12 12M18 6L6 18" />,
+  check: <path d="M5 12.5l4.5 4.5L19 6.5" />,
+  refresh: (
+    <>
+      <path d="M20 11a8 8 0 0 0-14.3-4.9M4 5v4h4" />
+      <path d="M4 13a8 8 0 0 0 14.3 4.9M20 19v-4h-4" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
   panelLeft: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2.2" />

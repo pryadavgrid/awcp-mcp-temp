@@ -80,8 +80,6 @@ export default function Radar() {
 
   return (
     <div className="space-y-6">
-      <ToolTiers tierData={tierData} onRefresh={refreshTiers} />
-
       <Panel
         title="Radar — Detected & Registered Agents"
         subtitle="Every agentic environment the radar has scanned or that self-registered"
@@ -103,8 +101,13 @@ export default function Radar() {
               <tr
                 key={a.id}
                 // stopped agents stay on the radar — flag the whole row in a
-                // very light red so they read as "stopped, not gone"
-                className={a.alive ? 'hover:bg-slate-50' : 'bg-rose-50 hover:bg-rose-100'}
+                // very light red so they read as "stopped, not gone" (with a
+                // dark-mode tint so the flag stays visible there too)
+                className={
+                  a.alive
+                    ? 'hover:bg-slate-50'
+                    : 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-500/15 dark:hover:bg-rose-500/25'
+                }
               >
                 <Td>
                   <div className="flex items-center gap-1.5">
@@ -148,7 +151,13 @@ export default function Radar() {
                     <span
                       className={`h-2 w-2 rounded-full ${a.alive ? 'bg-brand-500' : 'bg-rose-500'}`}
                     />
-                    <span className={a.alive ? 'text-brand-600' : 'text-rose-600'}>
+                    <span
+                      className={
+                        a.alive
+                          ? 'text-brand-600 dark:text-brand-300'
+                          : 'text-rose-600 dark:text-rose-300'
+                      }
+                    >
                       {a.alive ? 'live' : 'stop'}
                     </span>
                     <span className="text-xs text-slate-400">· {timeAgo(a.last_seen)}</span>
@@ -159,6 +168,8 @@ export default function Radar() {
           )}
         </Table>
       </Panel>
+
+      <ToolTiers tierData={tierData} onRefresh={refreshTiers} />
     </div>
   )
 }
@@ -288,7 +299,10 @@ function ToolTiers({ tierData, onRefresh }) {
               recent.map((c, i) => {
                 const blocked = c.decision === 'block'
                 return (
-                  <tr key={`${c.ts}-${i}`} className={blocked ? 'bg-rose-50/40' : 'hover:bg-slate-50'}>
+                  <tr
+                    key={`${c.ts}-${i}`}
+                    className={blocked ? 'bg-rose-50/40 dark:bg-rose-500/10' : 'hover:bg-slate-50'}
+                  >
                     <Td className="whitespace-nowrap text-xs text-slate-500">{timeAgo(c.ts)}</Td>
                     <Td className="font-mono text-xs text-slate-500">{c.agent_id || '—'}</Td>
                     <Td>
@@ -309,11 +323,11 @@ function ToolTiers({ tierData, onRefresh }) {
                     </Td>
                     <Td>
                       {blocked ? (
-                        <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700 ring-1 ring-inset ring-rose-600/20 dark:bg-rose-500/25 dark:text-rose-200 dark:ring-rose-400/40">
                           ⛔ blocked
                         </span>
                       ) : (
-                        <span className="text-xs text-brand-600">allowed</span>
+                        <span className="text-xs text-brand-600 dark:text-brand-300">allowed</span>
                       )}
                     </Td>
                   </tr>
