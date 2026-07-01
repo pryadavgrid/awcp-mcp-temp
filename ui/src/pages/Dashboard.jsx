@@ -12,10 +12,10 @@ import {
 } from '../api.js'
 import { StatCard } from '../components/StatCard.jsx'
 import { DraggableGrid } from '../components/DraggableGrid.jsx'
-import { AreaChart, Gauge } from '../components/Charts.jsx'
+import { AreaChart } from '../components/Charts.jsx'
 import { StatusBadge, Badge } from '../components/Badge.jsx'
 import { Icon } from '../components/Icons.jsx'
-import { timeAgo, fmtInt, pctCapped, prettyKind, shortId } from '../lib/format.js'
+import { timeAgo, fmtInt, prettyKind, shortId } from '../lib/format.js'
 
 // The dashboard is a launchpad: a small slice of EVERY control-plane view, where
 // each tile drills into the matching page. One combined poll feeds them all;
@@ -208,28 +208,13 @@ export default function Dashboard({ onNavigate }) {
       render: () => (
         <PreviewCard
           title="Token Monitor"
-          subtitle="Budget usage per running agent"
+          subtitle="Compared usage vs budget limit"
           onClick={() => go('tokens')}
         >
           {usageSorted.length === 0 ? (
             <Empty>No token usage reported yet.</Empty>
           ) : (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {usageSorted.map((u) => {
-                const pct = pctCapped(u.budget?.ratio || 0)
-                return (
-                  <Gauge
-                    key={u.agent_id}
-                    value={pct}
-                    max={100}
-                    display={`${pct}%`}
-                    label={u.name}
-                    sub={`${fmtInt(u.window?.total_tokens)} tok`}
-                    tone={u.budget?.state || 'ok'}
-                  />
-                )
-              })}
-            </div>
+            <UsageBars usage={usageSorted} />
           )}
         </PreviewCard>
       ),
@@ -608,6 +593,156 @@ function MiniStat({ label, value, tone = 'slate' }) {
 
 function Empty({ children }) {
   return <div className="py-4 text-center text-xs text-slate-400">{children}</div>
+}
+
+// ── Token Monitor bars ────────────────────────────────────────────────────────
+// A compact horizontal chart of window usage vs budget: the top (gradient) bar is
+// tokens spent this window — green while safe, amber near the budget, red past it
+// — and the muted bar under it is that agent's own budget (its ceiling). A dashed
+// "BUDGET LIMIT" line marks the shared reference budget. Colours are literal so
+// the green→amber→red ramp reads the same in light and dark; the chrome uses the
+// shared utilities the .dark remap themes automatically.
+const UB_OFFSET = '6.5rem' // label column (w-24 = 6rem) + gap-2 (0.5rem)
+const ubLeft = (f) =>
+  `calc(${UB_OFFSET} + (100% - ${UB_OFFSET}) * ${Math.max(0, Math.min(1, f))})`
+
+function fmtK(n) {
+  const v = Number(n || 0)
+  if (v < 1000) return String(Math.round(v))
+  const k = v / 1000
+  return `${k >= 10 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, '')}K`
+}
+
+// Round an axis max up to a friendly ×10ⁿ step so ticks land on round token
+// counts while still hugging the data (a 50K budget → a 60K axis, not 100K).
+function niceCeil(n) {
+  if (n <= 0) return 10
+  const base = Math.pow(10, Math.floor(Math.log10(n)))
+  const f = n / base
+  const steps = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+  return (steps.find((s) => f <= s + 1e-9) || 10) * base
+}
+
+// green→amber→red fill; stops positioned in AXIS space (0..100% = axisMax) so the
+// caller can stretch the background to land amber at the warn ratio and red at the
+// agent's budget.
+function usageGradient(warn, budget, axisMax) {
+  const w = Math.max(0.5, (warn / axisMax) * 100)
+  const b = Math.max(w + 0.5, (budget / axisMax) * 100)
+  return `linear-gradient(90deg, #2f8f56 0%, #45b06a ${Math.max(0, w - 6)}%, #45b06a ${Math.max(0, w - 0.5)}%, #f5a524 ${w}%, #f5a524 ${Math.max(w, b - 0.5)}%, #ef4444 ${b}%, #dc2626 100%)`
+}
+
+function UsageBars({ usage }) {
+  const rows = usage.slice(0, 6).map((u) => {
+    const used = Number(u.window?.total_tokens || 0)
+    const budget = Number(u.budget?.budget_tokens || 0)
+    const warnRatio = Number(u.budget?.warn_ratio || 0.8)
+    return {
+      id: u.agent_id,
+      name: u.name || u.agent_id,
+      used,
+      budget,
+      warn: budget * warnRatio,
+      ratio: Number(u.budget?.ratio || 0),
+      over: Number(u.budget?.ratio || 0) >= 1,
+    }
+  })
+
+  // Reference budget for the dashed line: the largest per-agent budget actually in
+  // play (never the system-wide default fallback, which would flatten every bar).
+  const globalBudget = Math.max(0, ...rows.map((r) => r.budget))
+  const rawMax = Math.max(1, ...rows.map((r) => Math.max(r.used, r.budget)), globalBudget)
+  const axisMax = niceCeil(rawMax * 1.15)
+  const ticks = [0, 0.5, 1].map((f) => ({ f, label: fmtK(axisMax * f) }))
+  const budgetF = globalBudget > 0 && globalBudget <= axisMax ? globalBudget / axisMax : null
+
+  return (
+    <div>
+      {/* BUDGET LIMIT label above its dashed line */}
+      <div className="relative h-3.5">
+        {budgetF != null && (
+          <span
+            className="absolute top-0 -translate-x-1/2 whitespace-nowrap text-[9px] font-semibold uppercase tracking-wider text-rose-500/90"
+            style={{ left: ubLeft(budgetF) }}
+          >
+            Budget limit
+          </span>
+        )}
+      </div>
+
+      {/* rows with a gridline + budget-line overlay sized to the rows block */}
+      <div className="relative">
+        <div className="pointer-events-none absolute inset-0">
+          {ticks.map((t) => (
+            <div
+              key={`g${t.f}`}
+              className="absolute bottom-0 top-0 w-px bg-slate-100"
+              style={{ left: ubLeft(t.f) }}
+            />
+          ))}
+          {budgetF != null && (
+            <div
+              className="absolute bottom-0 top-0 border-l border-dashed border-rose-400/80"
+              style={{ left: ubLeft(budgetF) }}
+            />
+          )}
+        </div>
+
+        <div className="relative space-y-2">
+          {rows.map((r) => {
+            const usedPct = Math.min(100, (r.used / axisMax) * 100)
+            const budgetPct = Math.min(100, (r.budget / axisMax) * 100)
+            return (
+              <div
+                key={r.id}
+                className="flex items-center gap-2"
+                title={`${r.name}\n${fmtInt(r.used)} tok used / ${fmtInt(r.budget)} tok budget · ${Math.round(r.ratio * 100)}%`}
+              >
+                <div className="w-24 shrink-0 pr-1 text-right">
+                  <div className="truncate text-[11px] font-semibold text-brand-900">{r.name}</div>
+                  <div className={`text-[9px] ${r.over ? 'text-rose-500' : 'text-slate-400'}`}>
+                    {fmtK(r.used)} / {fmtK(r.budget)}
+                  </div>
+                </div>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="relative h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-full"
+                      style={{
+                        width: `${usedPct}%`,
+                        backgroundImage: usageGradient(r.warn, r.budget, axisMax),
+                        backgroundSize: `${(axisMax / Math.max(r.used, 1)) * 100}% 100%`,
+                        backgroundRepeat: 'no-repeat',
+                      }}
+                    />
+                  </div>
+                  <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-slate-100/70">
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-full bg-slate-300/80 dark:bg-white/15"
+                      style={{ width: `${budgetPct}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* token axis */}
+      <div className="relative mt-2 h-3">
+        {ticks.map((t) => (
+          <div
+            key={`t${t.f}`}
+            className="absolute top-0 -translate-x-1/2 text-[9px] font-medium text-slate-400"
+            style={{ left: ubLeft(t.f) }}
+          >
+            {t.label}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 // Split context nodes into `bins` equal-time buckets across their own span,
