@@ -63,15 +63,18 @@ const PAGES_META = {
 // Valid page ids are exactly the nav entries — derived, not hardcoded twice.
 const PAGES = new Set(Object.keys(PAGES_META))
 
-// The current page lives in the URL hash (e.g. #radar). Reading it on load is
-// what makes a refresh stay on the same page; an unknown/empty hash → dashboard.
-const pageFromHash = () => {
-  const h = (window.location.hash || '').replace(/^#\/?/, '')
-  return PAGES.has(h) ? h : 'dashboard'
+// The current page lives in the URL PATH (e.g. /radar). Reading it on load is
+// what makes a refresh stay on the same page; the root "/" or any unmatched route
+// → dashboard. Deep-linking a path (e.g. refreshing /sandbox) relies on the
+// dev/preview server's SPA fallback serving index.html — Vite's default
+// appType:'spa' does this, so no extra config is needed.
+const pageFromPath = () => {
+  const p = (window.location.pathname || '/').replace(/^\/+/, '').replace(/\/+$/, '')
+  return PAGES.has(p) ? p : 'dashboard'
 }
 
 export default function App() {
-  const [active, setActive] = useState(pageFromHash)
+  const [active, setActive] = useState(pageFromPath)
   const { isDark, toggle: toggleTheme } = useTheme()
 
   // Boot splash: on a fresh page load, show the animated logo as a loading screen
@@ -145,24 +148,28 @@ export default function App() {
     return () => clearTimeout(id)
   }, [toast])
 
-  // Keep the page in the URL hash so (a) a refresh stays on the same page and
-  // (b) the browser Back/Forward buttons move between pages. The hash is the
-  // single source of truth: a nav click sets the hash, and the hashchange
-  // listener — fired by clicks AND by Back/Forward — updates the rendered page.
+  // Keep the page in the URL path so (a) a refresh stays on the same page and
+  // (b) the browser Back/Forward buttons move between pages. The path is the
+  // single source of truth: a nav click pushes a history entry, and the popstate
+  // listener — fired by Back/Forward — re-derives the rendered page.
   useEffect(() => {
-    if (!window.location.hash) {
-      window.history.replaceState(null, '', `#${active}`)
+    // Normalise the root "/" (or any unmatched route that fell back to dashboard)
+    // to the canonical /dashboard, so the address bar always names the current
+    // page. replaceState adds no extra history entry.
+    if (pageFromPath() === 'dashboard' && window.location.pathname !== '/dashboard') {
+      window.history.replaceState(null, '', '/dashboard')
     }
-    const onHashChange = () => setActive(pageFromHash())
-    window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
+    const onPop = () => setActive(pageFromPath())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Navigate by setting the hash (pushes a history entry so Back/Forward works);
-  // the hashchange listener then updates `active`.
+  // Navigate by pushing the new path (so Back/Forward works). pushState does NOT
+  // fire popstate, so update the rendered page directly.
   const navigate = (id) => {
     if (id === active) return
-    window.location.hash = id
+    window.history.pushState(null, '', `/${id}`)
+    setActive(id)
   }
 
   // Nav selection: close the mobile drawer, then navigate.
