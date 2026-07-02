@@ -2673,8 +2673,8 @@ def healthz() -> dict:
 
 
 @router.get("/")
-def index() -> FileResponse:
-    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
+def index() -> dict:
+    return {"status": "ok", "message": "port 8000 is running"}
 
 
 # ----------------------------------------------------------------------
