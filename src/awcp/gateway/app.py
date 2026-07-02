@@ -50,10 +50,16 @@ from awcp.observability.middleware import instrument_fastapi, instrument_request
 from awcp.radar.api import router as radar_router, lifespan as radar_lifespan
 from awcp.gateway.user import router as user_router
 from awcp.gateway.opa_proxy import router as opa_proxy_router
+from awcp.gateway import chat_store
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Durable per-chat conversation store (fail-open: a no-op if no DB is
+    # configured). Backs POST /user/chat/turn + GET /user/chat/history — the
+    # per-chat context memory and the task console's context-window meter.
+    import asyncio as _asyncio
+    await _asyncio.to_thread(chat_store.init)
     # Drive the radar's lifespan here so its background scanner and Temporal
     # onboarding/execution workers start — those are what the bundle agents report
     # their per-step execution events into. The radar lifespan ignores the app it

@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 from temporalio.client import Client
 
 from awcp.gateway import agents_fs as fs
+from awcp.gateway import chat_store
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -87,10 +88,36 @@ class AskRequest(BaseModel):
     agent: str = Field(..., description="Agent id from GET /user/agents (the folder name)")
     input: str = Field(..., description="The prompt / goal to run through the agent")
     auto_start: bool = Field(True, description="Start the agent if it is not already running")
+    session: str = Field("", description="Chat/session id — groups turns for per-chat "
+                                         "context memory + the context-window meter")
 
 
 class ApproveBody(BaseModel):
     decision: str = Field("approve", description="approve | deny")
+
+
+class ChatTurnBody(BaseModel):
+    """One completed agent turn, POSTed by the agent when a task settles. Persisted
+    to ops.chat_turns so the run survives (replacing the artifacts/ folder) and so
+    the agent can recall prior turns of the same session for context."""
+    session_id: str = Field(..., description="The chat this turn belongs to")
+    task_id: str | None = None
+    workflow_id: str | None = None
+    agent_id: str | None = None
+    agent_name: str | None = None
+    framework: str | None = None
+    model: str | None = None
+    input: str = ""
+    output: str = ""
+    tools_used: list[str] = Field(default_factory=list)
+    status: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    created_ts: float | None = None
+    started_ts: float | None = None
+    finished_ts: float | None = None
+    duration_ms: int = 0
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
@@ -211,11 +238,12 @@ async def _ensure_up(agent_id: str, auto_start: bool) -> tuple[dict, dict]:
     return agent, state
 
 
-async def _submit_task(base: str, prompt: str) -> dict:
-    """POST the prompt as a governed task to the agent and return the task record."""
+async def _submit_task(base: str, prompt: str, session: str = "") -> dict:
+    """POST the prompt as a governed task to the agent and return the task record.
+    `session` groups turns into one chat so the agent can recall prior context."""
     async with httpx.AsyncClient(timeout=15.0) as c:
         try:
-            r = await c.post(f"{base}/tasks", json={"goal": prompt})
+            r = await c.post(f"{base}/tasks", json={"goal": prompt, "session": session})
         except Exception as e:
             raise HTTPException(
                 status_code=502,
@@ -457,7 +485,7 @@ async def submit(req: AskRequest) -> dict:
     info = await _fetch_info(state["port"])
     agent_id = info.get("agent_id")  # the radar/Temporal id, e.g. agent-langgraph-<hash>
 
-    task = await _submit_task(base, prompt)
+    task = await _submit_task(base, prompt, req.session)
     task_id = task["id"]
     workflow_id = f"task-{agent_id}-{task_id}" if agent_id else None
 
@@ -685,6 +713,58 @@ async def workflows(limit: int = 100) -> dict:
     return {"workflows": items[:cap], "counts": counts or fallback}
 
 
+# ── chat history / per-chat context memory ────────────────────────────────────
+# One chat = one session_id. The agent POSTs each finished turn here (durable run
+# record, replacing the artifacts/ folder) and GETs the prior turns of a session
+# before it runs so it can reference earlier context. The same GET drives the task
+# console's inline context-window meter (Σ total_tokens vs the model window).
+
+def _context_summary(used: int, turn_count: int) -> dict:
+    """Roll a session's totals into the meter the task console renders inline:
+    Σ tokens used, the context window, and how much is used / remaining."""
+    used = int(used or 0)
+    window = max(1, chat_store.CONTEXT_WINDOW_TOKENS)
+    used_capped = min(used, window)
+    used_pct = round(used * 100 / window, 1)
+    remaining = max(0, window - used)
+    return {
+        "context_window": window,
+        "used_tokens": used,
+        "used_pct": used_pct,                 # can exceed 100 if the chat overflows
+        "used_pct_capped": round(used_capped * 100 / window, 1),
+        "remaining_tokens": remaining,
+        "remaining_pct": round(remaining * 100 / window, 1),
+        # NOTE: a COUNT, deliberately NOT keyed "turns" — the history route also
+        # returns the turns LIST under "turns", and this dict is spread AFTER it, so
+        # reusing the key would clobber the list with an int (the agent then slices
+        # an int → "'int' object is not subscriptable"). Keep them distinct.
+        "turn_count": int(turn_count or 0),
+    }
+
+
+@router.post("/chat/turn")
+async def chat_turn(body: ChatTurnBody) -> dict:
+    """Persist one completed agent turn to ops.chat_turns. Best-effort: returns
+    {stored:false} (never errors) when no DB is configured, so a turn is never lost
+    to the caller and the agent keeps running with no memory."""
+    seq = await asyncio.to_thread(chat_store.record, body.model_dump())
+    return {"stored": seq is not None, "seq": seq, "session_id": body.session_id}
+
+
+@router.get("/chat/history/{session_id}")
+async def chat_history(session_id: str, limit: int = 50) -> dict:
+    """Prior turns for one chat (oldest first) + the context-window meter. The agent
+    reads this before running to build a conversation preamble; the task console
+    reads it to render the inline 'context used / remaining' bar."""
+    turns = await asyncio.to_thread(chat_store.history, session_id, limit)
+    if turns is None:                         # store disabled / unreachable — fail open
+        return {"session_id": session_id, "enabled": False, "turns": [],
+                **_context_summary(0, 0)}
+    use = await asyncio.to_thread(chat_store.usage, session_id) or {}
+    return {"session_id": session_id, "enabled": True, "turns": turns,
+            **_context_summary(use.get("used_tokens", 0), use.get("turns", len(turns)))}
+
+
 @router.post("/ask")
 async def ask(req: AskRequest) -> dict:
     """Run the chosen agent on the prompt, BLOCK until it settles, return result.
@@ -700,7 +780,7 @@ async def ask(req: AskRequest) -> dict:
     info = await _fetch_info(state["port"])
     agent_id = info.get("agent_id")
 
-    task = await _submit_task(base, prompt)
+    task = await _submit_task(base, prompt, req.session)
     task_id = task["id"]
     workflow_id = f"task-{agent_id}-{task_id}" if agent_id else None
 

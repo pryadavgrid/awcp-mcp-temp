@@ -331,6 +331,41 @@ CREATE TABLE ops.sandbox_events (
 
 CREATE INDEX idx_sandbox_events_event_ts ON ops.sandbox_events (event_ts DESC);
 
+-- Per-chat conversation history — one row per completed agent turn. Replaces the
+-- ad-hoc artifacts/ folder as the durable record of what a user asked and what an
+-- agent answered, and is the backing store for BOTH (a) per-chat context memory
+-- (the agent reads prior turns of the same session_id before it runs so it can
+-- reference earlier context) and (b) the task console's inline context-window
+-- meter (Σ total_tokens per session vs AWCP_CONTEXT_WINDOW_TOKENS). Written
+-- best-effort by the gateway (awcp.gateway.chat_store) from POST /user/chat/turn;
+-- created on an already-initialised volume via chat_store._create_table().
+CREATE TABLE ops.chat_turns (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts            timestamptz NOT NULL DEFAULT now(),
+    session_id    text NOT NULL,        -- the chat this turn belongs to
+    seq           integer NOT NULL DEFAULT 0,   -- turn order within the chat
+    task_id       text,
+    workflow_id   text,
+    agent_id      text,
+    agent_name    text,
+    framework     text,
+    model         text,
+    input         text,                 -- the user's input prompt
+    output        text,                 -- the agent's output / result
+    tools_used    jsonb   NOT NULL DEFAULT '[]',   -- the tool calls this turn made
+    status        text,                 -- done | blocked | canceled | failed
+    input_tokens  integer NOT NULL DEFAULT 0,
+    output_tokens integer NOT NULL DEFAULT 0,
+    total_tokens  integer NOT NULL DEFAULT 0,
+    created_ts    double precision,     -- task lifecycle epochs (timing)
+    started_ts    double precision,
+    finished_ts   double precision,
+    duration_ms   integer NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_chat_turns_session ON ops.chat_turns (session_id, ts);
+CREATE INDEX idx_chat_turns_ts      ON ops.chat_turns (ts DESC);
+
 CREATE TABLE evidence.token_ledger_2026_06 PARTITION OF evidence.token_ledger
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 
