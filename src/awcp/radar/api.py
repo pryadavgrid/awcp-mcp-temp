@@ -1193,7 +1193,8 @@ def _gate_guard(agent_id: str, decision: dict, action: str, scope: str,
     return decision
 
 
-def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "") -> dict:
+def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "",
+                          approved: bool = False) -> dict:
     """Apply the operator policy (Radar Policy tab) as an ADMISSION check on top of
     the PDP decision, covering BOTH halves of the policy:
 
@@ -1208,6 +1209,11 @@ def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "") -
     reverse, and is a no-op when no policy is stored. Fail-open on any error (the gate
     must never crash on the policy layer)."""
     if decision.get("decision") != "allow":
+        return decision
+    # The operator already approved this exact call on the AWCP UI (Tool-Risk-Tier
+    # approval). That IS the authorization, so don't re-deny it here on the risk-level
+    # admission check — otherwise the approved tool runs only to be blocked again.
+    if approved:
         return decision
     try:
         thr = _opa_threshold()
@@ -1645,6 +1651,12 @@ class GateRequest(BaseModel):
     token_id: str = ""            # an approval token the caller presents for a gated write
     workflow_id: str = ""         # branch context recorded on an issued approval token
     branch_id: str = ""
+    # True when the operator ALREADY approved this exact call on the AWCP UI (the
+    # Tool-Risk-Tier approval pause). That approval is the operator's authorization,
+    # so it lifts the operator-policy admission deny (e.g. "agent not recognised /
+    # risk ≥ allowed level") for this one call — otherwise an approved tool would run
+    # only to be blocked again by a second gate.
+    approved: bool = False
 
 
 class SignalRequest(BaseModel):
@@ -1708,7 +1720,7 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     # Operator-policy admission: a detected agent the operator did NOT recognise,
     # OR a tool the operator denied (the gated `action` is the tool name), is denied
     # (Radar Policy tab). Only ever tightens; no-op when no policy names them.
-    decision = _operator_policy_gate(e, decision, action=req.action)
+    decision = _operator_policy_gate(e, decision, action=req.action, approved=req.approved)
 
     elapsed = time.monotonic() - t0
     METRICS.record_gate(
@@ -2264,6 +2276,11 @@ class TaskExecEventRequest(BaseModel):
     call_n: int = 1
     result_len: int = 0
     tools_used: list[str] = []
+    # True when a governed agent already cleared this tool through the pre-execution
+    # Tool-Risk-Tier gate (below threshold, or the operator APPROVED it on the AWCP UI
+    # before it ran). The post-hoc tier gate below then records the tier for the bars
+    # but does NOT re-block it — enforcement already happened up front.
+    approved: bool = False
     extra: dict = {}
 
 
@@ -2432,8 +2449,15 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
     # allow (whitelist) or deny (the operator's "special changes requested"). A
     # final block reuses the policy-guard's finish-blocked path so the user UI
     # surfaces the severity. Runs when EITHER layer is active.
-    if agent_id and event.get("type") in ("web_search", "tool_called") and (
-            OPA_AGENT_URL or operator_policy.enabled()):
+    # A governed agent now consults the OPA tier gate BEFORE it runs each tool (via
+    # POST /opa/evaluate) and pauses for operator approval on the AWCP UI when the tier
+    # is at/above the threshold. Such tools arrive here marked approved=True — the
+    # pre-gate already recorded the tier + decision, so we skip re-evaluating (no
+    # duplicate decision) and, crucially, never re-block a tool the operator approved.
+    # Un-approved tool events (an agent that didn't pre-gate) still hit the backstop.
+    if (agent_id and event.get("type") in ("web_search", "tool_called")
+            and not event.get("approved")
+            and (OPA_AGENT_URL or operator_policy.enabled())):
         _tool = event.get("tool_name") or event.get("type")
         if _tool:
             _opa = await _opa_tool_evaluate(agent_id, task_id, _tool, event)
@@ -2452,27 +2476,39 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
             if _opa.get("decision") == "block":
                 _why = _opa.get("reason") or (
                     f"tool '{_tool}' is {_opa.get('risk_tier')} risk — blocked by OPA tool policy")
-                _record_event("gate", agent_id, f"deny (opa_tool_tier:{_opa.get('risk_tier')})",
-                              action=_tool, decision="denied", reason=_why, task_id=task_id)
-                _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=_tool,
-                      reason=_why, task_id=task_id)
-                wf_id = STATE["exec_workflows"].pop(task_id, None)
-                STATE["exec_agents"].pop(task_id, None)
-                if wf_id and STATE["temporal"] and STATE["client"]:
-                    try:
-                        handle = STATE["client"].get_workflow_handle(wf_id)
-                        await handle.signal(
-                            AgentExecutionWorkflow.finish,
-                            {"status": "blocked", "error": _why},
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("radar.opa.block.finish_failed task_id=%s error=%r",
-                                    task_id, exc)
-                log.warning("radar.exec.event.blocked agent_id=%s task_id=%s tool=%s tier=%s reason=opa_tool_tier",
-                            agent_id, task_id, _tool, _opa.get("risk_tier"))
-                return {"ok": False, "reason": "blocked_by_opa_tool_tier",
-                        "tool": _tool, "decision": "deny",
-                        "risk_tier": _opa.get("risk_tier"), "gate_reason": _why}
+                # A threshold-crossing block is NOT enforced here anymore: the governed
+                # agent already paused the tool for operator approval BEFORE running it
+                # (POST /opa/evaluate → /approvals). This post-hoc path only RECORDS the
+                # tier (done by _opa_tool_evaluate above, for the Radar tier bars). We
+                # hard-stop the workflow ONLY for an EXPLICIT operator deny (Policy tab
+                # block=true) — the operator's authoritative "never run this tool".
+                _explicit_deny = bool(_ov and _ov.get("block") is True)
+                if not _explicit_deny:
+                    log.info("radar.exec.event.tier_recorded agent_id=%s task_id=%s tool=%s "
+                             "tier=%s (approval handled pre-exec)",
+                             agent_id, task_id, _tool, _opa.get("risk_tier"))
+                else:
+                    _record_event("gate", agent_id, f"deny (operator_policy:{_opa.get('risk_tier')})",
+                                  action=_tool, decision="denied", reason=_why, task_id=task_id)
+                    _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=_tool,
+                          reason=_why, task_id=task_id)
+                    wf_id = STATE["exec_workflows"].pop(task_id, None)
+                    STATE["exec_agents"].pop(task_id, None)
+                    if wf_id and STATE["temporal"] and STATE["client"]:
+                        try:
+                            handle = STATE["client"].get_workflow_handle(wf_id)
+                            await handle.signal(
+                                AgentExecutionWorkflow.finish,
+                                {"status": "blocked", "error": _why},
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning("radar.opa.block.finish_failed task_id=%s error=%r",
+                                        task_id, exc)
+                    log.warning("radar.exec.event.blocked agent_id=%s task_id=%s tool=%s reason=operator_deny",
+                                agent_id, task_id, _tool)
+                    return {"ok": False, "reason": "blocked_by_operator_policy",
+                            "tool": _tool, "decision": "deny",
+                            "risk_tier": _opa.get("risk_tier"), "gate_reason": _why}
 
     # Degradation directives (magazine Step 04, the half the control plane owns):
     #  • hand the runtime its CURRENT stage directives every step so it applies

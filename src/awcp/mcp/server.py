@@ -208,10 +208,14 @@ def _record_checkpoint(agent_id: str, task_id: str, tool_name: str,
     )
 
 
-def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
+def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool,
+                approved: bool = False) -> dict:
     """Ask the radar's write-action gate. Returns the radar's decision dict.
     On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a missing
-    control plane never hard-breaks tool execution (unless ops opt into fail-closed)."""
+    control plane never hard-breaks tool execution (unless ops opt into fail-closed).
+
+    `approved` forwards an operator's AWCP-UI approval of this exact call so the gate's
+    operator-policy admission check doesn't re-deny an already-approved tool."""
     if not agent_id:
         # No identity to gate against — treat as an ungoverned (direct) call.
         return {"decision": "allow", "mode": "ungoverned",
@@ -219,7 +223,7 @@ def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
     try:
         resp = httpx.post(
             f"{RADAR_URL}/agents/{agent_id}/gate",
-            json={"action": action, "write": is_write, "scope": scope},
+            json={"action": action, "write": is_write, "scope": scope, "approved": approved},
             timeout=GATE_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -484,7 +488,8 @@ def execute_tool(
         #    The scope is only forwarded when strict magazine-scope authorization
         #    is enabled.
         gate = _radar_gate(
-            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write
+            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write,
+            approved=approved,
         )
         decision = gate.get("decision", "allow")
         if span is not None:

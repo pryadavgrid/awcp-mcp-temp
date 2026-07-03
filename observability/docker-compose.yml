@@ -228,7 +228,10 @@ services:
     container_name: lmnr-postgres
     restart: unless-stopped
     ports:
-      - "5433:5432"
+      # Host-side port only (internal stack uses lmnr-postgres:5432 over the
+      # compose network). 5433 collides with an unrelated project's DB, so this
+      # maps to 5434 on the host — bump it if that ever collides too.
+      - "5434:5432"
     volumes:
       - lmnr_postgres_data:/var/lib/postgresql/data
     environment:
