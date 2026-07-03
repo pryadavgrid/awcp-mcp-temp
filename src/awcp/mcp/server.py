@@ -6,6 +6,7 @@ import json
 import logging
 
 import os
+import re
 import sys
 from datetime import timedelta
 from typing import Annotated, Any
@@ -41,7 +42,11 @@ from awcp.runtime.sandbox import (
     sandbox_status,
     write_file_sync,
 )
-from awcp.context_graph.client import record_checkpoint as _cg_record
+from awcp.context_graph.client import (
+    record_checkpoint as _cg_record,
+    fetch_working_set as _cg_working_set,
+    fetch_workflow_nodes as _cg_nodes,
+)
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
@@ -561,6 +566,208 @@ def execute_tool(
                 "reason": str(e),
                 "risk": eff_risk,
             })
+
+
+# ======================================================================
+# Context offload / recall — the context-window pressure valve.
+#
+# An agent on a LONG-RUNNING task with a LIMITED context window can park a chunk
+# of working context (accumulated findings, long tool output, a draft) in the
+# context graph and drop it from its window, keeping only the tiny ref this
+# returns. Later — same run or after a crash/handover — context_recall pulls it
+# back: either that exact chunk (by ref) or the Context Graph Manager's
+# budget-fitted working set (relevance-ranked fresh steps + resume anchor that
+# actually FIT the window). Both actions are themselves recorded as steps, so the
+# offload/recall traffic is visible on the Context Graph UI and evidence ledger.
+# ======================================================================
+OFFLOAD_MAX_CHARS = int(os.getenv("AWCP_CTX_OFFLOAD_MAX_CHARS", "20000"))
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap ~chars/4 token estimate (matches laminar's fallback). The manager
+    recounts server-side with tiktoken when fitting the working set."""
+    return max(1, len(text or "") // 4)
+
+
+def _slug(label: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", str(label or "").lower()).strip("-")
+    return s or "chunk"
+
+
+def _node_summary(payload: dict) -> str:
+    """One-line summary of a non-offload node's payload for recall output."""
+    return " ".join(
+        f"{k}={v}" for k, v in (payload or {}).items()
+        if v not in (None, "", {}) and not str(k).startswith("_") and k != "content"
+    )
+
+
+@mcp.tool(
+    description=(
+        "Context OFFLOAD — park a chunk of working context (accumulated findings, "
+        "long tool output, notes, a draft) in the governed context graph so it "
+        "stops consuming this agent's context window. The content is stored "
+        "verbatim on a tamper-chained node and a small JSON ref is returned: "
+        '{"status","ref","label","resume_pointer","tokens"}. Drop the content '
+        "from your window and keep the ref; retrieve it later with context_recall "
+        "(by ref for the exact chunk, or without ref for the budget-fitted "
+        "working set). Use whenever your context window is filling up on a "
+        "long-running task."
+    )
+)
+def context_offload(
+    content: Annotated[str, Field(
+        description="The context text to offload — stored verbatim, retrievable later.")],
+    label: Annotated[str, Field(
+        description="Short name for this chunk (e.g. findings, sources, draft) — "
+                    "used in the ref, the resume pointer, and the dashboard.")] = "chunk",
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id (as registered with the radar).")] = "",
+    task_id: Annotated[str, Field(
+        description="The task/run this context belongs to; recall uses the same id.")] = "",
+) -> str:
+    if not agent_id:
+        return json.dumps({"status": "error",
+                           "output": "agent_id is required to offload context"})
+    if not (content or "").strip():
+        return json.dumps({"status": "error", "output": "content is empty — nothing to offload"})
+
+    truncated = len(content) > OFFLOAD_MAX_CHARS
+    stored_content = content[:OFFLOAD_MAX_CHARS]
+    slug = _slug(label)
+    tokens = _estimate_tokens(stored_content)
+    resume_pointer = f"{task_id or 'task'}:offloaded:{slug}"
+
+    node = _cg_record(
+        RADAR_URL, agent_id,
+        step=f"offload:{slug}",
+        task_id=task_id,
+        workflow_id=task_id,
+        actor=agent_id,
+        resume_pointer=resume_pointer,
+        context=stored_content,   # hashed → the chain proves the content later
+        payload={"content": stored_content, "label": slug,
+                 "tokens": tokens, "truncated": truncated},
+        timeout=GATE_TIMEOUT,
+    )
+    if not node:
+        return json.dumps({"status": "error",
+                           "output": "context graph unreachable — content NOT offloaded, keep it in your window"})
+    logger.info("mcp.context.offload agent_id=%s task=%s label=%s tokens=%d",
+                agent_id, task_id, slug, tokens)
+    return json.dumps({
+        "status": "offloaded",
+        "ref": node.get("row_hash", ""),
+        "label": slug,
+        "resume_pointer": resume_pointer,
+        "tokens": tokens,
+        "truncated": truncated,
+        "workflow_id": node.get("workflow_id", task_id or agent_id),
+    })
+
+
+@mcp.tool(
+    description=(
+        "Context RECALL — retrieve context previously offloaded to (or recorded "
+        "in) the context graph. With `ref`: returns that exact chunk verbatim. "
+        "Without `ref`: returns the Context Graph Manager's working set for the "
+        "task — the relevance-ranked, staleness-filtered slice of steps that fits "
+        "in `budget` tokens (optionally steered by `focus`), plus the resume "
+        "anchor and any long-term memories. Use when resuming a long-running "
+        "task, recovering after a restart, or when you need offloaded context back."
+    )
+)
+def context_recall(
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id (as registered with the radar).")] = "",
+    task_id: Annotated[str, Field(
+        description="The task/run to recall context for (same id used when offloading).")] = "",
+    ref: Annotated[str, Field(
+        description="Optional node ref (row_hash, or a unique prefix of it) from "
+                    "context_offload — returns that exact chunk.")] = "",
+    focus: Annotated[str, Field(
+        description="Optional focus text — steers relevance ranking and long-term recall.")] = "",
+    budget: Annotated[int, Field(
+        description="Optional context-window token budget for the working set; "
+                    "0 = server default (AWCP_CTX_TOKEN_BUDGET).")] = 0,
+) -> str:
+    workflow_id = task_id or agent_id
+    if not workflow_id:
+        return json.dumps({"status": "error",
+                           "output": "task_id or agent_id is required to recall context"})
+
+    def _mark_recall(returned: int, used_tokens: int) -> None:
+        # The retrieval itself is part of the trail (best-effort, never blocking).
+        _cg_record(
+            RADAR_URL, agent_id or workflow_id,
+            step="recall",
+            task_id=task_id,
+            workflow_id=task_id,
+            actor=agent_id or workflow_id,
+            resume_pointer=f"{task_id or 'task'}:after:recall",
+            payload={"ref": ref, "focus": focus, "returned": returned,
+                     "recalled_tokens": used_tokens},
+            timeout=GATE_TIMEOUT,
+        )
+
+    # Targeted retrieval: one exact chunk by its row_hash ref (prefix allowed).
+    if ref:
+        nodes = _cg_nodes(RADAR_URL, workflow_id)
+        match = next((n for n in nodes
+                      if str(n.get("row_hash", "")).startswith(ref)), None)
+        if not match:
+            return json.dumps({"status": "not_found",
+                               "output": f"no node with ref '{ref}' in workflow '{workflow_id}'"})
+        payload = match.get("payload") or {}
+        content = payload.get("content", "")
+        _mark_recall(1, _estimate_tokens(str(content)))
+        return json.dumps({
+            "status": "ok",
+            "ref": match.get("row_hash", ""),
+            "step": match.get("step", ""),
+            "label": payload.get("label", ""),
+            "content": content if content else _node_summary(payload),
+            "resume_pointer": match.get("resume_pointer", ""),
+            "ts": match.get("ts"),
+        })
+
+    # Working-set retrieval: the budget-fitted recovery slice for this run.
+    ws = _cg_working_set(RADAR_URL, workflow_id, budget=budget, focus=focus)
+    if ws is None:
+        return json.dumps({"status": "error",
+                           "output": "context graph unreachable — nothing recalled"})
+    items = []
+    for s in ws.get("selected") or []:
+        n = (s or {}).get("node") or {}
+        p = n.get("payload") or {}
+        items.append({
+            "step": n.get("step", ""),
+            "ts": n.get("ts"),
+            "ref": n.get("row_hash", ""),
+            "tokens": s.get("tokens", 0),
+            "relevance": s.get("relevance", 0),
+            # offloaded chunks come back verbatim; ordinary steps as a summary
+            "content": p.get("content") or _node_summary(p),
+        })
+    memories = [{"text": (m.get("node") or {}).get("payload", {}).get("text", ""),
+                 "score": m.get("relevance", 0)}
+                for m in (ws.get("memory") or [])]
+    _mark_recall(len(items), int(ws.get("used_tokens") or 0))
+    logger.info("mcp.context.recall agent_id=%s wf=%s items=%d used=%s/%s",
+                agent_id, workflow_id, len(items),
+                ws.get("used_tokens"), ws.get("budget_tokens"))
+    return json.dumps({
+        "status": "ok",
+        "workflow_id": workflow_id,
+        "resume_pointer": ws.get("resume_pointer", ""),
+        "budget_tokens": ws.get("budget_tokens", 0),
+        "used_tokens": ws.get("used_tokens", 0),
+        "dropped": ws.get("dropped", 0),
+        "excluded_stale": ws.get("excluded_stale", 0),
+        "items": items,
+        "memory": memories,
+        "note": ws.get("note", ""),
+    })
 
 
 @mcp.tool(
