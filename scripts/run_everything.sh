@@ -316,9 +316,13 @@ if [ -n "${LMNR_PROJECT_API_KEY:-}" ]; then
     [ -z "$(port_open 5667)" ] && \
       warn "  …but the Laminar dashboard (:5667) isn't answering — start the lmnr frontend to view the traces."
   else
-    warn "LMNR_PROJECT_API_KEY is set but the Laminar stack is NOT running (:8881/:8880/:5667 all closed)."
-    warn "  Start it from the lmnr repo first, e.g.:  docker compose -f /path/to/lmnr/docker-compose.yml up -d"
-    warn "  Until then token spans have nowhere to land and the :5667 dashboard won't exist."
+    # Key is set but the self-hosted Laminar stack isn't running. Rather than
+    # let the OTLP exporter retry a dead endpoint (connection-refused spam in the
+    # gateway log), fall back cleanly to the LOCAL token monitor for this run by
+    # unsetting the key so the exporter is a no-op. To dual-export, start the
+    # lmnr stack first:  docker compose -f /path/to/lmnr/docker-compose.yml up -d
+    unset LMNR_PROJECT_API_KEY
+    say "Laminar stack not running (:8881/:8880/:5667 closed) — using the LOCAL token monitor at /laminar/ui."
   fi
 else
   warn "LMNR_PROJECT_API_KEY not set — token spans won't reach the :5667 Laminar dashboard"
