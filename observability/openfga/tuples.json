@@ -1,0 +1,8 @@
+{
+  "writes": {
+    "tuple_keys": [
+      { "user": "user:operator-test", "relation": "operator", "object": "system:awcp" },
+      { "user": "user:viewer-test", "relation": "viewer", "object": "system:awcp" }
+    ]
+  }
+}

@@ -26,6 +26,15 @@ const TEMPLATE = {
   },
 }
 
+// Risk-tier vocabularies + colours (shared with Radar's Tool Risk Tiers): agents
+// go low·medium·high; tools also have severe. 'default' means "no override — use
+// the OPA baseline + slider" and reads slate.
+const AGENT_TIERS = ['low', 'medium', 'high']
+const TOOL_TIERS = ['low', 'medium', 'high', 'severe']
+const TIER_HEX = { low: '#22c55e', medium: '#f59e0b', high: '#f97316', severe: '#f43f5e' }
+const DEFAULT_HEX = '#94a3b8' // slate-400 — "no opinion"
+const tierHex = (t) => TIER_HEX[t] || DEFAULT_HEX
+
 // ── lightweight JSON syntax highlighting ──────────────────────────────────────
 // Renders the editor text as coloured HTML shown UNDER a transparent textarea, so
 // colouring tracks typing live without a heavy editor dependency. Restrained
@@ -35,31 +44,25 @@ const TEMPLATE = {
 // Two palettes: dark-on-light for the light theme, and bright-on-black for the
 // dark theme (so the editor reads like a real terminal — black background, vivid
 // colour-coded tokens). The active one is chosen at render time from the theme.
-// VS Code-style token colouring: a distinct hue per entry type. Same hue families
-// in both themes (blue keys · green strings · amber numbers · violet literals ·
-// slate punctuation), tuned dark-on-light for the light sheet and bright-on-black
-// for the dark terminal.
 const _HL_LIGHT = {
-  key: '#1d4ed8',    // blue-700 — property names
-  str: '#047857',    // emerald-700 — string values
-  num: '#b45309',    // amber-700 — numbers
-  lit: '#7c3aed',    // violet-600 — true/false/null
-  punct: '#64748b',  // slate-500 — { } [ ] , :
+  key: '#1d4ed8',
+  str: '#047857',
+  num: '#b45309',
+  lit: '#7c3aed',
+  punct: '#64748b',
 }
 const _HL_DARK = {
-  key: '#4fc1ff',    // bright blue — property names
-  str: '#5fd38d',    // bright green — string values
-  num: '#dcb46a',    // gold — numbers
-  lit: '#c191e8',    // bright violet — true/false/null
-  punct: '#9aa6b2',  // light slate — { } [ ] , :
+  key: '#4fc1ff',
+  str: '#5fd38d',
+  num: '#dcb46a',
+  lit: '#c191e8',
+  punct: '#9aa6b2',
 }
 
 function escapeHtml(s) {
   return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))
 }
 
-// Colour one line of JSON. (Strings never span lines in valid JSON, so a per-line
-// pass is safe and lets us style the error line independently.)
 function highlightLine(line, hl) {
   return escapeHtml(line).replace(
     /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|([{}[\],:])/g,
@@ -78,9 +81,6 @@ function highlightLine(line, hl) {
   )
 }
 
-// Render every line as a block, so the offending line (1-based `errorLine`, or null
-// when the JSON is valid) gets a soft red wash + a red wavy underline — an IDE-style
-// error marker that lines up exactly with the line number in the gutter.
 const _ERR_STYLE =
   'display:block;background:rgba(239,68,68,0.13);' +
   'text-decoration:underline wavy #ef4444;text-underline-offset:3px;text-decoration-skip-ink:none'
@@ -89,7 +89,7 @@ function highlightJsonLines(src, errorLine, hl) {
   return src
     .split('\n')
     .map((ln, i) => {
-      const inner = highlightLine(ln, hl) || ' ' // keep empty lines at full row height
+      const inner = highlightLine(ln, hl) || ' '
       const style = i + 1 === errorLine ? _ERR_STYLE : 'display:block'
       return `<span style="${style}">${inner}</span>`
     })
@@ -105,15 +105,14 @@ export default function Policy() {
   const [dirty, setDirty] = useState(false)
   const [msg, setMsg] = useState(null) // { tone:'green'|'red', text }
   const [saving, setSaving] = useState(false)
+  // Visual builder is the DEFAULT view; the toggle "slider" flips to the raw JSON.
+  const [view, setView] = useState('builder')
   const fileRef = useRef(null)
   const taRef = useRef(null)
   const gutterRef = useRef(null)
   const preRef = useRef(null)
 
-  // Track the app's dark theme by watching the `dark` class on <html> (set by the
-  // theme toggle). Used to switch the editor between a light sheet and a black
-  // terminal with bright syntax colours. A MutationObserver keeps it reactive even
-  // though the toggle lives in another component.
+  // Track the app's dark theme by watching the `dark` class on <html>.
   const [isDark, setIsDark] = useState(() =>
     typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
   )
@@ -126,12 +125,9 @@ export default function Policy() {
     return () => obs.disconnect()
   }, [])
 
-  // Line numbers for the gutter, derived from the current text.
   const lineCount = text.length ? text.split('\n').length : 1
   const lineNumbers = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')
 
-  // Live JSON validity → the 1-based line of the parse error (or null when valid /
-  // empty), so the editor can mark that line red as the operator types.
   const errorLine = useMemo(() => {
     if (!text.trim()) return null
     try {
@@ -143,16 +139,11 @@ export default function Policy() {
     }
   }, [text])
 
-  // The highlighted HTML for the editor's underlay (colours + red error line).
-  // Palette follows the theme: bright-on-black in dark mode, dark-on-light in light.
   const highlightedHtml = useMemo(
     () => highlightJsonLines(text, errorLine, isDark ? _HL_DARK : _HL_LIGHT),
     [text, errorLine, isDark],
   )
 
-  // Turn a JSON.parse error into a line/column the operator can jump to. V8's
-  // message carries a character "position N"; we map it back to line+col so the
-  // gutter number is actionable. Falls back to the raw message if no position.
   function jsonError(e, src) {
     const m = /position (\d+)/.exec(e.message || '')
     if (m) {
@@ -187,10 +178,6 @@ export default function Policy() {
     }
   }
 
-  // Tab indents instead of moving focus, so the JSON editor behaves like a code
-  // editor. Tab: insert 2 spaces at the cursor, or indent every line in a multi-line
-  // selection. Shift+Tab: dedent the current/selected lines. 2 spaces matches
-  // JSON.stringify(…, 2). Selection is restored after React re-renders the value.
   function handleEditorKeyDown(e) {
     if (e.key !== 'Tab') return
     e.preventDefault()
@@ -200,7 +187,6 @@ export default function Policy() {
     const lineStart = value.lastIndexOf('\n', start - 1) + 1
     const restore = (s, end2) => requestAnimationFrame(() => ta.setSelectionRange(s, end2))
 
-    // Plain Tab with no selection -> just insert an indent at the cursor.
     if (!e.shiftKey && start === end) {
       setText(value.slice(0, start) + INDENT + value.slice(end))
       setDirty(true)
@@ -208,7 +194,6 @@ export default function Policy() {
       return
     }
 
-    // Otherwise indent / dedent every line touched by the selection.
     const lines = value.slice(lineStart, end).split('\n')
     let firstDelta = 0
     let totalDelta = 0
@@ -234,16 +219,13 @@ export default function Policy() {
     refresh()
   }
 
-  // Import a JSON file from the operator's machine into the editor. Pure
-  // client-side (FileReader) — nothing is uploaded until they click Save. We
-  // validate it parses and pretty-print it; bad files are reported, not loaded.
   async function importFile(e) {
     const file = e.target.files?.[0]
-    e.target.value = '' // allow re-importing the same filename
+    e.target.value = ''
     if (!file) return
     try {
       const raw = await file.text()
-      const doc = JSON.parse(raw) // reject non-JSON before touching the editor
+      const doc = JSON.parse(raw)
       setText(JSON.stringify(doc, null, 2))
       setDirty(true)
       setMsg({ tone: 'green', text: `imported ${file.name} — review, then Save` })
@@ -268,7 +250,6 @@ export default function Policy() {
       setMsg({ tone: 'green', text: `✓ saved v${r.version} (${r.enabled ? 'active' : 'inert'})` })
       refresh()
     } catch (e) {
-      // The backend returns 400 (bad shape) or 503 (no governance DB) with a detail.
       setMsg({ tone: 'red', text: `✗ ${e.message}` })
     } finally {
       setSaving(false)
@@ -283,88 +264,102 @@ export default function Policy() {
         right={<span className="text-xs text-slate-500">{meta}</span>}
       >
         <div className="space-y-4 px-5 py-4">
-          <dl className="grid grid-cols-[6.5rem_1fr] gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
-            <dt className="font-mono text-[11px] text-slate-500">default</dt>
-            <dd className="text-slate-600">
-              Allowed when the tier is <span className="font-medium">below</span> the “allowed risk level” slider;
-              denied at or above it.
-            </dd>
-            <dt className="font-mono text-[11px] text-slate-500">allow</dt>
-            <dd className="text-slate-600">
-              <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">true</code> always
-              allow, <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">false</code>{' '}
-              always deny — overrides the slider. Omit to let the slider decide.
-            </dd>
-            <dt className="font-mono text-[11px] text-slate-500">risk</dt>
-            <dd className="text-slate-600">
-              Relabels the tier compared against the slider — agents{' '}
-              <span className="font-mono">low·medium·high</span>, tools also <span className="font-mono">severe</span>.
-            </dd>
-            <dt className="font-mono text-[11px] text-slate-500">skills</dt>
-            <dd className="text-slate-600">
-              Match agents by a card-declared skill (Skills column below). Can only{' '}
-              <span className="font-medium">tighten</span> — <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">allow:false</code> or raise risk — since skills are self-declared.
-            </dd>
-          </dl>
-
-          {/* Code-style editor: a line-number gutter + live JSON syntax colouring.
-              The colours are rendered in a <pre> UNDER a transparent textarea (the
-              textarea handles input/caret/selection; the pre shows the colours). All
-              three layers share the same font/size/line-height/padding and no-wrap,
-              so colours, caret and line numbers line up exactly and scroll together. */}
-          <div
-            className={`flex h-80 overflow-hidden rounded-lg border focus-within:border-brand-500 ${
-              isDark
-                ? 'border-[#23302b] bg-[#0c1411]'
-                : 'border-slate-300 bg-slate-50 focus-within:bg-white'
-            }`}
-          >
-            <div
-              ref={gutterRef}
-              aria-hidden="true"
-              className="select-none overflow-hidden whitespace-pre py-3 pl-3 pr-2 text-right font-mono text-[12.5px] leading-relaxed text-slate-400"
-            >
-              {lineNumbers}
+          {/* View toggle (the "slider"): Visual builder is the default; flip it to
+              show the current policy as raw, editable JSON. Both edit one document. */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500">
+              <LegendDot hex="#22c55e" label="allow" />
+              <LegendDot hex="#f43f5e" label="deny" />
+              <LegendDot hex={DEFAULT_HEX} label="default (slider decides)" />
+              <span className="text-slate-300">·</span>
+              <span>risk:</span>
+              <LegendDot hex={TIER_HEX.low} label="low" />
+              <LegendDot hex={TIER_HEX.medium} label="medium" />
+              <LegendDot hex={TIER_HEX.high} label="high" />
+              <LegendDot hex={TIER_HEX.severe} label="severe" />
             </div>
-            <div className="relative flex-1 overflow-hidden">
-              <pre
-                ref={preRef}
-                aria-hidden="true"
-                className={`pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed ${
-                  isDark ? 'text-[#cfe3d6]' : 'text-slate-800'
-                }`}
-                dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-              />
-              <textarea
-                ref={taRef}
-                value={text}
-                spellCheck={false}
-                wrap="off"
-                // Keep the typed text invisible so the coloured <pre> underlay shows
-                // through. Inline (not just the text-transparent class) so it beats
-                // the global `.dark textarea { color }` rule, which would otherwise
-                // paint the text opaque white in dark mode and hide the colours.
-                style={{ color: 'transparent' }}
-                onChange={(e) => {
-                  setText(e.target.value)
-                  setDirty(true)
-                }}
-                onKeyDown={handleEditorKeyDown}
-                onScroll={(e) => {
-                  const { scrollTop, scrollLeft } = e.target
-                  if (gutterRef.current) gutterRef.current.scrollTop = scrollTop
-                  if (preRef.current) {
-                    preRef.current.scrollTop = scrollTop
-                    preRef.current.scrollLeft = scrollLeft
-                  }
-                }}
-                placeholder={loading ? 'Loading…' : '{ "agents": {...}, "tools": {...} }'}
-                className={`absolute inset-0 m-0 resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-transparent outline-none placeholder:text-slate-400 ${
-                  isDark ? 'caret-[#7ee787]' : 'caret-slate-800'
-                }`}
-              />
-            </div>
+            <ViewToggle view={view} setView={setView} />
           </div>
+
+          {view === 'builder' ? (
+            <PolicyBuilder text={text} setText={setText} setDirty={setDirty} onGotoJson={() => setView('json')} />
+          ) : (
+            <>
+              <dl className="grid grid-cols-[6.5rem_1fr] gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs">
+                <dt className="font-mono text-[11px] text-slate-500">default</dt>
+                <dd className="text-slate-600">
+                  Allowed when the tier is <span className="font-medium">below</span> the “allowed risk level” slider;
+                  denied at or above it.
+                </dd>
+                <dt className="font-mono text-[11px] text-slate-500">allow</dt>
+                <dd className="text-slate-600">
+                  <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">true</code> always
+                  allow, <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">false</code>{' '}
+                  always deny — overrides the slider. Omit to let the slider decide.
+                </dd>
+                <dt className="font-mono text-[11px] text-slate-500">risk</dt>
+                <dd className="text-slate-600">
+                  Relabels the tier compared against the slider — agents{' '}
+                  <span className="font-mono">low·medium·high</span>, tools also <span className="font-mono">severe</span>.
+                </dd>
+                <dt className="font-mono text-[11px] text-slate-500">skills</dt>
+                <dd className="text-slate-600">
+                  Match agents by a card-declared skill (Skills column below). Can only{' '}
+                  <span className="font-medium">tighten</span> — <code className="rounded bg-white px-1 font-mono ring-1 ring-inset ring-slate-200">allow:false</code> or raise risk — since skills are self-declared.
+                </dd>
+              </dl>
+
+              <div
+                className={`flex h-80 overflow-hidden rounded-lg border focus-within:border-brand-500 ${
+                  isDark
+                    ? 'border-[#23302b] bg-[#0c1411]'
+                    : 'border-slate-300 bg-slate-50 focus-within:bg-white'
+                }`}
+              >
+                <div
+                  ref={gutterRef}
+                  aria-hidden="true"
+                  className="select-none overflow-hidden whitespace-pre py-3 pl-3 pr-2 text-right font-mono text-[12.5px] leading-relaxed text-slate-400"
+                >
+                  {lineNumbers}
+                </div>
+                <div className="relative flex-1 overflow-hidden">
+                  <pre
+                    ref={preRef}
+                    aria-hidden="true"
+                    className={`pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed ${
+                      isDark ? 'text-[#cfe3d6]' : 'text-slate-800'
+                    }`}
+                    dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+                  />
+                  <textarea
+                    ref={taRef}
+                    value={text}
+                    spellCheck={false}
+                    wrap="off"
+                    style={{ color: 'transparent' }}
+                    onChange={(e) => {
+                      setText(e.target.value)
+                      setDirty(true)
+                    }}
+                    onKeyDown={handleEditorKeyDown}
+                    onScroll={(e) => {
+                      const { scrollTop, scrollLeft } = e.target
+                      if (gutterRef.current) gutterRef.current.scrollTop = scrollTop
+                      if (preRef.current) {
+                        preRef.current.scrollTop = scrollTop
+                        preRef.current.scrollLeft = scrollLeft
+                      }
+                    }}
+                    placeholder={loading ? 'Loading…' : '{ "agents": {...}, "tools": {...} }'}
+                    className={`absolute inset-0 m-0 resize-none overflow-auto whitespace-pre bg-transparent py-3 pl-2 pr-3 font-mono text-[12.5px] leading-relaxed text-transparent outline-none placeholder:text-slate-400 ${
+                      isDark ? 'caret-[#7ee787]' : 'caret-slate-800'
+                    }`}
+                  />
+                </div>
+              </div>
+            </>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             <button
@@ -380,25 +375,29 @@ export default function Policy() {
             >
               Reload from store
             </button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={importFile}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
-            >
-              Import JSON…
-            </button>
-            <button
-              onClick={format}
-              className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
-            >
-              Format JSON
-            </button>
+            {view === 'json' && (
+              <>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={importFile}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
+                >
+                  Import JSON…
+                </button>
+                <button
+                  onClick={format}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
+                >
+                  Format JSON
+                </button>
+              </>
+            )}
             {msg && (
               <span
                 className={`font-mono text-xs ${msg.tone === 'green' ? 'text-brand-600' : 'text-rose-600'}`}
@@ -474,5 +473,273 @@ export default function Policy() {
         </Table>
       </Panel>
     </div>
+  )
+}
+
+// ── Visual builder ────────────────────────────────────────────────────────────
+// A structured editor over the SAME policy document as the JSON view: it parses
+// `text`, renders every agent + tool rule with a colour-coded risk slider and
+// Allow/Deny checkboxes, and writes edits straight back into `text` (so Save and
+// the JSON view stay in sync). Keys not shown here (skills, exclusion_list, note,
+// version, _README…) are preserved untouched on every edit.
+function PolicyBuilder({ text, setText, setDirty, onGotoJson }) {
+  let policy = null
+  let parseErr = false
+  try {
+    policy = text.trim() ? JSON.parse(text) : {}
+  } catch {
+    parseErr = true
+  }
+  if (parseErr || typeof policy !== 'object' || policy === null || Array.isArray(policy)) {
+    return (
+      <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        The policy isn’t valid JSON right now, so the builder can’t render it.{' '}
+        <button onClick={onGotoJson} className="font-semibold underline">
+          Switch to JSON
+        </button>{' '}
+        to fix it.
+      </div>
+    )
+  }
+
+  const write = (next) => {
+    setText(JSON.stringify(next, null, 2))
+    setDirty(true)
+  }
+  const update = (section, key, patch) => {
+    const next = { ...policy, [section]: { ...(policy[section] || {}) } }
+    const entry = { ...(next[section][key] || {}) }
+    for (const [pk, pv] of Object.entries(patch)) {
+      if (pv === undefined) delete entry[pk]
+      else entry[pk] = pv
+    }
+    next[section][key] = entry
+    write(next)
+  }
+  const remove = (section, key) => {
+    const next = { ...policy, [section]: { ...(policy[section] || {}) } }
+    delete next[section][key]
+    write(next)
+  }
+  const add = (section, key) => {
+    const k = (key || '').trim()
+    if (!k) return
+    const next = { ...policy, [section]: { ...(policy[section] || {}), [k]: (policy[section] || {})[k] || {} } }
+    write(next)
+  }
+
+  return (
+    <div className="space-y-5">
+      <BuilderSection
+        title="Agents"
+        hint="match by agent id / name (globs ok)"
+        section="agents"
+        entries={policy.agents || {}}
+        tiers={AGENT_TIERS}
+        update={update}
+        remove={remove}
+        add={add}
+      />
+      <BuilderSection
+        title="Tools"
+        hint="match by tool name (globs ok)"
+        section="tools"
+        entries={policy.tools || {}}
+        tiers={TOOL_TIERS}
+        update={update}
+        remove={remove}
+        add={add}
+      />
+    </div>
+  )
+}
+
+function BuilderSection({ title, hint, section, entries, tiers, update, remove, add }) {
+  const [newKey, setNewKey] = useState('')
+  const keys = Object.keys(entries).filter((k) => !k.startsWith('_'))
+  const submit = () => {
+    add(section, newKey)
+    setNewKey('')
+  }
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline gap-2">
+        <h3 className="text-sm font-bold text-brand-900">{title}</h3>
+        <span className="text-[11px] text-slate-400">{hint}</span>
+        <span className="ml-auto text-[11px] text-slate-400">{keys.length} rule{keys.length === 1 ? '' : 's'}</span>
+      </div>
+      <div className="space-y-2">
+        {keys.length === 0 && (
+          <div className="rounded-lg border border-dashed border-slate-300 px-3 py-3 text-xs text-slate-400">
+            No {title.toLowerCase()} rules yet — add one below.
+          </div>
+        )}
+        {keys.map((k) => (
+          <EntryRow
+            key={k}
+            entry={entries[k] || {}}
+            name={k}
+            tiers={tiers}
+            onChange={(patch) => update(section, k, patch)}
+            onRemove={() => remove(section, k)}
+          />
+        ))}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <input
+          value={newKey}
+          onChange={(e) => setNewKey(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && submit()}
+          placeholder={`add ${title.slice(0, -1).toLowerCase()} rule (e.g. ${section === 'tools' ? 'run_command' : 'agent-langgraph-*'})`}
+          className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-brand-900 outline-none focus:border-brand-500"
+        />
+        <button
+          onClick={submit}
+          className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+        >
+          + Add
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function EntryRow({ entry, name, tiers, onChange, onRemove }) {
+  const risk = entry.risk && tiers.includes(entry.risk) ? entry.risk : 'default'
+  const allow = entry.allow === true ? true : entry.allow === false ? false : undefined
+  // Left accent shows the effective decision at a glance: allow=green, deny=red,
+  // else the risk tier's colour (slate for "default / no opinion").
+  const accent = allow === true ? '#22c55e' : allow === false ? '#f43f5e' : tierHex(risk)
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-white py-2.5 pl-3 pr-3 dark:border-slate-700"
+      style={{ borderLeft: `4px solid ${accent}` }}
+    >
+      <div className="min-w-[10rem] flex-1">
+        <div className="truncate font-mono text-sm text-brand-900">{name}</div>
+        {entry.note && <div className="truncate text-[11px] text-slate-400">{entry.note}</div>}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">risk</span>
+        <TierSlider
+          options={['default', ...tiers]}
+          value={risk}
+          onChange={(v) => onChange({ risk: v === 'default' ? undefined : v })}
+        />
+      </div>
+
+      <AllowDeny value={allow} onChange={(v) => onChange({ allow: v })} />
+
+      <button
+        onClick={onRemove}
+        title="Remove rule"
+        aria-label="Remove rule"
+        className="text-slate-300 transition hover:text-rose-500"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+// A colour-coded risk-tier slider (reuses the .risk-slider styling from index.css).
+// Leftmost stop is "default" (no override → slate); the rest set an explicit tier.
+function TierSlider({ options, value, onChange }) {
+  const idx = Math.max(0, options.indexOf(value))
+  const cur = options[idx]
+  const hex = cur === 'default' ? DEFAULT_HEX : tierHex(cur)
+  const pct = (idx / Math.max(1, options.length - 1)) * 100
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="range"
+        min={0}
+        max={options.length - 1}
+        step={1}
+        value={idx}
+        aria-label="risk tier"
+        onChange={(e) => onChange(options[Number(e.target.value)])}
+        className="risk-slider w-28"
+        style={{
+          background: `linear-gradient(90deg, ${hex} 0%, ${hex} ${pct}%, #ffffff ${pct}%, #ffffff 100%)`,
+          '--thumb-color': hex,
+        }}
+      />
+      <span className="w-16 text-xs font-semibold" style={{ color: hex }}>
+        {cur}
+      </span>
+    </div>
+  )
+}
+
+// Explicit Allow / Deny checkboxes — mutually exclusive; neither ticked = default
+// (defer to the slider). Green for allow, red for deny.
+function AllowDeny({ value, onChange }) {
+  return (
+    <div className="flex items-center gap-3 text-xs">
+      <label
+        className={`flex cursor-pointer items-center gap-1.5 ${
+          value === true ? 'font-semibold text-brand-700' : 'text-slate-500'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={value === true}
+          onChange={() => onChange(value === true ? undefined : true)}
+          className="h-3.5 w-3.5 accent-[#22c55e]"
+        />
+        Allow
+      </label>
+      <label
+        className={`flex cursor-pointer items-center gap-1.5 ${
+          value === false ? 'font-semibold text-rose-600' : 'text-slate-500'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={value === false}
+          onChange={() => onChange(value === false ? undefined : false)}
+          className="h-3.5 w-3.5 accent-[#f43f5e]"
+        />
+        Deny
+      </label>
+    </div>
+  )
+}
+
+function ViewToggle({ view, setView }) {
+  const json = view === 'json'
+  return (
+    <button
+      onClick={() => setView(json ? 'builder' : 'json')}
+      role="switch"
+      aria-checked={json}
+      title="Toggle between the visual builder and the raw JSON"
+      className="flex shrink-0 items-center gap-2 text-xs font-medium text-slate-500"
+    >
+      <span className={!json ? 'font-semibold text-brand-700' : ''}>Visual</span>
+      <span
+        className={`relative inline-flex h-5 w-9 items-center rounded-full transition ${
+          json ? 'bg-brand-600' : 'bg-slate-300'
+        }`}
+      >
+        <span
+          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition ${
+            json ? 'translate-x-4' : 'translate-x-0.5'
+          }`}
+        />
+      </span>
+      <span className={json ? 'font-semibold text-brand-700' : ''}>JSON</span>
+    </button>
+  )
+}
+
+function LegendDot({ hex, label }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="h-2 w-2 rounded-full" style={{ background: hex }} />
+      {label}
+    </span>
   )
 }

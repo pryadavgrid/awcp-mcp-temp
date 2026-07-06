@@ -31,6 +31,31 @@ from __future__ import annotations
 
 import os
 
+
+# Load IAM / dev secrets from observability/.env into the process env (NON-overriding
+# — anything already exported wins, missing file is a no-op). This is what lets the
+# gateway reach the Keycloak-admin / SMTP / approver config for the credential
+# approval flow (and OPENFGA_STORE_ID etc.) without any of it being hardcoded.
+def _load_dotenv() -> None:
+    try:
+        import pathlib
+        p = pathlib.Path(__file__).resolve().parents[3] / "observability" / ".env"
+        if not p.is_file():
+            return
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v.strip()
+    except Exception:
+        pass
+
+
+_load_dotenv()
+
 # Initialise OTel FIRST — before importing the radar app, which calls
 # setup_otel() at import time. The first provider registered wins, so doing it
 # here makes the whole process report under one service name: "awcp-gateway".
@@ -50,6 +75,8 @@ from awcp.observability.middleware import instrument_fastapi, instrument_request
 from awcp.radar.api import router as radar_router, lifespan as radar_lifespan
 from awcp.gateway.user import router as user_router
 from awcp.gateway.opa_proxy import router as opa_proxy_router
+from awcp.gateway.auth import AWCPAuthMiddleware, auth_startup_banner
+from awcp.gateway.signup import router as signup_router
 from awcp.gateway import chat_store
 
 
@@ -64,11 +91,19 @@ async def lifespan(app: FastAPI):
     # onboarding/execution workers start — those are what the bundle agents report
     # their per-step execution events into. The radar lifespan ignores the app it
     # is handed, so passing the gateway app is fine.
+    import logging
+    logging.getLogger("awcp.gateway").info(auth_startup_banner())
     async with radar_lifespan(app):
         yield
 
 
 app = FastAPI(title="AWCP Gateway", lifespan=lifespan)
+
+# IAM enforcement (Keycloak + OpenFGA). Added BEFORE CORS so CORS ends up the
+# OUTERMOST middleware and its headers apply even to auth's 401/403 responses.
+# Self-disabling: it's a pass-through unless AWCP_AUTH_MODE=shadow|enforce, so this
+# line changes nothing until IAM is switched on. See awcp/gateway/auth.py.
+app.add_middleware(AWCPAuthMiddleware)
 
 # Allow the React dashboard (served from a different origin during dev) to call
 # the gateway. This is independent of the UI folder — deleting the UI has no
@@ -98,6 +133,9 @@ app.include_router(opa_proxy_router)
 #   links (/laminar/ui, /laminar/usage, /agents …) working, so EVERYTHING is
 #   reachable on this one port:  /user/*  ·  /agents+/tasks+/events  ·  /laminar/*
 app.include_router(radar_router)
+
+# ── IAM self-service signup ("Create account" on the login page) ────────────────
+app.include_router(signup_router)
 
 
 @app.get("/api", tags=["gateway"])

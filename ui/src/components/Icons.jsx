@@ -105,6 +105,14 @@ const PATHS = {
       <path d="M20.5 20.5L16.5 16.5" />
     </>
   ),
+  chevronDown: <path d="M6 9l6 6 6-6" />,
+  logout: (
+    <>
+      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+      <path d="M10 17l5-5-5-5" />
+      <path d="M15 12H3" />
+    </>
+  ),
 }
 
 export function Icon({ name, className = 'h-5 w-5', strokeWidth = 1.8 }) {

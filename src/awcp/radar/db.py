@@ -251,6 +251,8 @@ def init() -> bool:
             ensure_workflow_events_table()
             ensure_operator_policy_table()
             ensure_write_approvals_table()
+            ensure_iam_audit_table()
+            ensure_access_requests_table()
         return ok
 
 
@@ -1021,6 +1023,194 @@ def ensure_write_approvals_table() -> None:
                     "kept in memory only until the table exists", exc)
 
 
+def ensure_iam_audit_table() -> None:
+    """Create the iam schema + iam.audit table (IF NOT EXISTS) via the admin
+    connection — the IAM auth/authz decision log (IAM.md Phase 5). init-db owns the
+    canonical schema, but on an ALREADY-initialised volume that SQL won't re-run, so
+    this guarantees the table for the gateway's auth middleware. Best-effort."""
+    url = DB_ADMIN_URL
+    if not url:
+        return
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS iam.audit ("
+        " id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+        " ts timestamptz NOT NULL DEFAULT now(),"
+        " user_id text,"
+        " username text,"
+        " action text,"
+        " resource text,"
+        " plane text,"
+        " result text,"
+        " ip_address text)"
+    )
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_iam_audit_ts ON iam.audit (ts DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_iam_audit_user ON iam.audit (username, ts DESC)",
+    )
+    grants = (
+        "GRANT USAGE ON SCHEMA iam TO awcp_app",
+        "GRANT USAGE ON SCHEMA iam TO awcp_ro",
+        "GRANT SELECT, INSERT ON iam.audit TO awcp_app",
+        "GRANT SELECT ON iam.audit TO awcp_ro",
+    )
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url, connect_args={"connect_timeout": 3}
+                            if url.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text("CREATE SCHEMA IF NOT EXISTS iam"))
+            c.execute(text(ddl))
+            for ix in indexes:
+                c.execute(text(ix))
+        for g in grants:
+            try:
+                with eng.begin() as c:
+                    c.execute(text(g))
+            except Exception:  # noqa: BLE001 — roles may not exist; default privs cover it
+                pass
+        eng.dispose()
+        log.info("radar.db iam.audit ensured (IAM auth decision log)")
+    except Exception as exc:  # noqa: BLE001 — maintenance is best-effort
+        log.warning("radar.db ensure_iam_audit_table failed (%r) — IAM audit "
+                    "kept in the gateway log only until the table exists", exc)
+
+
+def record_iam_audit(username: str = "", action: str = "", resource: str = "",
+                     result: str = "", plane: str = "", user_id: str = "",
+                     ip_address: str = "") -> None:
+    """Best-effort append to iam.audit. No-op when the DB is disabled or on any
+    error — must never raise into the auth middleware (the gateway also logs each
+    decision, so nothing is lost if the DB is down)."""
+    if not _enabled or _engine is None:
+        return
+    try:
+        with _engine.begin() as c:
+            c.execute(_text(
+                "INSERT INTO iam.audit (user_id, username, action, resource, plane, result, ip_address) "
+                "VALUES (:user_id, :username, :action, :resource, :plane, :result, :ip_address)"
+            ), {
+                "user_id": user_id or None, "username": username or None,
+                "action": action or None, "resource": resource or None,
+                "plane": plane or None, "result": result or None,
+                "ip_address": ip_address or None,
+            })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.record_iam_audit failed error=%r", exc)
+
+
+def ensure_access_requests_table() -> None:
+    """Create iam.access_requests (IF NOT EXISTS) — the credential-application +
+    email-approval store. Applicant PII is stored as the gateway hands it over
+    (Fernet ciphertext when encryption is on); approval-link tokens are stored only
+    as hashes; the approver address lives in env, never here. Best-effort."""
+    url = DB_ADMIN_URL
+    if not url:
+        return
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS iam.access_requests ("
+        " id text PRIMARY KEY,"
+        " ts timestamptz NOT NULL DEFAULT now(),"
+        " email text,"
+        " full_name text,"
+        " requested_role text NOT NULL,"
+        " reason text,"
+        " status text NOT NULL DEFAULT 'pending',"
+        " approve_token_hash text NOT NULL,"
+        " deny_token_hash text NOT NULL,"
+        " enc boolean NOT NULL DEFAULT false,"
+        " expires_at timestamptz,"
+        " decided_at timestamptz,"
+        " decided_via text)"
+    )
+    index = ("CREATE INDEX IF NOT EXISTS idx_access_requests_status_ts "
+             "ON iam.access_requests (status, ts DESC)")
+    grants = (
+        "GRANT USAGE ON SCHEMA iam TO awcp_app",
+        "GRANT USAGE ON SCHEMA iam TO awcp_ro",
+        "GRANT SELECT, INSERT, UPDATE ON iam.access_requests TO awcp_app",
+        "GRANT SELECT ON iam.access_requests TO awcp_ro",
+    )
+    try:
+        from sqlalchemy import create_engine, text
+        eng = create_engine(url, connect_args={"connect_timeout": 3}
+                            if url.startswith(("postgresql", "postgres")) else {})
+        with eng.begin() as c:
+            c.execute(text("CREATE SCHEMA IF NOT EXISTS iam"))
+            c.execute(text(ddl))
+            c.execute(text(index))
+        for g in grants:
+            try:
+                with eng.begin() as c:
+                    c.execute(text(g))
+            except Exception:  # noqa: BLE001 — roles may not exist; default privs cover it
+                pass
+        eng.dispose()
+        log.info("radar.db iam.access_requests ensured (credential approval store)")
+    except Exception as exc:  # noqa: BLE001 — maintenance is best-effort
+        log.warning("radar.db ensure_access_requests_table failed (%r)", exc)
+
+
+def create_access_request(rid: str, email: str, full_name: str, requested_role: str,
+                          reason: str, approve_hash: str, deny_hash: str, enc: bool,
+                          expires_at_epoch: float) -> bool:
+    """Insert a pending access request. Returns True on success (the caller keeps
+    the RAW link tokens; only their hashes are stored here)."""
+    if not _enabled or _engine is None:
+        return False
+    try:
+        with _engine.begin() as c:
+            c.execute(_text(
+                "INSERT INTO iam.access_requests "
+                "(id, email, full_name, requested_role, reason, approve_token_hash, "
+                " deny_token_hash, enc, expires_at) "
+                "VALUES (:id, :email, :full_name, :role, :reason, :ah, :dh, :enc, "
+                " to_timestamp(:exp))"
+            ), {
+                "id": rid, "email": email or None, "full_name": full_name or None,
+                "role": requested_role, "reason": reason or None,
+                "ah": approve_hash, "dh": deny_hash, "enc": bool(enc),
+                "exp": float(expires_at_epoch),
+            })
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.create_access_request failed error=%r", exc)
+        return False
+
+
+def get_access_request(rid: str) -> dict | None:
+    if not _enabled or _engine is None or not rid:
+        return None
+    try:
+        with _engine.connect() as c:
+            r = c.execute(_text(
+                "SELECT id, email, full_name, requested_role, reason, status, "
+                "approve_token_hash, deny_token_hash, enc, "
+                "extract(epoch FROM expires_at) AS exp "
+                "FROM iam.access_requests WHERE id = :id"
+            ), {"id": rid}).mappings().first()
+        return dict(r) if r else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.get_access_request failed error=%r", exc)
+        return None
+
+
+def decide_access_request(rid: str, status: str, decided_via: str = "email-link") -> bool:
+    """Atomically move a request pending → status. Returns True only if a PENDING
+    row was updated — so an approve/deny link is single-use even under retries."""
+    if not _enabled or _engine is None:
+        return False
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "UPDATE iam.access_requests SET status = :s, decided_at = now(), "
+                "decided_via = :v WHERE id = :id AND status = 'pending' RETURNING id"
+            ), {"s": status, "v": decided_via, "id": rid}).first()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.decide_access_request failed error=%r", exc)
+        return False
+
+
 _WA_COLS = ("id, extract(epoch FROM ts) AS ts, agent_id, agent_name, task_id, action, "
             "detail, risk, status, decided_by, extract(epoch FROM decided_at) AS decided_at")
 
@@ -1112,3 +1302,22 @@ def decide_write_approval(approval_id: int, decision: str,
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.db.decide_write_approval failed error=%r", exc)
         return None
+
+
+def supersede_write_approval(approval_id: int) -> bool:
+    """Mark a duplicate PENDING approval as 'superseded' — a no-op verdict used to
+    collapse redundant rows (same agent + action) so the panel shows a single
+    actionable request. Returns True when a pending row was updated."""
+    if not _enabled or _engine is None:
+        return False
+    try:
+        with _engine.begin() as c:
+            row = c.execute(_text(
+                "UPDATE governance.write_approvals SET status='superseded', "
+                "decided_by='dedup', decided_at=now() "
+                "WHERE id = :id AND status = 'pending' RETURNING id"
+            ), {"id": int(approval_id)}).first()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("radar.db.supersede_write_approval failed error=%r", exc)
+        return False

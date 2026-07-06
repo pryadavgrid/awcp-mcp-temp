@@ -16,6 +16,7 @@ import { useTheme } from './hooks/useTheme.js'
 import { useMediaQuery } from './hooks/useMediaQuery.js'
 import { getHealth, getApprovals } from './api.js'
 import { API_BASE } from './config.js'
+import { getUsername, logout } from './lib/auth'
 
 const SIDEBAR_KEY = 'awcp-sidebar-collapsed'
 
@@ -123,7 +124,19 @@ export default function App() {
   // Live pending-approvals poll → the sidebar count badge + the "new request"
   // toast. getApprovals('pending') returns the array of paused write actions.
   const { data: pendingData } = usePoll(() => getApprovals('pending', 100), [])
-  const pendingCount = Array.isArray(pendingData) ? pendingData.length : 0
+  const pendingList = Array.isArray(pendingData) ? pendingData : []
+  const pendingCount = pendingList.length
+
+  // Notification dropdown (the header bell): opens on click; each item drills into
+  // the Approvals page for that paused write action. Closes on outside click / Esc.
+  const [notifOpen, setNotifOpen] = useState(false)
+  const notifRef = useRef(null)
+
+  // Signed-in operator (from the Keycloak token) + a menu to sign out.
+  const username = getUsername() || 'Operator'
+  const initials = (username.replace(/[^a-zA-Z0-9]/g, '').slice(0, 2) || 'AW').toUpperCase()
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userRef = useRef(null)
 
   // Fire a toast only when the queue GROWS (a genuinely new request), never on
   // the first load or when the count drops because the operator just decided one.
@@ -147,6 +160,36 @@ export default function App() {
     const id = setTimeout(() => setToast(null), 6000)
     return () => clearTimeout(id)
   }, [toast])
+
+  // Close the notification dropdown on an outside click or Escape.
+  useEffect(() => {
+    if (!notifOpen) return
+    const onDown = (e) => {
+      if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false)
+    }
+    const onEsc = (e) => e.key === 'Escape' && setNotifOpen(false)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [notifOpen])
+
+  // Close the user menu on outside click / Esc (same pattern as the bell).
+  useEffect(() => {
+    if (!userMenuOpen) return
+    const onDown = (e) => {
+      if (userRef.current && !userRef.current.contains(e.target)) setUserMenuOpen(false)
+    }
+    const onEsc = (e) => e.key === 'Escape' && setUserMenuOpen(false)
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [userMenuOpen])
 
   // Keep the page in the URL path so (a) a refresh stays on the same page and
   // (b) the browser Back/Forward buttons move between pages. The path is the
@@ -258,8 +301,8 @@ export default function App() {
 
       <main className="flex min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
         <div className="mx-auto w-full max-w-[1600px] space-y-5 px-3 py-4 sm:space-y-6 sm:px-6 sm:py-6">
-          {/* ── Top bar: menu · search · status · notifications · operator ──── */}
-          <header className="flex items-center justify-between gap-2 rounded-2xl border border-slate-100 bg-white px-3 py-2.5 shadow-card sm:gap-3 sm:px-4 sm:py-3">
+          {/* ── Header: page heading on the left, status + controls on the same line ── */}
+          <header className="flex flex-wrap items-center gap-3 pl-1 pt-1">
             <button
               onClick={() => setMobileOpen(true)}
               title="Open menu"
@@ -268,19 +311,15 @@ export default function App() {
             >
               <Icon name="menu" className="h-5 w-5" />
             </button>
-            <label className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl bg-slate-100/80 px-3.5 py-2.5 text-sm text-slate-500 transition focus-within:bg-white focus-within:ring-2 focus-within:ring-brand-500/30 sm:max-w-md">
-              <Icon name="search" className="h-4 w-4 shrink-0 text-slate-400" strokeWidth={2} />
-              <input
-                type="text"
-                placeholder="Search agents, workflows, tools…"
-                className="w-full bg-transparent placeholder:text-slate-400 focus:outline-none"
-              />
-              <kbd className="hidden rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 sm:inline">
-                ⌘K
-              </kbd>
-            </label>
 
-            <div className="flex items-center gap-1.5 sm:gap-3">
+            <div className="min-w-0">
+              <h1 className="text-[26px] font-extrabold leading-tight tracking-tight text-brand-900 sm:text-[32px]">
+                {meta.title}
+              </h1>
+              <p className="mt-1 text-sm text-slate-400">{meta.subtitle}</p>
+            </div>
+
+            <div className="ml-auto flex items-center gap-1.5 sm:gap-3">
               <span className="hidden text-[11px] text-slate-400 lg:inline">{API_BASE}</span>
               <span
                 className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset sm:flex ${
@@ -304,40 +343,118 @@ export default function App() {
                 <Icon name={isDark ? 'sun' : 'moon'} className="h-5 w-5" />
               </button>
 
-              <button
-                onClick={() => navigate('approvals')}
-                title="Pending approvals"
-                className="relative grid h-10 w-10 place-items-center rounded-xl border border-slate-100 bg-white text-slate-500 transition hover:border-brand-200 hover:text-brand-600"
-              >
-                <Icon name="bell" className="h-5 w-5" />
-                {pendingCount > 0 && (
-                  <span className="absolute -right-1 -top-1 grid h-5 min-w-[20px] place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white ring-2 ring-white">
-                    {pendingCount}
-                  </span>
-                )}
-              </button>
+              <div className="relative" ref={notifRef}>
+                <button
+                  onClick={() => setNotifOpen((o) => !o)}
+                  title="Notifications"
+                  aria-haspopup="menu"
+                  aria-expanded={notifOpen}
+                  className="relative grid h-10 w-10 place-items-center rounded-xl border border-slate-100 bg-white text-slate-500 transition hover:border-brand-200 hover:text-brand-600"
+                >
+                  <Icon name="bell" className="h-5 w-5" />
+                  {pendingCount > 0 && (
+                    <span className="absolute -right-1 -top-1 grid h-5 min-w-[20px] place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white ring-2 ring-white">
+                      {pendingCount}
+                    </span>
+                  )}
+                </button>
 
-              <div className="flex items-center gap-2.5 rounded-xl border border-slate-100 py-1.5 pl-1.5 pr-3">
-                <span className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-[#45b06a] to-[#2f7d4f] text-xs font-bold text-white">
-                  AW
-                </span>
-                <div className="hidden leading-tight sm:block">
-                  <div className="text-sm font-semibold text-brand-900">Operator</div>
-                  <div className="text-[11px] text-slate-400">Control Plane</div>
-                </div>
+                {notifOpen && (
+                  <div className="absolute right-0 top-12 z-50 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-card-hover">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                      <span className="text-sm font-semibold text-brand-900">Notifications</span>
+                      <span className="text-xs text-slate-400">{pendingCount} pending</span>
+                    </div>
+                    <div className="max-h-80 overflow-y-auto">
+                      {pendingCount === 0 ? (
+                        <div className="px-4 py-8 text-center text-sm text-slate-400">
+                          You&rsquo;re all caught up.
+                        </div>
+                      ) : (
+                        pendingList.map((n) => (
+                          <button
+                            key={n.id}
+                            onClick={() => {
+                              setNotifOpen(false)
+                              navigate('approvals')
+                            }}
+                            className="flex w-full items-start gap-3 border-b border-slate-50 px-4 py-3 text-left transition last:border-0 hover:bg-slate-50"
+                          >
+                            <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brand-50 text-brand-600">
+                              <Icon name="bell" className="h-4 w-4" />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-medium text-brand-900">
+                                {n.agent_name || n.agent_id || 'Agent'}
+                              </div>
+                              <div className="truncate text-xs text-slate-500">
+                                Awaiting approval &middot;{' '}
+                                <span className="font-mono">{n.action || 'write'}</span>
+                              </div>
+                            </div>
+                            {n.risk && (
+                              <span className="mt-0.5 shrink-0 rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                                {n.risk}
+                              </span>
+                            )}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                    <button
+                      onClick={() => {
+                        setNotifOpen(false)
+                        navigate('approvals')
+                      }}
+                      className="block w-full border-t border-slate-100 px-4 py-2.5 text-center text-xs font-semibold text-brand-600 transition hover:bg-brand-50"
+                    >
+                      Review all in Approvals &rarr;
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="relative" ref={userRef}>
+                <button
+                  onClick={() => setUserMenuOpen((o) => !o)}
+                  aria-expanded={userMenuOpen}
+                  className="flex items-center gap-2.5 rounded-xl border border-slate-100 py-1.5 pl-1.5 pr-2.5 transition hover:bg-slate-50"
+                >
+                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-[#45b06a] to-[#2f7d4f] text-xs font-bold text-white">
+                    {initials}
+                  </span>
+                  <div className="hidden max-w-[160px] leading-tight sm:block">
+                    <div className="truncate text-sm font-semibold text-brand-900" title={username}>
+                      {username}
+                    </div>
+                    <div className="text-[11px] text-slate-400">Operator</div>
+                  </div>
+                  <Icon name="chevronDown" className="hidden h-4 w-4 text-slate-400 sm:block" />
+                </button>
+
+                {userMenuOpen && (
+                  <div className="absolute right-0 z-30 mt-2 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card-hover">
+                    <div className="border-b border-slate-100 px-4 py-3">
+                      <div className="text-[11px] uppercase tracking-wide text-slate-400">Signed in as</div>
+                      <div className="truncate text-sm font-semibold text-brand-900" title={username}>
+                        {username}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setUserMenuOpen(false)
+                        logout()
+                      }}
+                      className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-semibold text-rose-600 transition hover:bg-rose-50"
+                    >
+                      <Icon name="logout" className="h-4 w-4" />
+                      Sign out
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </header>
-
-          {/* ── Page heading + subheading ──────────────────────────────────── */}
-          <div className="flex flex-wrap items-end justify-between gap-3 pl-1 pt-1">
-            <div>
-              <h1 className="text-2xl font-extrabold leading-tight tracking-tight text-brand-900 sm:text-[28px]">
-                {meta.title}
-              </h1>
-              <p className="mt-1 text-sm text-slate-400">{meta.subtitle}</p>
-            </div>
-          </div>
 
           {error && (
             <div className="break-words rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">

@@ -1,0 +1,40 @@
+# AWCP authorization model (human-readable DSL — source of truth).
+# The API payload equivalent is model.json (applied by bootstrap.sh).
+#
+# Design: role-based, enforced against a single object `system:awcp`. Roles are
+# assigned to users (by Keycloak preferred_username → user:<username>), and each
+# permission the gateway checks (can_*) is computed from the roles with the
+# hierarchy baked in. The gateway (Phase 4) checks e.g.
+#   check(user:<username>, can_operate, system:awcp)
+#
+# Permission → endpoints (see IAM.md §4):
+#   can_read          GET reads (agents, approvals, policy, events, dashboards)
+#   can_audit         GET /events/audit  (auditor+)
+#   can_operate       approvals decide/approve/deny, agent signal/autonomy/risk,
+#                     run tasks (/user/submit, /ask, /stop, ...)
+#   can_admin         PUT /policy, DELETE /agents/{id}, POST /opa/threshold
+#   can_manage_system user/role management (super admin)
+#   can_act_as_agent  service plane: /agents/register, /gate, /tasks/execution/*
+
+model
+  schema 1.1
+
+type user
+
+type system
+  relations
+    # --- role assignments (direct) ---
+    define super_admin: [user]
+    define platform_admin: [user]
+    define operator: [user]
+    define auditor: [user]
+    define viewer: [user]
+    define agent: [user]
+
+    # --- permissions the gateway checks (hierarchy baked in) ---
+    define can_manage_system: super_admin
+    define can_admin: platform_admin or super_admin
+    define can_operate: operator or platform_admin or super_admin
+    define can_read: viewer or auditor or operator or platform_admin or super_admin
+    define can_audit: auditor or platform_admin or super_admin
+    define can_act_as_agent: agent or super_admin

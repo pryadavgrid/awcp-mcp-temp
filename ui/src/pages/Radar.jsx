@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { usePoll } from '../hooks/usePoll.js'
-import { getAgents, getToolTiers, setBlockThreshold } from '../api.js'
+import { getAgents, getAgentBrief, getToolTiers, setBlockThreshold } from '../api.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { StatusBadge } from '../components/Badge.jsx'
 import { timeAgo } from '../lib/format.js'
@@ -77,6 +77,8 @@ export default function Radar() {
   const { data, loading } = usePoll(getAgents, [])
   const agents = data || []
   const { data: tierData, refresh: refreshTiers } = usePoll(getToolTiers, [])
+  // The agent whose live brief modal is open (clicking its "card" chip).
+  const [sel, setSel] = useState(null)
 
   return (
     <div className="space-y-6">
@@ -113,14 +115,14 @@ export default function Radar() {
                   <div className="flex items-center gap-1.5">
                     <span className="font-medium text-brand-900">{a.name}</span>
                     {a.card_summary && (
-                      <span
-                        className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20"
-                        title={a.card_summary.description
-                          ? `AgentCard: ${a.card_summary.description}`
-                          : 'AgentCard published'}
+                      <button
+                        type="button"
+                        onClick={() => setSel({ id: a.id, name: a.name })}
+                        className="cursor-pointer rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20 transition hover:bg-brand-200"
+                        title="Click for a live brief of what this agent is doing"
                       >
-                        card
-                      </span>
+                        card{a.card_summary.source === 'synthesized' ? '*' : ''}
+                      </button>
                     )}
                   </div>
                   <div className="font-mono text-[11px] text-slate-400">{a.id}</div>
@@ -170,6 +172,84 @@ export default function Radar() {
       </Panel>
 
       <ToolTiers tierData={tierData} onRefresh={refreshTiers} />
+
+      <AgentBriefModal sel={sel} onClose={() => setSel(null)} />
+    </div>
+  )
+}
+
+// Click a "card" chip → a small modal with a LIVE, server-generated brief of what
+// the agent is and is doing. It refetches every few seconds while open (and the
+// server regenerates it from current state), so it's dynamic, not a static blurb.
+function AgentBriefModal({ sel, onClose }) {
+  const [state, setState] = useState({ loading: true })
+  useEffect(() => {
+    if (!sel) return
+    let stop = false
+    const load = async () => {
+      try {
+        const d = await getAgentBrief(sel.id)
+        if (!stop) setState({ loading: false, ...d })
+      } catch (e) {
+        if (!stop) setState({ loading: false, error: e?.message || 'failed to load brief' })
+      }
+    }
+    setState({ loading: true })
+    load()
+    const id = setInterval(load, 5000) // keep it live while the modal is open
+    const onEsc = (e) => e.key === 'Escape' && onClose()
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      stop = true
+      clearInterval(id)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [sel, onClose])
+
+  if (!sel) return null
+  return (
+    <div
+      className="fixed inset-0 z-[80] grid place-items-center bg-black/40 p-4 backdrop-blur-sm"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-card-hover"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-lg font-bold text-brand-900">{sel.name}</div>
+            <div className="truncate font-mono text-[11px] text-slate-400">{sel.id}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-lg text-slate-400 transition hover:bg-slate-100 hover:text-brand-600"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm leading-relaxed text-slate-700 dark:bg-slate-800/50">
+          {state.loading ? (
+            <span className="text-slate-400">Generating a live brief…</span>
+          ) : state.error ? (
+            <span className="text-rose-600">{state.error}</span>
+          ) : (
+            state.brief
+          )}
+        </div>
+
+        {!state.loading && !state.error && (
+          <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
+            <span className={`h-1.5 w-1.5 rounded-full ${state.live ? 'bg-brand-500' : 'bg-rose-500'}`} />
+            {state.status || '—'} · live view, refreshes every 5s
+          </div>
+        )}
+      </div>
     </div>
   )
 }

@@ -1242,7 +1242,35 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-") or "agent"
 
 
+def _ensure_card(e: AgentEntry) -> AgentEntry:
+    """Backfill a SYNTHESIZED AgentCard for an agent that has none, so every agent
+    in the registry shows a card even if it never published one at
+    ``/.well-known/agent.json`` (or a fetch failed).
+
+    Idempotent — runs once per agent (guarded on ``e.card is None``) and only for
+    agent-like kinds. It stores the synthesized card blob but deliberately leaves
+    ``card_url`` None and does NOT touch ``card_fetched_at`` or ``e.skills``:
+      * card_fetched_at stays None so a later real fetch during onboarding can
+        still supersede the synthesized card with the agent-declared one;
+      * e.skills stays untouched so the synthesized (guessed-from-scopes) skills
+        never leak into skill-based operator policy — a synthesized card is for
+        display, not control.
+    Enrichment only: never raises into the listing path."""
+    if e is None or e.card is not None:
+        return e
+    if e.kind not in ("agent_framework", "orchestrator"):
+        return e  # don't fabricate A2A cards for MCP servers / LLM runtimes
+    try:
+        from awcp.radar.card import synthesize_card
+        card, _skills = synthesize_card(e)
+        REGISTRY.patch(e.id, card=card, card_url=None)
+        return REGISTRY.get(e.id) or e
+    except Exception:  # noqa: BLE001 — a card must never break the listing
+        return e
+
+
 def _to_dict(e: AgentEntry) -> dict:
+    e = _ensure_card(e)
     d = e.model_dump()
     if e.onboarding_workflow_id:
         d["temporal_url"] = (
@@ -1269,13 +1297,21 @@ def _to_dict(e: AgentEntry) -> dict:
         d["policy_risk"] = operator_policy.agent_risk_override(e.id, getattr(e, "name", "") or "")
     except Exception:  # noqa: BLE001 — never let the policy view break the listing
         d["recognised"], d["policy_risk"] = None, None
-    # AgentCard summary (compact — the full card is at GET /agents/{id}/card). Only
-    # present when a card was fetched, so existing list consumers are unaffected.
+    # AgentCard summary (compact — the full card is at GET /agents/{id}/card).
+    # Every agent-like entry has a card now: a fetched (agent-declared) one, else a
+    # registry-synthesized fallback. `source` lets the UI badge which it is. Skills
+    # come from the denormalized e.skills for a fetched card (which also feeds
+    # policy), else are read straight from the synthesized card blob (display only).
     if e.card:
+        card_skills = e.skills or [
+            s.get("id") for s in (e.card.get("skills") or [])
+            if isinstance(s, dict) and s.get("id")
+        ]
         d["card_summary"] = {
             "description": e.card.get("description", ""),
-            "skills": e.skills or [],
+            "skills": card_skills,
             "protocol_version": e.card.get("protocol_version", ""),
+            "source": e.card.get("source", "fetched"),
         }
     return d
 
@@ -1306,9 +1342,111 @@ def get_agent_card(agent_id: str) -> dict:
     e = REGISTRY.get(agent_id)
     if not e:
         raise HTTPException(status_code=404, detail="agent not found")
+    e = _ensure_card(e)  # synthesize a fallback card if the agent published none
     if not e.card:
-        raise HTTPException(status_code=404, detail="no card fetched for this agent")
+        raise HTTPException(status_code=404, detail="no card for this agent")
     return e.card
+
+
+def _ago(delta: float) -> str:
+    d = max(0, int(delta))
+    if d < 60:
+        return f"{d}s ago"
+    if d < 3600:
+        return f"{d // 60}m ago"
+    if d < 86400:
+        return f"{d // 3600}h ago"
+    return f"{d // 86400}d ago"
+
+
+def _agent_brief(e: AgentEntry) -> dict:
+    """Compose a short, LIVE natural-language brief of what this agent IS and what
+    it is doing right now.
+
+    Assembled on every call from current registry state (identity, declared
+    tools/skills, governance status, autonomy, risk, onboarding, liveness) plus the
+    recent in-memory event ring for this agent — so it reflects the agent's state at
+    read time and changes as that state changes. Nothing here is a stored/static
+    blurb; it is regenerated per request from live data."""
+    now = time.time()
+    fw = (e.framework or e.runtime or "").strip()
+    kind_word = {
+        "agent_framework": "agent", "orchestrator": "orchestrator",
+        "mcp_server": "MCP server", "llm_runtime": "LLM runtime",
+    }.get(e.kind, "agent")
+
+    # What it can do — prefer declared card skills, then denormalized skills, then scopes.
+    tools = list(e.skills or [])
+    if not tools and e.card:
+        tools = [s.get("id") for s in (e.card.get("skills") or [])
+                 if isinstance(s, dict) and s.get("id")]
+    if not tools:
+        tools = list(e.write_scopes or [])
+
+    # 1) identity + purpose
+    who = f"{e.name} is a {fw + ' ' if fw else ''}{kind_word}"
+    if tools:
+        shown = ", ".join(tools[:4]) + (f" (+{len(tools) - 4} more)" if len(tools) > 4 else "")
+        who += f" whose declared tools are {shown}."
+    else:
+        who += " with no declared tools yet."
+
+    # 2) governance state
+    gov: list[str] = []
+    if e.status == "quarantined":
+        gov.append("currently quarantined"
+                   + (f" — {e.quarantine_reason}" if e.quarantine_reason else ""))
+    else:
+        gov.append("admitted and governed")
+    if e.autonomy_profile and e.autonomy_profile != "active":
+        gov.append(f"running in {e.autonomy_profile.replace('_', ' ')}"
+                   + (f" ({e.autonomy_reason})" if e.autonomy_reason else ""))
+    try:
+        gov.append(f"risk tier {policy.authoritative_risk(e)}")
+    except Exception:  # noqa: BLE001
+        pass
+    if e.onboarding_state:
+        gov.append(f"onboarding {e.onboarding_state}")
+    state = "It is " + "; ".join(gov) + "."
+
+    # 3) live activity — from the recent event ring for this agent
+    evs = [ev for ev in _EVENTS if ev.get("agent_id") == e.id][:6]
+    if evs:
+        last = evs[0]
+        det = (last.get("detail") or "").strip()
+        act = ("Most recently the radar saw it "
+               + str(last.get("kind", "?")).replace("_", " ")
+               + (f" ({det})" if det else ""))
+        counts: dict[str, int] = {}
+        for ev in evs:
+            k = str(ev.get("kind", "?")).replace("_", " ")
+            counts[k] = counts.get(k, 0) + 1
+        act += "; recent events — " + ", ".join(f"{v}× {k}" for k, v in counts.items()) + "."
+    else:
+        act = "No governed activity has been recorded for it yet."
+
+    live = (f"It is {'live' if e.alive else 'stopped'} "
+            f"(last seen {_ago(now - (e.last_seen or now))}).")
+
+    return {
+        "agent_id": e.id,
+        "name": e.name,
+        "brief": " ".join([who, state, act, live]),
+        "generated_at": now,
+        "live": e.alive,
+        "status": e.status,
+    }
+
+
+@router.get("/agents/{agent_id}/brief")
+def get_agent_brief(agent_id: str) -> dict:
+    """A short, dynamically-generated summary of what the agent is and is doing —
+    recomputed from live state on every request (see _agent_brief)."""
+    e = REGISTRY.get(agent_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="agent not found")
+    e = _ensure_card(e)
+    return _agent_brief(e)
 
 
 @router.post("/agents/{agent_id}/card/refresh")
@@ -1360,6 +1498,10 @@ def register(req: RegisterRequest) -> dict:
         owner=req.owner,
         endpoint=req.endpoint,
         transport=req.transport,
+        # The agent's own pid (os.getpid()), when it reports it — lets a scan
+        # sighting of the same process fold INTO this self entry instead of
+        # showing up as a separate "unknown" row (see store.reconcile_scan).
+        pid=req.pid,
         control_endpoint=req.control_endpoint,
         write_scopes=req.write_scopes,
         feature_flags=req.feature_flags,
@@ -2098,12 +2240,44 @@ def _reconcile_scope_approvals() -> None:
         log.warning("radar.approval.reconcile_failed error=%r", exc)
 
 
+def _dedup_pending_approvals() -> None:
+    """Collapse duplicate PENDING write-approvals to at most one per
+    (agent_id, action). Older code paths / a race could leave more than one
+    pending row for the same agent's scope change (e.g. the two 'CrewAI Writer'
+    rows); keep the NEWEST and mark the rest 'superseded' so the panel shows a
+    single actionable request. Idempotent — a no-op once deduped."""
+    with _WA_LOCK:
+        rows = _events_db.list_write_approvals("pending", 500)
+        if rows is not None:  # DB path — rows are newest-first (ts DESC)
+            seen: set = set()
+            for r in rows:
+                key = (r.get("agent_id"), r.get("action"))
+                if key in seen:
+                    _events_db.supersede_write_approval(int(r["id"]))
+                else:
+                    seen.add(key)
+        else:  # in-memory fallback — keep newest id per key
+            seen = set()
+            for i in sorted(_WA_MEM, reverse=True):
+                r = _WA_MEM[i]
+                if r.get("status") != "pending":
+                    continue
+                key = (r.get("agent_id"), r.get("action"))
+                if key in seen:
+                    r["status"] = "superseded"
+                    r["decided_by"] = "dedup"
+                    r["decided_at"] = time.time()
+                else:
+                    seen.add(key)
+
+
 @router.get("/approvals")
 def list_approvals(status: str = "", limit: int = 100) -> list[dict]:
     """Write-approval requests (newest first), optionally filtered by status
     (pending | approved | denied). The AWCP UI polls this for its panel."""
     if status in ("", "pending"):
         _reconcile_scope_approvals()
+        _dedup_pending_approvals()
     rows = _events_db.list_write_approvals(status, limit)
     if rows is not None:
         return rows
@@ -2253,6 +2427,27 @@ def deregister(agent_id: str) -> dict:
     if _HOOKS:
         _hook(_HT.AGENT_DEREGISTERED, agent_id=agent_id, reason="operator removed")
     return {"ok": True, "removed": agent_id}
+
+
+class DeregisterRequest(BaseModel):
+    reason: str = ""
+
+
+@router.post("/agents/{agent_id}/deregister")
+def self_deregister(agent_id: str, req: DeregisterRequest | None = None) -> dict:
+    """Agent-initiated removal (agent/service plane). An agent signals that it is
+    leaving and the radar drops it from the inventory — the same effect as the
+    operator DELETE, but callable by the agent itself (e.g. on shutdown) so it can
+    clean up after itself. Idempotent: removing an already-gone agent returns
+    ok=False (never 404), so a fire-and-forget shutdown call is always safe."""
+    reason = (req.reason if req and req.reason else "") or "agent self-deregistered"
+    removed = REGISTRY.remove(agent_id)
+    if removed:
+        _record_event("removed", agent_id, reason, trigger="self")
+        if _HOOKS:
+            _hook(_HT.AGENT_DEREGISTERED, agent_id=agent_id, reason="self")
+        log.info("radar.deregister.self agent_id=%s reason=%r", agent_id, reason)
+    return {"ok": bool(removed), "removed": agent_id if removed else None}
 
 
 # ----------------------------------------------------------------------

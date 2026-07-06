@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AWCP — layout mock (top nav)</title>
+    <!--
+      STANDALONE MOCK. Not wired to the app. Just an idea:
+        • the left sidebar tabs move up into a horizontal TOP nav (and switch panels)
+        • a few departures from the default sidebar+grid template:
+            - full-width bento grid instead of a uniform card grid
+            - a bold gradient top bar with pill tabs + sliding indicator
+            - a persistent bottom status rail (service health)
+            - warm amber as a second accent next to brand green
+      Open directly in a browser. Tailwind via CDN + a little custom CSS/JS.
+    -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              brand: {
+                50: '#eef6f0', 100: '#d6ebdd', 200: '#a9d6ba',
+                300: '#74bd91', 400: '#45b06a', 500: '#34995a',
+                600: '#2a8048', 700: '#226b3c', 800: '#1c5531', 900: '#14361f',
+              },
+            },
+            fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+            boxShadow: {
+              soft: '0 1px 2px rgba(20,54,31,.05), 0 8px 24px -12px rgba(20,54,31,.18)',
+              softer: '0 1px 2px rgba(20,54,31,.04), 0 20px 40px -22px rgba(20,54,31,.22)',
+            },
+          },
+        },
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root { --brand: #2a8048; --brand-ink: #14361f; }
+      html { scroll-behavior: smooth; }
+      body {
+        font-family: 'Inter', system-ui, sans-serif;
+        color: #14361f;
+        /* subtle dotted field — departs from the flat template background */
+        background-color: #f2f6f2;
+        background-image: radial-gradient(rgba(20, 54, 31, 0.05) 1px, transparent 1px);
+        background-size: 22px 22px;
+      }
+      .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+      /* Pill tab nav with a sliding indicator */
+      .tabs { position: relative; }
+      .tab {
+        position: relative; z-index: 1; white-space: nowrap;
+        transition: color .25s ease;
+      }
+      .tab[aria-selected='true'] { color: #fff; }
+      .tab[aria-selected='false'] { color: rgba(255, 255, 255, 0.72); }
+      .tab[aria-selected='false']:hover { color: #fff; }
+      #tabPill {
+        position: absolute; top: 0; left: 0; height: 100%;
+        border-radius: 9999px;
+        background: rgba(255, 255, 255, 0.16);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+        transition: transform .28s cubic-bezier(.22, 1, .36, 1), width .28s cubic-bezier(.22, 1, .36, 1);
+        pointer-events: none;
+      }
+
+      .panel { display: none; animation: rise .35s cubic-bezier(.22, 1, .36, 1) both; }
+      .panel.active { display: block; }
+      @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+      .card { border-radius: 1.25rem; background: #fff; box-shadow: 0 1px 2px rgba(20,54,31,.05), 0 8px 24px -12px rgba(20,54,31,.18); }
+      .bar { transition: height .6s cubic-bezier(.22,1,.36,1); }
+      /* thin scrollbar for the tab strip */
+      .noscroll::-webkit-scrollbar { height: 0; }
+    </style>
+  </head>
+
+  <body class="min-h-screen pb-16">
+    <!-- ══ TOP BAR: brand · horizontal tabs · controls ══════════════════════ -->
+    <header class="sticky top-0 z-40">
+      <div class="bg-gradient-to-r from-brand-900 via-brand-800 to-brand-700 text-white shadow-softer">
+        <div class="mx-auto flex max-w-[1400px] items-center gap-4 px-4 py-3 sm:px-6">
+          <!-- brand -->
+          <div class="flex items-center gap-3">
+            <span class="grid h-11 w-11 place-items-center rounded-2xl bg-white/10 ring-1 ring-white/25">
+              <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round">
+                <circle cx="12" cy="13" r="7" />
+                <path d="M12 13 L16 9" />
+                <path d="M12 3 v2.5" />
+                <circle cx="12" cy="13" r="1.4" fill="#45b06a" stroke="none" />
+              </svg>
+            </span>
+            <div class="leading-none">
+              <div class="text-sm font-extrabold tracking-wide">AWCP</div>
+              <div class="mt-1 text-[10px] font-medium uppercase tracking-[0.2em] text-white/60">Control Plane</div>
+            </div>
+          </div>
+
+          <!-- horizontal tabs (were the left sidebar) -->
+          <nav class="tabs noscroll ml-2 flex flex-1 items-center gap-1 overflow-x-auto rounded-full bg-white/5 p-1 ring-1 ring-white/10" id="tabs" role="tablist">
+            <div id="tabPill"></div>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="radar" aria-selected="false">Radar</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="approvals" aria-selected="false">Approvals</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="workflow" aria-selected="false">Workflow</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="context" aria-selected="false">Context</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="tokens" aria-selected="false">Tokens</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="hooks" aria-selected="false">Hooks</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="policy" aria-selected="false">Policy</button>
+            <button class="tab rounded-full px-4 py-2 text-sm font-semibold" role="tab" data-tab="sandbox" aria-selected="false">Sandbox</button>
+          </nav>
+
+          <!-- controls -->
+          <div class="flex items-center gap-2">
+            <button title="Notifications" class="relative grid h-10 w-10 place-items-center rounded-xl bg-white/10 ring-1 ring-white/20 transition hover:bg-white/20">
+              <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+              <span class="absolute -right-1 -top-1 grid h-5 min-w-[20px] place-items-center rounded-full bg-amber-400 px-1 text-[10px] font-bold text-brand-900 ring-2 ring-brand-800">3</span>
+            </button>
+            <div class="flex items-center gap-2 rounded-xl bg-white/10 py-1 pl-1 pr-3 ring-1 ring-white/20">
+              <span class="grid h-8 w-8 place-items-center rounded-lg bg-white/90 text-xs font-extrabold text-brand-700">AW</span>
+              <div class="hidden leading-tight sm:block">
+                <div class="text-xs font-semibold">Operator</div>
+                <div class="text-[10px] text-white/60">admin</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="mx-auto max-w-[1400px] px-4 pt-6 sm:px-6">
+      <!-- greeting strip -->
+      <div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 id="pageTitle" class="text-2xl font-extrabold tracking-tight">Mission Control</h1>
+          <p id="pageSub" class="mt-1 text-sm text-brand-800/60">Live view of the governed agent workforce.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-brand-700 shadow-soft">
+            <span class="h-2 w-2 animate-pulse rounded-full bg-brand-400"></span> live · api :8000
+          </span>
+          <span class="inline-flex items-center gap-2 rounded-full bg-brand-900 px-3 py-1.5 text-xs font-semibold text-white shadow-soft">
+            <span class="mono">6</span> agents online
+          </span>
+        </div>
+      </div>
+
+      <!-- ══ DASHBOARD (bento) ═══════════════════════════════════════════════ -->
+      <section id="p-dashboard" class="panel active">
+        <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <!-- hero KPI spanning 2 -->
+          <div class="col-span-2 flex flex-col justify-between rounded-[1.5rem] bg-gradient-to-br from-brand-500 via-brand-600 to-brand-700 p-6 text-white shadow-softer">
+            <div class="flex items-start justify-between">
+              <div>
+                <div class="text-xs font-semibold uppercase tracking-widest text-white/70">Agents Running</div>
+                <div class="mt-2 text-5xl font-extrabold">6</div>
+              </div>
+              <span class="grid h-11 w-11 place-items-center rounded-2xl bg-white/15 ring-1 ring-white/25">▲</span>
+            </div>
+            <div class="mt-6 flex items-center gap-4 text-sm text-white/80">
+              <span><b class="text-white">4</b> active</span>
+              <span><b class="text-white">1</b> restricted</span>
+              <span><b class="text-white">1</b> quarantined</span>
+            </div>
+          </div>
+
+          <div class="card p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest text-brand-800/50">Workflows</div>
+            <div class="mt-2 text-3xl font-extrabold">3</div>
+            <div class="mt-1 text-xs text-brand-800/50">2 onboarding · 1 task exec</div>
+          </div>
+          <div class="card p-5">
+            <div class="text-xs font-semibold uppercase tracking-widest text-brand-800/50">Tool Calls</div>
+            <div class="mt-2 text-3xl font-extrabold text-amber-500">12</div>
+            <div class="mt-1 text-xs text-brand-800/50">in-flight governed</div>
+          </div>
+
+          <!-- activity chart, wide -->
+          <div class="card col-span-2 p-5 lg:col-span-3">
+            <div class="mb-4 flex items-center justify-between">
+              <div>
+                <div class="font-bold">Governed Activity</div>
+                <div class="text-xs text-brand-800/50">recorded steps over time</div>
+              </div>
+              <span class="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-semibold text-brand-700">last 24h</span>
+            </div>
+            <div class="flex h-40 items-end gap-2" id="chart"></div>
+          </div>
+
+          <!-- approvals -->
+          <div class="card p-5">
+            <div class="mb-3 flex items-center justify-between">
+              <div class="font-bold">Approvals</div>
+              <span class="grid h-6 min-w-6 place-items-center rounded-full bg-amber-400 px-1.5 text-xs font-bold text-brand-900">3</span>
+            </div>
+            <div class="space-y-3 text-sm">
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-amber-400"></span><span class="flex-1 truncate">researcher · <span class="mono text-xs">send_email</span></span></div>
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-amber-400"></span><span class="flex-1 truncate">coder · <span class="mono text-xs">write_file</span></span></div>
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-amber-400"></span><span class="flex-1 truncate">ops · <span class="mono text-xs">external_post</span></span></div>
+            </div>
+          </div>
+
+          <!-- radar mini -->
+          <div class="card col-span-2 p-5">
+            <div class="mb-3 font-bold">Radar</div>
+            <div class="space-y-2.5 text-sm">
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-brand-400"></span><span class="flex-1 truncate">langgraph-researcher</span><span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs text-brand-700">active</span></div>
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-brand-400"></span><span class="flex-1 truncate">crewai-coder</span><span class="rounded-md bg-brand-50 px-2 py-0.5 text-xs text-brand-700">active</span></div>
+              <div class="flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-rose-400"></span><span class="flex-1 truncate">autogen-analyst</span><span class="rounded-md bg-rose-50 px-2 py-0.5 text-xs text-rose-600">quarantined</span></div>
+            </div>
+          </div>
+
+          <!-- tokens -->
+          <div class="card p-5">
+            <div class="mb-3 font-bold">Top Tokens</div>
+            <div class="space-y-3">
+              <div><div class="mb-1 flex justify-between text-xs"><span>researcher</span><span class="mono">18.2k</span></div><div class="h-2 rounded-full bg-brand-50"><div class="h-2 rounded-full bg-brand-500" style="width:82%"></div></div></div>
+              <div><div class="mb-1 flex justify-between text-xs"><span>coder</span><span class="mono">11.7k</span></div><div class="h-2 rounded-full bg-brand-50"><div class="h-2 rounded-full bg-brand-400" style="width:53%"></div></div></div>
+              <div><div class="mb-1 flex justify-between text-xs"><span>analyst</span><span class="mono">6.1k</span></div><div class="h-2 rounded-full bg-brand-50"><div class="h-2 rounded-full bg-amber-400" style="width:28%"></div></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══ OTHER TABS (lighter mocks, enough to show switching) ════════════ -->
+      <section id="p-radar" class="panel">
+        <div class="card overflow-hidden">
+          <div class="grid grid-cols-[1fr_auto_auto_auto] gap-4 border-b border-brand-50 px-5 py-3 text-xs font-semibold uppercase tracking-wide text-brand-800/50">
+            <span>Agent</span><span>Framework</span><span>Autonomy</span><span>Status</span>
+          </div>
+          <div id="radarRows"></div>
+        </div>
+      </section>
+
+      <section id="p-approvals" class="panel">
+        <div class="grid gap-4 md:grid-cols-3" id="apprCards"></div>
+      </section>
+
+      <section id="p-policy" class="panel">
+        <div class="card overflow-hidden">
+          <div class="flex items-center justify-between border-b border-brand-50 px-5 py-3">
+            <div class="font-bold">Operator Policy <span class="mono text-xs text-brand-800/40">governance.operator_policy</span></div>
+            <button class="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white">Save</button>
+          </div>
+          <pre class="mono overflow-auto bg-brand-900 p-5 text-[13px] leading-relaxed text-brand-50"><span style="color:#9aa6b2">{</span>
+  <span style="color:#4fc1ff">"tools"</span>: <span style="color:#9aa6b2">{</span>
+    <span style="color:#4fc1ff">"send_email"</span>: <span style="color:#9aa6b2">{</span> <span style="color:#4fc1ff">"risk"</span>: <span style="color:#5fd38d">"high"</span>, <span style="color:#4fc1ff">"gate"</span>: <span style="color:#c191e8">true</span> <span style="color:#9aa6b2">},</span>
+    <span style="color:#4fc1ff">"write_file"</span>: <span style="color:#9aa6b2">{</span> <span style="color:#4fc1ff">"risk"</span>: <span style="color:#5fd38d">"medium"</span> <span style="color:#9aa6b2">}</span>
+  <span style="color:#9aa6b2">},</span>
+  <span style="color:#4fc1ff">"exclusion_list"</span>: <span style="color:#9aa6b2">[</span>
+    <span style="color:#5fd38d">"claude"</span>, <span style="color:#5fd38d">"codex"</span>, <span style="color:#5fd38d">"copilot"</span>
+  <span style="color:#9aa6b2">]</span>
+<span style="color:#9aa6b2">}</span></pre>
+        </div>
+      </section>
+
+      <!-- generic placeholder panels -->
+      <section id="p-workflow" class="panel"><div class="placeholder"></div></section>
+      <section id="p-context" class="panel"><div class="placeholder"></div></section>
+      <section id="p-tokens" class="panel"><div class="placeholder"></div></section>
+      <section id="p-hooks" class="panel"><div class="placeholder"></div></section>
+      <section id="p-sandbox" class="panel"><div class="placeholder"></div></section>
+    </main>
+
+    <!-- ══ persistent bottom status rail (a departure from the template) ═════ -->
+    <footer class="fixed inset-x-0 bottom-0 z-40 border-t border-brand-100 bg-white/85 backdrop-blur">
+      <div class="mx-auto flex max-w-[1400px] items-center gap-5 overflow-x-auto px-4 py-2.5 text-xs sm:px-6">
+        <span class="font-semibold text-brand-800/60">System</span>
+        <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-brand-400"></span>Temporal</span>
+        <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-brand-400"></span>OTel</span>
+        <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-brand-400"></span>Laminar</span>
+        <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-brand-400"></span>OPA</span>
+        <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>Sandbox · running</span>
+        <span class="ml-auto text-brand-800/40">mock — not wired to backend</span>
+      </div>
+    </footer>
+
+    <script>
+      // ── tab switching + sliding pill indicator ──────────────────────────
+      const tabsWrap = document.getElementById('tabs')
+      const pill = document.getElementById('tabPill')
+      const tabs = [...document.querySelectorAll('.tab')]
+      const titles = {
+        dashboard: ['Mission Control', 'Live view of the governed agent workforce.'],
+        radar: ['Radar', 'Every detected agent and its governance state.'],
+        approvals: ['Approvals', 'Write actions paused awaiting an operator decision.'],
+        workflow: ['Workflow', 'Temporal onboarding + task-execution runs.'],
+        context: ['Context Graph', 'Governed steps linked across runs.'],
+        tokens: ['Token Monitor', 'Per-agent token usage windows.'],
+        hooks: ['Agent Hooks', 'Registered control hooks per agent.'],
+        policy: ['Operator Policy', 'The live governance policy document.'],
+        sandbox: ['Sandbox', 'Container-isolated tool execution.'],
+      }
+      function movePill(el) {
+        pill.style.width = el.offsetWidth + 'px'
+        pill.style.transform = `translateX(${el.offsetLeft}px)`
+      }
+      function select(el) {
+        tabs.forEach((t) => t.setAttribute('aria-selected', String(t === el)))
+        const id = el.dataset.tab
+        document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'))
+        document.getElementById('p-' + id).classList.add('active')
+        const [t, s] = titles[id]
+        document.getElementById('pageTitle').textContent = t
+        document.getElementById('pageSub').textContent = s
+        movePill(el)
+        el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' })
+      }
+      tabs.forEach((t) => t.addEventListener('click', () => select(t)))
+      window.addEventListener('resize', () => movePill(document.querySelector('.tab[aria-selected="true"]')))
+      requestAnimationFrame(() => movePill(tabs[0]))
+
+      // ── fill in the dashboard chart bars ───────────────────────────────
+      const heights = [30, 46, 38, 62, 54, 78, 66, 90, 72, 84, 60, 95]
+      document.getElementById('chart').innerHTML = heights
+        .map((h, i) => `<div class="bar flex-1 rounded-t-md ${i === heights.length - 1 ? 'bg-brand-600' : 'bg-brand-300'}" style="height:${h}%"></div>`)
+        .join('')
+
+      // ── radar rows ─────────────────────────────────────────────────────
+      const agents = [
+        ['langgraph-researcher', 'LangGraph', 'active', 'brand'],
+        ['crewai-coder', 'CrewAI', 'active', 'brand'],
+        ['autogen-analyst', 'AutoGen', 'quarantined', 'rose'],
+        ['langgraph-writer', 'LangGraph', 'restricted', 'amber'],
+        ['mcp-ops', 'MCP', 'active', 'brand'],
+      ]
+      document.getElementById('radarRows').innerHTML = agents
+        .map(
+          ([n, f, s, c]) => `<div class="grid grid-cols-[1fr_auto_auto_auto] items-center gap-4 border-b border-brand-50 px-5 py-3.5 text-sm last:border-0">
+            <span class="flex items-center gap-2 font-medium"><span class="h-2 w-2 rounded-full bg-${c === 'rose' ? 'rose' : c === 'amber' ? 'amber' : 'brand'}-400"></span>${n}</span>
+            <span class="text-brand-800/60">${f}</span>
+            <span class="mono text-xs text-brand-800/60">${s}</span>
+            <span class="rounded-md bg-${c === 'rose' ? 'rose' : c === 'amber' ? 'amber' : 'brand'}-50 px-2 py-0.5 text-xs font-semibold text-${c === 'rose' ? 'rose' : c === 'amber' ? 'amber' : 'brand'}-${c === 'brand' ? '700' : '600'}">${s}</span>
+          </div>`
+        )
+        .join('')
+
+      // ── approval cards ─────────────────────────────────────────────────
+      const appr = [
+        ['researcher', 'send_email', 'high', 'to alice@acme.com — launch campaign'],
+        ['coder', 'write_file', 'medium', '/workspace/report.md (4.2 kB)'],
+        ['ops', 'external_post', 'high', 'POST https://api.partner.io/publish'],
+      ]
+      document.getElementById('apprCards').innerHTML = appr
+        .map(
+          ([a, act, risk, detail]) => `<div class="card p-5">
+            <div class="mb-2 flex items-center justify-between">
+              <span class="font-semibold">${a}</span>
+              <span class="rounded-md bg-${risk === 'high' ? 'rose' : 'amber'}-50 px-2 py-0.5 text-xs font-bold text-${risk === 'high' ? 'rose' : 'amber'}-600">${risk}</span>
+            </div>
+            <div class="mono mb-1 text-sm text-brand-700">${act}</div>
+            <div class="text-xs text-brand-800/50">${detail}</div>
+            <div class="mt-4 flex gap-2">
+              <button class="flex-1 rounded-lg bg-brand-600 py-2 text-xs font-semibold text-white">Approve</button>
+              <button class="flex-1 rounded-lg bg-brand-50 py-2 text-xs font-semibold text-brand-700">Deny</button>
+            </div>
+          </div>`
+        )
+        .join('')
+
+      // ── placeholder panels ─────────────────────────────────────────────
+      document.querySelectorAll('.placeholder').forEach((el) => {
+        el.className = 'card grid place-items-center p-16 text-center'
+        el.innerHTML = `<div><div class="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-brand-50 text-brand-600">◆</div><div class="font-semibold">Mocked panel</div><div class="mt-1 text-sm text-brand-800/50">This tab would render its real page here.</div></div>`
+      })
+    </script>
+  </body>
+</html>

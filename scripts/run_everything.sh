@@ -136,6 +136,29 @@ export OLLAMA_BASE="${OLLAMA_BASE:-http://localhost:${GATEWAY_PORT}/llm}"
 export AGENT_RADAR_DATABASE_URL="${AGENT_RADAR_DATABASE_URL:-postgresql+psycopg://${AWCP_APP_USER:-awcp_app}:${AWCP_APP_PASSWORD:-awcp_app_password}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
 export AGENT_RADAR_DB_ADMIN_URL="${AGENT_RADAR_DB_ADMIN_URL:-postgresql+psycopg://${POSTGRES_USER:-awcp}:${POSTGRES_PASSWORD:-awcppassword}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-awcp}}"
 
+# ── IAM (Keycloak + OpenFGA) — OFF by default ─────────────────────────────────
+# ONE flag turns on authentication for the gateway, the agents, AND the UI at once:
+#   AWCP_IAM_MODE=shadow  bash scripts/run_everything.sh   # validate + audit, allow all
+#   AWCP_IAM_MODE=enforce bash scripts/run_everything.sh   # actually 401 / 403
+# Unset (default) → this whole block is skipped and everything runs exactly as
+# before. Config + the agent secret come from the gitignored observability/.env
+# (created in IAM Phases 1-3); anything already exported wins — nothing hardcoded.
+if [ -n "${AWCP_IAM_MODE:-}" ] && [ "${AWCP_IAM_MODE}" != "off" ]; then
+  _iam_env="$ROOT/observability/.env"
+  _iam_get(){ [ -f "$_iam_env" ] && { grep -E "^$1=" "$_iam_env" | head -1 | cut -d= -f2- || true; }; }
+  export AWCP_AUTH_MODE="$AWCP_IAM_MODE"
+  export KEYCLOAK_URL="${KEYCLOAK_URL:-http://localhost:8083}"
+  export KEYCLOAK_REALM="${KEYCLOAK_REALM:-AWCP}"
+  export OPENFGA_API_URL="${OPENFGA_API_URL:-$(_iam_get OPENFGA_API_URL)}"
+  export OPENFGA_API_URL="${OPENFGA_API_URL:-http://localhost:8082}"
+  export OPENFGA_STORE_ID="${OPENFGA_STORE_ID:-$(_iam_get OPENFGA_STORE_ID)}"
+  export AWCP_AGENT_CLIENT_ID="${AWCP_AGENT_CLIENT_ID:-awcp-agent}"
+  export AWCP_AGENT_CLIENT_SECRET="${AWCP_AGENT_CLIENT_SECRET:-$(_iam_get AWCP_AGENT_CLIENT_SECRET)}"
+  echo "🔒 IAM ${AWCP_AUTH_MODE} — keycloak=${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM} · openfga=${OPENFGA_API_URL} store=${OPENFGA_STORE_ID:-UNSET}"
+  [ -z "${OPENFGA_STORE_ID:-}" ] && echo "  ! OPENFGA_STORE_ID empty — run: bash observability/openfga/bootstrap.sh"
+  [ -z "${AWCP_AGENT_CLIENT_SECRET:-}" ] && echo "  ! AWCP_AGENT_CLIENT_SECRET empty — agents won't get tokens under enforce"
+fi
+
 # Temporal task queues the gateway's in-process workers listen on. Namespaced so
 # the gateway and any standalone radar can share one Temporal dev server without
 # stealing each other's workflows.
