@@ -65,6 +65,19 @@ export const getAgentGraph = (id) =>
 // Whole-ledger hash-chain verification (re-hash + linkage). {enabled:false} when
 // the durable ledger (Postgres) is off — nothing persisted to verify.
 export const getChainVerify = () => call('GET', '/context-graph/verify')
+// The Context Graph Manager's budget-fitted recovery slice for one run: which
+// steps a resuming agent would carry forward (fresh + relevant + fits the token
+// budget), which are stale, and the resume anchor. Drives the graph overlay.
+export const getWorkingSet = (wf, budget = 0, focus = '') =>
+  call(
+    'GET',
+    `/context-graph/${encodeURIComponent(wf)}/working-set?budget=${budget || 0}` +
+      (focus ? `&focus=${encodeURIComponent(focus)}` : ''),
+  )
+// Which of a run's steps are stale (aged / superseded / dead branch), with the
+// reasons — pairs with getWorkingSet to explain what recovery leaves behind.
+export const getStale = (wf) =>
+  call('GET', `/context-graph/${encodeURIComponent(wf)}/stale`)
 
 // Neo4j graph projection (additive read-model). {enabled:false} when Neo4j is off.
 export const getNeo4jStatus = () => call('GET', '/context-graph/neo4j/status')

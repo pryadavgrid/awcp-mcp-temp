@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { usePoll } from '../hooks/usePoll.js'
-import { getContextFeed, getChainVerify } from '../api.js'
+import { getContextFeed, getChainVerify, getAgents, getWorkingSet, getStale } from '../api.js'
 import { Panel } from '../components/Table.jsx'
 import { Badge, StatusBadge } from '../components/Badge.jsx'
 import { timeAgo } from '../lib/format.js'
-import Neo4jGraph from '../components/Neo4jGraph.jsx'
+import ContextFlowGraph from '../components/ContextFlowGraph.jsx'
 import { neo4jBrowserUrl } from '../config.js'
 
 // The context graph = every governed step an agent took, recorded as a node in
@@ -45,8 +45,11 @@ function groupRuns(nodes) {
 export default function ContextGraph() {
   const { data, loading, error } = usePoll(() => getContextFeed(300), [])
   const { data: chain } = usePoll(getChainVerify, [])
+  // Live registry — gives each agent node its A2A AgentCard (description+skills).
+  const { data: agents } = usePoll(getAgents, [])
   const [selected, setSelected] = useState(null)
-  const [view, setView] = useState('timeline') // 'timeline' | 'graph'
+  const [view, setView] = useState('graph') // 'graph' | 'timeline'
+  const [overlay, setOverlay] = useState(false) // working-set (recovery) overlay
 
   const nodes = (data && data.nodes) || []
   const runs = groupRuns(nodes)
@@ -54,6 +57,18 @@ export default function ContextGraph() {
 
   // Resolve the active run: explicit selection if it still exists, else newest.
   const run = runs.find((r) => r.workflow_id === selected) || runs[0] || null
+
+  // Working-set + stale reports for the overlay (only fetched while it is on).
+  const wfId = run?.workflow_id || ''
+  const wantOverlay = view === 'graph' && overlay && !!wfId
+  const { data: workingSet } = usePoll(
+    () => (wantOverlay ? getWorkingSet(wfId) : Promise.resolve(null)),
+    [wantOverlay, wfId],
+  )
+  const { data: staleReport } = usePoll(
+    () => (wantOverlay ? getStale(wfId) : Promise.resolve(null)),
+    [wantOverlay, wfId],
+  )
 
   // The endpoint 404s into an error only if the package isn't mounted; a missing
   // graph just yields an empty feed, so distinguish the two for the user.
@@ -72,11 +87,11 @@ export default function ContextGraph() {
         <ChainStat chain={chain} />
       </div>
 
-      {/* ── view toggle: timeline (Postgres ledger) vs graph (Neo4j) ──── */}
+      {/* ── view toggle: stepwise flow graph vs the raw timeline ─────────── */}
       <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 text-sm shadow-sm w-max">
         {[
+          ['graph', '◈ Flow'],
           ['timeline', '☰ Timeline'],
-          ['graph', '◈ Graph'],
         ].map(([id, label]) => (
           <button
             key={id}
@@ -128,20 +143,31 @@ export default function ContextGraph() {
           </Panel>
         ) : (
           <Panel
-            title={run ? 'Step graph' : 'Context graph'}
+            title={run ? 'Context flow' : 'Context graph'}
             subtitle={
               run
-                ? `${run.steps} step${run.steps === 1 ? '' : 's'} · Agent → Step chain → Tool / Policy (Neo4j projection)`
-                : 'Select a run to see its graph'
+                ? `${run.steps} governed step${run.steps === 1 ? '' : 's'} · Agent (A2A card) → numbered step chain → tools & policies · arrows show the flow`
+                : 'Select a run to see its stepwise flow'
             }
-            right={<Neo4jLinkButton workflow={run?.workflow_id} />}
+            right={
+              <div className="flex items-center gap-2">
+                <OverlayToggle on={overlay} onToggle={() => setOverlay((v) => !v)} />
+                <Neo4jLinkButton workflow={run?.workflow_id} />
+              </div>
+            }
           >
             {!run ? (
               <p className="px-5 py-12 text-center text-sm text-slate-400">Nothing selected.</p>
             ) : (
               <div className="px-5 py-4">
                 {/* keyed on the workflow so the graph fully resets between runs */}
-                <Neo4jGraph key={run.workflow_id} workflow={run.workflow_id} />
+                <ContextFlowGraph
+                  key={run.workflow_id}
+                  run={run}
+                  agents={agents || []}
+                  workingSet={wantOverlay ? workingSet : null}
+                  staleReport={wantOverlay ? staleReport : null}
+                />
               </div>
             )}
           </Panel>
@@ -198,6 +224,26 @@ function RunsPanel({ runs, activeId, loading, hasData, notMounted, onSelect }) {
         )}
       </div>
     </Panel>
+  )
+}
+
+// Toggles the recovery working-set overlay: what a resuming agent would carry
+// forward within its context-window budget, what is stale, and the resume anchor
+// (all from GET /context-graph/{wf}/working-set — the context offload/retrieval
+// story rendered onto the flow).
+function OverlayToggle({ on, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      title="Overlay the recovery working set: which steps a resuming agent carries forward (within its token budget), which are stale, and the resume anchor"
+      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium shadow-sm transition ${
+        on
+          ? 'border-brand-500 bg-brand-600 text-white'
+          : 'border-slate-200 bg-white text-slate-600 hover:border-brand-300 hover:bg-brand-50 hover:text-brand-700'
+      }`}
+    >
+      ⚓ Working set
+    </button>
   )
 }
 

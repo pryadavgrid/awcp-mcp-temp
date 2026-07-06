@@ -460,9 +460,13 @@ def evaluate(req: EvaluateRequest) -> dict:
         _RECENT.append(record)
     db.record_decision(record)               # durable append (no disk; survives restart)
     _log_laminar(req.agent_id, req.task_id, req.tool_name, req.tool_input)
+    # hard_deny marks an EXPLICIT operator deny (Policy tab allow:false) as opposed to a
+    # mere threshold crossing: the agent must NEVER run a hard-denied tool (no approval
+    # prompt), whereas a threshold block asks the operator for approval on the AWCP UI.
     return {"tool_name": req.tool_name, "risk_tier": tier, "decision": decision,
             "reason": reason, "reasoning": rec.get("reason", ""),
-            "engine": engine, "block_tiers": BLOCK_TIERS}
+            "engine": engine, "block_tiers": BLOCK_TIERS,
+            "hard_deny": bool(ov and ov.get("block") is True)}
 
 
 @app.get("/decisions/{task_id}")

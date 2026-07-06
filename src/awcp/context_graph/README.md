@@ -293,7 +293,7 @@ MATCH p=(:Step)-[:NEXT*]->(:Step) RETURN p LIMIT 25;       // lineage chains
 | `manager.py` | the **smart-memory layer**: relevance scoring, stale-context detection, token-budget working set |
 | `memory.py`  | optional **Letta** long-term-memory recall backend (REST, fail-open) |
 | `api.py`     | the FastAPI `APIRouter` (mounted into the radar router) |
-| `client.py`  | HTTP recorder for the MCP process |
+| `client.py`  | HTTP client for the MCP process: record checkpoints, fetch working set / nodes (offload+recall plumbing, §12) |
 | `__init__.py`| public exports |
 
 ---
@@ -330,7 +330,7 @@ workflow actually has, and it writes nothing (pure reads over `store`, fail-open
    1. scores + flags every node; 2. keeps only **fresh** nodes; 3. always seats the
    newest fresh node first (the resume point); 4. greedily adds the rest by
    relevance until the next would bust the budget; 5. spends any leftover budget on
-   Letta long-term recall (§12); 6. returns the selection in chronological order
+   Letta long-term recall (§13); 6. returns the selection in chronological order
    with `used_tokens`, `dropped`, `excluded_stale`, and `resume_pointer`.
    Token counts use **tiktoken** when present, else a chars/4 heuristic — so it
    degrades, never breaks. The default budget is `AWCP_CTX_TOKEN_BUDGET` (4000).
@@ -351,7 +351,52 @@ curl -s "localhost:8000/context-graph/<wf>/working-set?budget=2000&focus=gold%20
 curl -s "localhost:8000/context-graph/<wf>/stale" | jq
 ```
 
-## 12. Letta long-term memory (optional, fail-open)
+## 12. Context offload / recall (the context-window pressure valve)
+
+The manager (§11) answers "what should a *recovering* run carry?". This layer
+lets a **live agent use the graph as spill-over memory** — the core promise:
+an agent on a long-running task with a limited context window can **off-load**
+context into the graph and **retrieve** it later, exactly when needed.
+
+Two MCP tools (in `awcp.mcp.server`, so every governed agent has them):
+
+| tool | what it does |
+|---|---|
+| `context_offload(content, label, agent_id, task_id)` | Stores `content` **verbatim** on a tamper-chained node (`step="offload:<label>"`, content in `payload.content`, also hashed into `context_hash`). Returns a tiny ref: `{ref, label, resume_pointer, tokens}`. The agent drops the content from its window and keeps the ref. |
+| `context_recall(agent_id, task_id, ref="", focus="", budget=0)` | **With `ref`** (row_hash or unique prefix): returns that exact chunk verbatim. **Without `ref`**: returns the manager's working set — the relevance-ranked, staleness-filtered steps that fit `budget` tokens (offloaded chunks come back verbatim, ordinary steps as summaries), plus the resume anchor and Letta memories. |
+
+Design points:
+
+- **Both actions are themselves recorded** (`offload:<label>` / `recall` steps),
+  so offload/recall traffic is visible on the dashboard flow (📤 / 📥 nodes) and
+  in the evidence ledger — the trail *is* the audit of the agent's memory use.
+- **Re-offloading a label supersedes the old snapshot**: `_superseded` keys
+  offloads by `(task_id, full step)`, so "findings v2" makes "findings v1"
+  stale without touching other labels. Offloads are top-weighted carried
+  context (`_STEP_WEIGHTS["offload"]=1.0`); recall markers are near-zero
+  (`0.2`) so bookkeeping never crowds real context out of the budget.
+- **Size-capped** via `AWCP_CTX_OFFLOAD_MAX_CHARS` (default 20000; truncation
+  is flagged in the ref). Fail-open like everything else: if the radar is
+  unreachable, offload returns an explicit error telling the agent to keep the
+  content in its window.
+- HTTP plumbing lives in `client.py` (`record_checkpoint` now returns the
+  created node so the caller gets its `row_hash` ref; plus
+  `fetch_working_set` / `fetch_workflow_nodes`).
+
+```python
+# agent-side pattern for a long-running task
+ref = context_offload(content=big_findings, label="findings",
+                      agent_id=me, task_id=task)          # → park it, free the window
+...                                                        # window stays small
+back = context_recall(agent_id=me, task_id=task, ref=ref["ref"])   # exact chunk
+ws   = context_recall(agent_id=me, task_id=task, budget=3000,
+                      focus="gold price")                  # or: best slice that fits
+```
+
+Tests: `tests/context_graph/test_offload_recall.py` (round-trip, ranking,
+per-label supersede — all on the in-memory ring, no Postgres needed).
+
+## 13. Letta long-term memory (optional, fail-open)
 
 `memory.py` adds the **durable, cross-run** memory the brochure names as a partner:
 **Letta** (formerly MemGPT). Postgres stays the per-run trail and Neo4j the graph

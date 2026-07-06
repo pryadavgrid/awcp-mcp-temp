@@ -6,6 +6,7 @@ import json
 import logging
 
 import os
+import re
 import sys
 from datetime import timedelta
 from typing import Annotated, Any
@@ -41,7 +42,11 @@ from awcp.runtime.sandbox import (
     sandbox_status,
     write_file_sync,
 )
-from awcp.context_graph.client import record_checkpoint as _cg_record
+from awcp.context_graph.client import (
+    record_checkpoint as _cg_record,
+    fetch_working_set as _cg_working_set,
+    fetch_workflow_nodes as _cg_nodes,
+)
 from awcp.runtime.json_utils import extract_json
 from awcp.runtime.schemas import PromptRequest
 from awcp.agents.ollama_search import build_search_answer_prompt
@@ -110,6 +115,55 @@ GATE_SEND_SCOPE = os.getenv("AWCP_GATE_SEND_SCOPE", "false").lower() == "true"
 # best-effort (a metering hiccup never affects the tool result).
 METER_TOOL_TOKENS = os.getenv("AWCP_METER_TOOL_TOKENS", "true").lower() == "true"
 
+# Surface sandbox tool calls as Temporal activities. The sandbox tools
+# (run_command / write_file / read_file) run *inside* this MCP server — the only
+# place they execute — so unless we report each call to the radar, work an agent
+# does in the sandbox never reaches Temporal; it only shows on the Sandbox page.
+# We emit the same `tool_called` execution event a self-instrumenting bundle
+# agent sends, which the radar turns into an `execution_tool_call` activity on the
+# task's AgentExecutionWorkflow. Scoped to sandbox tools so tools an agent already
+# self-reports aren't double-counted; both the flag and the tool set are
+# env-overridable (set the flag false if your agents already report these).
+EMIT_SANDBOX_EXEC_EVENTS = (
+    os.getenv("AWCP_MCP_EMIT_SANDBOX_EXEC_EVENTS", "true").lower() == "true"
+)
+SANDBOX_EXEC_TOOLS = {
+    t.strip()
+    for t in os.getenv("AWCP_SANDBOX_EXEC_TOOLS", "run_command,write_file,read_file").split(",")
+    if t.strip()
+}
+
+
+def _emit_exec_event(agent_id: str, task_id: str, tool_name: str, eff_risk: str,
+                     gate: dict, outcome: str, output: Any = "") -> None:
+    """Report a sandbox tool call to the radar as a `tool_called` execution event
+    so it appears as an activity in the task's AgentExecutionWorkflow (Temporal).
+
+    No-op unless emission is enabled, the tool is a sandbox tool, and both an
+    agent_id and task_id are present (without a task_id there is no workflow to
+    attach the activity to — the radar replies "no_active_workflow"). The radar
+    only signals an already-running task workflow, so this can add a step but
+    never starts a stray workflow. Best-effort: a reporting hiccup never affects
+    the tool result."""
+    if not (EMIT_SANDBOX_EXEC_EVENTS and agent_id and task_id
+            and tool_name in SANDBOX_EXEC_TOOLS):
+        return
+    try:
+        httpx.post(
+            f"{RADAR_URL}/tasks/execution/{task_id}/event",
+            json={
+                "type": "tool_called",
+                "tool_name": tool_name,
+                "risk": eff_risk,
+                "gate": "blocked" if outcome == "blocked" else gate.get("decision", "allow"),
+                "result_len": len(str(output)) if output else 0,
+                "extra": {"sandbox": True, "outcome": outcome},
+            },
+            timeout=GATE_TIMEOUT,
+        )
+    except Exception as exc:  # noqa: BLE001 — reporting must never break a tool call
+        logger.debug("mcp.exec_event.failed tool=%s error=%r", tool_name, exc)
+
 
 def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
                        tool_input: dict, output: Any) -> None:
@@ -159,10 +213,14 @@ def _record_checkpoint(agent_id: str, task_id: str, tool_name: str,
     )
 
 
-def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
+def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool,
+                approved: bool = False) -> dict:
     """Ask the radar's write-action gate. Returns the radar's decision dict.
     On any failure falls back to allow/deny per AWCP_GATE_FAIL_OPEN so a missing
-    control plane never hard-breaks tool execution (unless ops opt into fail-closed)."""
+    control plane never hard-breaks tool execution (unless ops opt into fail-closed).
+
+    `approved` forwards an operator's AWCP-UI approval of this exact call so the gate's
+    operator-policy admission check doesn't re-deny an already-approved tool."""
     if not agent_id:
         # No identity to gate against — treat as an ungoverned (direct) call.
         return {"decision": "allow", "mode": "ungoverned",
@@ -170,7 +228,7 @@ def _radar_gate(agent_id: str, action: str, scope: str, is_write: bool) -> dict:
     try:
         resp = httpx.post(
             f"{RADAR_URL}/agents/{agent_id}/gate",
-            json={"action": action, "write": is_write, "scope": scope},
+            json={"action": action, "write": is_write, "scope": scope, "approved": approved},
             timeout=GATE_TIMEOUT,
         )
         if resp.status_code == 200:
@@ -435,7 +493,8 @@ def execute_tool(
         #    The scope is only forwarded when strict magazine-scope authorization
         #    is enabled.
         gate = _radar_gate(
-            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write
+            agent_id, tool_name, eff_scope if GATE_SEND_SCOPE else "", is_write,
+            approved=approved,
         )
         decision = gate.get("decision", "allow")
         if span is not None:
@@ -453,6 +512,8 @@ def execute_tool(
             # Record the blocked attempt as a node too — a denial is part of the trail.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "blocked")
+            # Surface a blocked sandbox call on Temporal as well (it's a real step).
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "blocked")
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
@@ -471,6 +532,8 @@ def execute_tool(
             # Record the step in the context graph (governed-step trail, best-effort).
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "succeeded")
+            # Surface a sandbox tool run as a Temporal activity (run_command etc.).
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "succeeded", result)
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
@@ -493,6 +556,8 @@ def execute_tool(
             # Record the failed step as an error node in the context graph.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
                                eff_risk, "error", error=str(e))
+            # Surface a failed sandbox call on Temporal as well.
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "error")
             return json.dumps({
                 "status": "error",
                 "output": f"Error executing tool '{tool_name}': {str(e)}",
@@ -501,6 +566,208 @@ def execute_tool(
                 "reason": str(e),
                 "risk": eff_risk,
             })
+
+
+# ======================================================================
+# Context offload / recall — the context-window pressure valve.
+#
+# An agent on a LONG-RUNNING task with a LIMITED context window can park a chunk
+# of working context (accumulated findings, long tool output, a draft) in the
+# context graph and drop it from its window, keeping only the tiny ref this
+# returns. Later — same run or after a crash/handover — context_recall pulls it
+# back: either that exact chunk (by ref) or the Context Graph Manager's
+# budget-fitted working set (relevance-ranked fresh steps + resume anchor that
+# actually FIT the window). Both actions are themselves recorded as steps, so the
+# offload/recall traffic is visible on the Context Graph UI and evidence ledger.
+# ======================================================================
+OFFLOAD_MAX_CHARS = int(os.getenv("AWCP_CTX_OFFLOAD_MAX_CHARS", "20000"))
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap ~chars/4 token estimate (matches laminar's fallback). The manager
+    recounts server-side with tiktoken when fitting the working set."""
+    return max(1, len(text or "") // 4)
+
+
+def _slug(label: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", str(label or "").lower()).strip("-")
+    return s or "chunk"
+
+
+def _node_summary(payload: dict) -> str:
+    """One-line summary of a non-offload node's payload for recall output."""
+    return " ".join(
+        f"{k}={v}" for k, v in (payload or {}).items()
+        if v not in (None, "", {}) and not str(k).startswith("_") and k != "content"
+    )
+
+
+@mcp.tool(
+    description=(
+        "Context OFFLOAD — park a chunk of working context (accumulated findings, "
+        "long tool output, notes, a draft) in the governed context graph so it "
+        "stops consuming this agent's context window. The content is stored "
+        "verbatim on a tamper-chained node and a small JSON ref is returned: "
+        '{"status","ref","label","resume_pointer","tokens"}. Drop the content '
+        "from your window and keep the ref; retrieve it later with context_recall "
+        "(by ref for the exact chunk, or without ref for the budget-fitted "
+        "working set). Use whenever your context window is filling up on a "
+        "long-running task."
+    )
+)
+def context_offload(
+    content: Annotated[str, Field(
+        description="The context text to offload — stored verbatim, retrievable later.")],
+    label: Annotated[str, Field(
+        description="Short name for this chunk (e.g. findings, sources, draft) — "
+                    "used in the ref, the resume pointer, and the dashboard.")] = "chunk",
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id (as registered with the radar).")] = "",
+    task_id: Annotated[str, Field(
+        description="The task/run this context belongs to; recall uses the same id.")] = "",
+) -> str:
+    if not agent_id:
+        return json.dumps({"status": "error",
+                           "output": "agent_id is required to offload context"})
+    if not (content or "").strip():
+        return json.dumps({"status": "error", "output": "content is empty — nothing to offload"})
+
+    truncated = len(content) > OFFLOAD_MAX_CHARS
+    stored_content = content[:OFFLOAD_MAX_CHARS]
+    slug = _slug(label)
+    tokens = _estimate_tokens(stored_content)
+    resume_pointer = f"{task_id or 'task'}:offloaded:{slug}"
+
+    node = _cg_record(
+        RADAR_URL, agent_id,
+        step=f"offload:{slug}",
+        task_id=task_id,
+        workflow_id=task_id,
+        actor=agent_id,
+        resume_pointer=resume_pointer,
+        context=stored_content,   # hashed → the chain proves the content later
+        payload={"content": stored_content, "label": slug,
+                 "tokens": tokens, "truncated": truncated},
+        timeout=GATE_TIMEOUT,
+    )
+    if not node:
+        return json.dumps({"status": "error",
+                           "output": "context graph unreachable — content NOT offloaded, keep it in your window"})
+    logger.info("mcp.context.offload agent_id=%s task=%s label=%s tokens=%d",
+                agent_id, task_id, slug, tokens)
+    return json.dumps({
+        "status": "offloaded",
+        "ref": node.get("row_hash", ""),
+        "label": slug,
+        "resume_pointer": resume_pointer,
+        "tokens": tokens,
+        "truncated": truncated,
+        "workflow_id": node.get("workflow_id", task_id or agent_id),
+    })
+
+
+@mcp.tool(
+    description=(
+        "Context RECALL — retrieve context previously offloaded to (or recorded "
+        "in) the context graph. With `ref`: returns that exact chunk verbatim. "
+        "Without `ref`: returns the Context Graph Manager's working set for the "
+        "task — the relevance-ranked, staleness-filtered slice of steps that fits "
+        "in `budget` tokens (optionally steered by `focus`), plus the resume "
+        "anchor and any long-term memories. Use when resuming a long-running "
+        "task, recovering after a restart, or when you need offloaded context back."
+    )
+)
+def context_recall(
+    agent_id: Annotated[str, Field(
+        description="Calling agent's id (as registered with the radar).")] = "",
+    task_id: Annotated[str, Field(
+        description="The task/run to recall context for (same id used when offloading).")] = "",
+    ref: Annotated[str, Field(
+        description="Optional node ref (row_hash, or a unique prefix of it) from "
+                    "context_offload — returns that exact chunk.")] = "",
+    focus: Annotated[str, Field(
+        description="Optional focus text — steers relevance ranking and long-term recall.")] = "",
+    budget: Annotated[int, Field(
+        description="Optional context-window token budget for the working set; "
+                    "0 = server default (AWCP_CTX_TOKEN_BUDGET).")] = 0,
+) -> str:
+    workflow_id = task_id or agent_id
+    if not workflow_id:
+        return json.dumps({"status": "error",
+                           "output": "task_id or agent_id is required to recall context"})
+
+    def _mark_recall(returned: int, used_tokens: int) -> None:
+        # The retrieval itself is part of the trail (best-effort, never blocking).
+        _cg_record(
+            RADAR_URL, agent_id or workflow_id,
+            step="recall",
+            task_id=task_id,
+            workflow_id=task_id,
+            actor=agent_id or workflow_id,
+            resume_pointer=f"{task_id or 'task'}:after:recall",
+            payload={"ref": ref, "focus": focus, "returned": returned,
+                     "recalled_tokens": used_tokens},
+            timeout=GATE_TIMEOUT,
+        )
+
+    # Targeted retrieval: one exact chunk by its row_hash ref (prefix allowed).
+    if ref:
+        nodes = _cg_nodes(RADAR_URL, workflow_id)
+        match = next((n for n in nodes
+                      if str(n.get("row_hash", "")).startswith(ref)), None)
+        if not match:
+            return json.dumps({"status": "not_found",
+                               "output": f"no node with ref '{ref}' in workflow '{workflow_id}'"})
+        payload = match.get("payload") or {}
+        content = payload.get("content", "")
+        _mark_recall(1, _estimate_tokens(str(content)))
+        return json.dumps({
+            "status": "ok",
+            "ref": match.get("row_hash", ""),
+            "step": match.get("step", ""),
+            "label": payload.get("label", ""),
+            "content": content if content else _node_summary(payload),
+            "resume_pointer": match.get("resume_pointer", ""),
+            "ts": match.get("ts"),
+        })
+
+    # Working-set retrieval: the budget-fitted recovery slice for this run.
+    ws = _cg_working_set(RADAR_URL, workflow_id, budget=budget, focus=focus)
+    if ws is None:
+        return json.dumps({"status": "error",
+                           "output": "context graph unreachable — nothing recalled"})
+    items = []
+    for s in ws.get("selected") or []:
+        n = (s or {}).get("node") or {}
+        p = n.get("payload") or {}
+        items.append({
+            "step": n.get("step", ""),
+            "ts": n.get("ts"),
+            "ref": n.get("row_hash", ""),
+            "tokens": s.get("tokens", 0),
+            "relevance": s.get("relevance", 0),
+            # offloaded chunks come back verbatim; ordinary steps as a summary
+            "content": p.get("content") or _node_summary(p),
+        })
+    memories = [{"text": (m.get("node") or {}).get("payload", {}).get("text", ""),
+                 "score": m.get("relevance", 0)}
+                for m in (ws.get("memory") or [])]
+    _mark_recall(len(items), int(ws.get("used_tokens") or 0))
+    logger.info("mcp.context.recall agent_id=%s wf=%s items=%d used=%s/%s",
+                agent_id, workflow_id, len(items),
+                ws.get("used_tokens"), ws.get("budget_tokens"))
+    return json.dumps({
+        "status": "ok",
+        "workflow_id": workflow_id,
+        "resume_pointer": ws.get("resume_pointer", ""),
+        "budget_tokens": ws.get("budget_tokens", 0),
+        "used_tokens": ws.get("used_tokens", 0),
+        "dropped": ws.get("dropped", 0),
+        "excluded_stale": ws.get("excluded_stale", 0),
+        "items": items,
+        "memory": memories,
+        "note": ws.get("note", ""),
+    })
 
 
 @mcp.tool(

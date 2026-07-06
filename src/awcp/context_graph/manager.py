@@ -53,16 +53,21 @@ W_FOCUS = float(os.getenv("AWCP_CTX_W_FOCUS", "0.30"))
 
 # How much each kind of step is worth as carried context (prefix before the ':').
 # Unknown kinds get a neutral mid weight, so a new step type is never zero-scored.
+# "offload" is deliberately top-weighted: an agent explicitly parked that content
+# to retrieve later, so it IS the working context. "recall" markers are the
+# opposite — bookkeeping about a retrieval, near-worthless as carried context.
 _STEP_WEIGHTS = {
-    "generate": 1.0, "synthesize": 1.0, "answer": 1.0,
+    "generate": 1.0, "synthesize": 1.0, "answer": 1.0, "offload": 1.0,
     "route": 0.8, "llm": 0.8, "plan": 0.8,
     "tool": 0.9, "web_search": 0.9,
-    "checkpoint": 0.5,
+    "checkpoint": 0.5, "recall": 0.2,
 }
 # State-producing steps: a later one of the SAME kind in the SAME task supersedes
 # the earlier snapshot. Tool calls are NOT here — they legitimately repeat (two
 # searches with different queries are both valid), so they're never "superseded".
-_STATE_STEPS = {"route", "generate", "synthesize", "answer", "plan"}
+# Offloads supersede PER LABEL (see _superseded): re-offloading "findings"
+# replaces the older "findings" snapshot but never touches other labels.
+_STATE_STEPS = {"route", "generate", "synthesize", "answer", "plan", "offload"}
 
 
 # ── token counting (self-contained, fail-open; tiktoken if present) ───────────
@@ -145,13 +150,18 @@ def _stale_reasons(n: ContextNode, idx: int, nodes: list[ContextNode],
 
 def _superseded(nodes: list[ContextNode]) -> set[int]:
     """Indices of state-producing snapshots replaced by a later one in the same
-    task. Keyed by (task_id, step-kind); the last occurrence wins, earlier ones
-    are superseded."""
+    task. Keyed by (task_id, step-kind) — except offloads, which are keyed by the
+    FULL step (kind + label) so only a re-offload of the same label supersedes.
+    The last occurrence wins, earlier ones are superseded."""
     last_for: dict[tuple[str, str], int] = {}
+
+    def _key(n: ContextNode, kind: str) -> tuple[str, str]:
+        return (n.task_id, n.step) if kind == "offload" else (n.task_id, kind)
+
     for i, n in enumerate(nodes):
         kind = _step_kind(n.step)
         if kind in _STATE_STEPS:
-            last_for[(n.task_id, kind)] = i
+            last_for[_key(n, kind)] = i
     keep = set(last_for.values())
     return {i for i, n in enumerate(nodes)
             if _step_kind(n.step) in _STATE_STEPS and i not in keep}

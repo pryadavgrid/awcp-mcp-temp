@@ -71,6 +71,28 @@ async def set_threshold(body: ThresholdBody) -> dict:
     return await _opa("POST", "/threshold", {"threshold": body.threshold})
 
 
+class EvaluateBody(BaseModel):
+    tool_name: str
+    tool_input: dict | None = None
+    question: str = ""
+    agent_id: str = ""
+    task_id: str = ""
+
+
+@router.post("/opa/evaluate")
+async def evaluate_tool(body: EvaluateBody) -> dict:
+    """Pre-execution tool check for a governed agent: forward one tool call to the
+    OPA agent, which reasons its risk tier and returns whether it crosses the
+    operator's block threshold. Body: {tool_name, agent_id, task_id}. Response:
+    {risk_tier, decision ("allow"|"block"), engine}. Agents call this BEFORE running a
+    tool so a tier at/above the threshold can pause for operator approval on the AWCP
+    UI. Returns an inert allow when no OPA agent is wired (so agents never hard-break)."""
+    if not OPA_AGENT_URL:
+        return {"tool_name": body.tool_name, "risk_tier": "", "decision": "allow",
+                "engine": "disabled", "enabled": False}
+    return await _opa("POST", "/evaluate", body.model_dump())
+
+
 @router.get("/opa/decisions/{task_id}")
 async def get_decisions(task_id: str) -> dict:
     """The structured JSON of every tool call (+ tier + decision) for one question."""
