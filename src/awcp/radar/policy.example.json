@@ -33,11 +33,20 @@
   "updated_by": "operator",
   "note": "risk-tier overrides: OPA baseline -> JSON risk -> slider",
 
+  "exclusion_list": [
+    "claude",
+    "codex",
+    "copilot",
+    "cursor",
+    "windsurf",
+    "aider"
+  ],
+
   "agents": {
     "agent-langgraph-*":   { "risk": "low",  "note": "override magazine tier -> recognised under the slider" },
     "agent-crewai-*":      { "risk": "low" },
     "agent-pydantic_ai-*": { "risk": "low" },
-    "*temporal*":          { "allow": false, "note": "explicit hard deny (infra)" }
+    "*temporal*":          { "allow": true, "note": "explicit hard deny (infra)" }
   },
 
   "tools": {

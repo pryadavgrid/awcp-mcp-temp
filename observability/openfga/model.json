@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    { "type": "user" },
+    {
+      "type": "system",
+      "relations": {
+        "super_admin": { "this": {} },
+        "platform_admin": { "this": {} },
+        "operator": { "this": {} },
+        "auditor": { "this": {} },
+        "viewer": { "this": {} },
+        "agent": { "this": {} },
+        "can_manage_system": { "computedUserset": { "object": "", "relation": "super_admin" } },
+        "can_admin": {
+          "union": { "child": [
+            { "computedUserset": { "object": "", "relation": "platform_admin" } },
+            { "computedUserset": { "object": "", "relation": "super_admin" } }
+          ] }
+        },
+        "can_operate": {
+          "union": { "child": [
+            { "computedUserset": { "object": "", "relation": "operator" } },
+            { "computedUserset": { "object": "", "relation": "platform_admin" } },
+            { "computedUserset": { "object": "", "relation": "super_admin" } }
+          ] }
+        },
+        "can_read": {
+          "union": { "child": [
+            { "computedUserset": { "object": "", "relation": "viewer" } },
+            { "computedUserset": { "object": "", "relation": "auditor" } },
+            { "computedUserset": { "object": "", "relation": "operator" } },
+            { "computedUserset": { "object": "", "relation": "platform_admin" } },
+            { "computedUserset": { "object": "", "relation": "super_admin" } }
+          ] }
+        },
+        "can_audit": {
+          "union": { "child": [
+            { "computedUserset": { "object": "", "relation": "auditor" } },
+            { "computedUserset": { "object": "", "relation": "platform_admin" } },
+            { "computedUserset": { "object": "", "relation": "super_admin" } }
+          ] }
+        },
+        "can_act_as_agent": {
+          "union": { "child": [
+            { "computedUserset": { "object": "", "relation": "agent" } },
+            { "computedUserset": { "object": "", "relation": "super_admin" } }
+          ] }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "super_admin": { "directly_related_user_types": [ { "type": "user" } ] },
+          "platform_admin": { "directly_related_user_types": [ { "type": "user" } ] },
+          "operator": { "directly_related_user_types": [ { "type": "user" } ] },
+          "auditor": { "directly_related_user_types": [ { "type": "user" } ] },
+          "viewer": { "directly_related_user_types": [ { "type": "user" } ] },
+          "agent": { "directly_related_user_types": [ { "type": "user" } ] }
+        }
+      }
+    }
+  ]
+}

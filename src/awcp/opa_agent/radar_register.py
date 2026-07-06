@@ -17,10 +17,20 @@ goes back to fully hidden).
 from __future__ import annotations
 
 import os
+import atexit
 import threading
 import time
 
 import httpx
+
+
+def _service_headers() -> dict:
+    """IAM service-identity header for radar calls (empty when IAM is off/unconfigured)."""
+    try:
+        from awcp.agent_auth import auth_headers
+        return auth_headers()
+    except Exception:  # noqa: BLE001 — auth is optional; never block registration
+        return {}
 
 
 class RadarPresence:
@@ -74,7 +84,7 @@ class RadarPresence:
     def _register(self) -> bool:
         try:
             r = httpx.post(f"{self.url}/agents/register", json=self._payload(),
-                           timeout=self.timeout)
+                           headers=_service_headers(), timeout=self.timeout)
             r.raise_for_status()
             return bool(r.json().get("id"))
         except Exception:                        # noqa: BLE001 — never crash the agent
@@ -85,7 +95,8 @@ class RadarPresence:
         Empty/failed ⇒ the radar forgot us (pruned/restarted) ⇒ caller re-registers."""
         try:
             r = httpx.post(f"{self.url}/agents/{self.agent_id}/signal",
-                           json={"ok": True, "reason": "heartbeat"}, timeout=self.timeout)
+                           json={"ok": True, "reason": "heartbeat"},
+                           headers=_service_headers(), timeout=self.timeout)
             r.raise_for_status()
             return bool(r.json())
         except Exception:                        # noqa: BLE001
@@ -100,8 +111,21 @@ class RadarPresence:
             if not self._signal_alive():
                 self._register()
 
+    def deregister(self, reason: str = "shutdown") -> None:
+        """Self-deregister from the radar and stop the presence loop, so the agent
+        disappears from the Agent Radar. Best-effort; runs on process exit."""
+        self.enabled = False  # stop the loop re-registering
+        if not self.agent_id:
+            return
+        try:
+            httpx.post(f"{self.url}/agents/{self.agent_id}/deregister",
+                       json={"reason": reason}, headers=_service_headers(), timeout=self.timeout)
+        except Exception:                        # noqa: BLE001 — leaving must never crash the agent
+            pass
+
     def start(self) -> None:
         if not self.enabled:
             return
+        atexit.register(self.deregister)
         threading.Thread(target=self._loop, name="opa-radar-presence",
                          daemon=True).start()

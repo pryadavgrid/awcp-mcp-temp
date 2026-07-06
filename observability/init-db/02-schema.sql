@@ -4,6 +4,7 @@ CREATE SCHEMA IF NOT EXISTS registry;
 CREATE SCHEMA IF NOT EXISTS governance;
 CREATE SCHEMA IF NOT EXISTS evidence;
 CREATE SCHEMA IF NOT EXISTS ops;
+CREATE SCHEMA IF NOT EXISTS iam;
 
 CREATE TABLE registry.agents (
     id                     text PRIMARY KEY,
@@ -343,7 +344,48 @@ CREATE TABLE governance.policy_decisions_2026_06 PARTITION OF governance.policy_
 CREATE TABLE governance.degradation_events_2026_06 PARTITION OF governance.degradation_events
     FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
 
+-- IAM auth/authz decision log (Keycloak + OpenFGA middleware — see IAM.md Phase 5).
+-- Append-only, like evidence.*: the gateway INSERTs one row per checked request.
+CREATE TABLE iam.audit (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts          timestamptz NOT NULL DEFAULT now(),
+    user_id     text,   -- Keycloak subject (sub), when known
+    username    text,   -- Keycloak preferred_username (or 'awcp-agent' for service)
+    action      text,   -- permission checked (can_read/can_operate/...) or event
+    resource    text,   -- "<METHOD> <path>"
+    plane       text,   -- human | service | public
+    result      text,   -- allow | deny | unauthenticated | login | logout | refresh_fail
+    ip_address  text
+);
+CREATE INDEX idx_iam_audit_ts ON iam.audit (ts DESC);
+CREATE INDEX idx_iam_audit_user ON iam.audit (username, ts DESC);
+
+-- Credential applications + email approval (login page "Apply for credentials").
+-- Approver address + SMTP creds live in env (never here); approval-link tokens are
+-- stored only as SHA-256 hashes; applicant PII is Fernet-encrypted when enc = true.
+CREATE TABLE iam.access_requests (
+    id                 text PRIMARY KEY,
+    ts                 timestamptz NOT NULL DEFAULT now(),
+    email              text,
+    full_name          text,
+    requested_role     text NOT NULL,
+    reason             text,
+    status             text NOT NULL DEFAULT 'pending',  -- pending | approved | denied
+    approve_token_hash text NOT NULL,
+    deny_token_hash    text NOT NULL,
+    enc                boolean NOT NULL DEFAULT false,
+    expires_at         timestamptz,
+    decided_at         timestamptz,
+    decided_via        text
+);
+CREATE INDEX idx_access_requests_status_ts ON iam.access_requests (status, ts DESC);
+
 GRANT USAGE ON SCHEMA registry, governance, evidence, ops TO awcp_app, awcp_ro;
+GRANT USAGE ON SCHEMA iam TO awcp_app, awcp_ro;
+GRANT SELECT, INSERT ON iam.audit TO awcp_app;
+GRANT SELECT ON iam.audit TO awcp_ro;
+GRANT SELECT, INSERT, UPDATE ON iam.access_requests TO awcp_app;
+GRANT SELECT ON iam.access_requests TO awcp_ro;
 
 GRANT SELECT, INSERT, UPDATE, DELETE
   ON ALL TABLES IN SCHEMA registry, governance, ops TO awcp_app;

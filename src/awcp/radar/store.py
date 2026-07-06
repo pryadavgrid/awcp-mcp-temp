@@ -337,11 +337,30 @@ class Registry:
             return existed
 
     def register(self, entry: AgentEntry) -> AgentEntry:
-        """Self-registration upsert."""
+        """Self-registration upsert.
+
+        Also SUPERSEDES any stale self entry that is the same agent under a
+        different id — e.g. a row from an obsolete id scheme that survived in
+        Postgres — so the same instance is never listed twice. A match is either
+        the same identity url (endpoint / card url), or, for a legacy row that
+        carries no endpoint, the same name + framework. Removed rows are pruned
+        from Postgres by the following _persist()/sync()."""
         with self._lock:
             existing = self._entries.get(entry.id)
             if existing:
                 entry.first_seen = existing.first_seen
+            u = _entry_url(entry)
+            for oid, other in list(self._entries.items()):
+                if oid == entry.id or other.source != "self":
+                    continue
+                ou = _entry_url(other)
+                same_url = bool(u and ou and ou == u)
+                same_ident = (ou is None and other.name == entry.name
+                              and (other.framework or None) == (entry.framework or None))
+                if same_url or same_ident:
+                    self._entries.pop(oid, None)
+                    log.info("radar.store dedup: superseded stale self entry %s with %s",
+                             oid, entry.id)
             self._entries[entry.id] = entry
             self._persist()
             return entry

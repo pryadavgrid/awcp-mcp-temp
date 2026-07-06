@@ -111,6 +111,119 @@ services:
       - awcp-obs
 
   # ══════════════════════════════════════════
+  # IAM — Keycloak (authentication) + OpenFGA (authorization). See IAM.md.
+  #
+  # Both reuse awcp-postgres with their own databases (`keycloak`, `openfga`),
+  # created idempotently by the one-shot iam-db-init container below — this works
+  # on EXISTING postgres volumes too (./init-db only runs on brand-new volumes).
+  #
+  #   Keycloak admin console → http://localhost:8083   (creds in ./.env — gitignored)
+  #     realm "AWCP" auto-imported from ./keycloak/AWCP-realm.json on first boot
+  #     (import is skipped if the realm already exists — safe to restart).
+  #   OpenFGA HTTP API      → http://localhost:8082   (/healthz, /stores)
+  #
+  # Nothing else in the stack depends on these two; stopping them affects only IAM.
+  # ══════════════════════════════════════════
+  iam-db-init:
+    image: postgres:16
+    container_name: awcp-iam-db-init
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-awcppassword}
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -e
+        until pg_isready -h postgres -U "${POSTGRES_USER:-awcp}" >/dev/null 2>&1; do sleep 1; done
+        for db in keycloak openfga; do
+          if ! psql -h postgres -U "${POSTGRES_USER:-awcp}" -d "${POSTGRES_DB:-awcp}" -tAc \
+              "SELECT 1 FROM pg_database WHERE datname='$$db'" | grep -q 1; then
+            psql -h postgres -U "${POSTGRES_USER:-awcp}" -d "${POSTGRES_DB:-awcp}" -c "CREATE DATABASE $$db"
+            echo "created database $$db"
+          else
+            echo "database $$db already exists"
+          fi
+        done
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - awcp-obs
+
+  keycloak:
+    # 26.0.x has an --import-realm regression ("Session not bound to a realm")
+    # when the import contains a serviceAccountsEnabled client (our awcp-agent);
+    # fixed in later 26.x — keep this at >= 26.3.
+    image: quay.io/keycloak/keycloak:26.3
+    container_name: awcp-keycloak
+    restart: unless-stopped
+    command: ["start-dev", "--import-realm"]
+    # Secrets (admin bootstrap creds, awcp-agent client secret, test-user passwords)
+    # come from the gitignored ./.env — NOT committed. Keycloak substitutes the
+    # ${...} placeholders in ./keycloak/AWCP-realm.json from these at import time.
+    # Copy .env.example → .env and fill in before first boot.
+    env_file:
+      - .env
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER:-awcp}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-awcppassword}
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "8083:8080" # Keycloak → http://localhost:8083
+    depends_on:
+      iam-db-init:
+        condition: service_completed_successfully
+    networks:
+      - awcp-obs
+    healthcheck:
+      # keycloak image ships no curl/wget; health lives on the 9000 management port
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'UP' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.4
+    container_name: awcp-openfga-migrate
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER:-awcp}:${POSTGRES_PASSWORD:-awcppassword}@postgres:5432/openfga?sslmode=disable
+    depends_on:
+      iam-db-init:
+        condition: service_completed_successfully
+    networks:
+      - awcp-obs
+
+  openfga:
+    image: openfga/openfga:v1.8.4
+    container_name: awcp-openfga
+    restart: unless-stopped
+    command: ["run"]
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://${POSTGRES_USER:-awcp}:${POSTGRES_PASSWORD:-awcppassword}@postgres:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+    ports:
+      - "8082:8080" # OpenFGA HTTP API → http://localhost:8082
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    networks:
+      - awcp-obs
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=127.0.0.1:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  # ══════════════════════════════════════════
   # OTel Collector — receives from Python apps
   # ══════════════════════════════════════════
   otel-collector:

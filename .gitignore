@@ -85,3 +85,6 @@ agent_radar_registry.json
 
 # --- Sandboxed agent workspace (volume-mounted into OpenSandbox) ---
 workspace/
+
+# keep IAM secrets template committed (real .env stays ignored)
+!.env.example

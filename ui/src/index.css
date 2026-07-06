@@ -214,3 +214,39 @@ html .hover\:bg-brand-700:hover {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ── Custom cursor ─────────────────────────────────────────────────────────
+   A brand-green arrow with a white outline: the dark-green fill reads on light
+   backgrounds, the white outline reads on dark ones — so one cursor works in
+   both themes. `, auto` is the fallback for engines that don't do SVG cursors.
+   The same arrow is reused on clickable elements so the pointer/finger never
+   reverts to the OS hand — one consistent custom cursor everywhere. Editable
+   fields keep a text caret so typing/selection still feels right. */
+html {
+  --awcp-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='26' height='26' viewBox='0 0 24 24'%3E%3Cpath fill='%232f6b45' stroke='%23ffffff' stroke-width='1.5' stroke-linejoin='round' d='M4 2 L4 18.5 L8.3 14.4 L11.1 20.6 L13.6 19.4 L10.8 13.4 L16.7 13.4 Z'/%3E%3C/svg%3E")
+    4 2, auto;
+  /* Pointing-hand variant for clickables — same green fill + white outline as
+     the arrow, so the two read as one cursor family. Hotspot at the fingertip. */
+  --awcp-cursor-hand: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24'%3E%3Cpath fill='%232f6b45' stroke='%23ffffff' stroke-width='1.4' stroke-linejoin='round' stroke-linecap='round' d='M8 2c-.83 0-1.5.67-1.5 1.5v8.2L5.1 10.5c-.6-.6-1.55-.6-2.15-.02-.55.53-.58 1.4-.08 1.98l3.2 3.9c.76.93 1.9 1.47 3.1 1.47H13c2.2 0 4-1.8 4-4v-3.6c0-.8-.65-1.45-1.45-1.45-.36 0-.7.13-.95.36-.06-.74-.68-1.32-1.44-1.32-.4 0-.76.16-1.02.43-.1-.68-.7-1.2-1.4-1.2-.28 0-.54.08-.76.22V3.5C9.5 2.67 8.83 2 8 2Z'/%3E%3C/svg%3E")
+    8 2, pointer;
+  cursor: var(--awcp-cursor);
+}
+a,
+button,
+[role='button'],
+[type='button'],
+[type='submit'],
+[type='reset'],
+[type='checkbox'],
+[type='radio'],
+label[for],
+select,
+summary,
+.cursor-pointer {
+  cursor: var(--awcp-cursor-hand);
+}
+input:not([type='button']):not([type='submit']):not([type='checkbox']):not([type='radio']):not([type='range']),
+textarea,
+[contenteditable='true'] {
+  cursor: text;
+}

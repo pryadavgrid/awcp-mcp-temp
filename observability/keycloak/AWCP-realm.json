@@ -1,0 +1,95 @@
+{
+  "realm": "AWCP",
+  "enabled": true,
+  "displayName": "Agent Workforce Control Plane",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "sslRequired": "external",
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 28800,
+  "ssoSessionMaxLifespan": 86400,
+  "bruteForceProtected": false,
+  "roles": {
+    "realm": [
+      { "name": "super-admin", "description": "Full system access incl. user/role management, PUT /policy, DELETE /agents/{id}" },
+      { "name": "platform-admin", "description": "PUT /policy, POST /opa/threshold, DELETE /agents/{id}, plus all operator actions" },
+      { "name": "operator", "description": "Approvals (decide/approve/deny), agent control (signal/autonomy/risk), run tasks (/user/*)" },
+      { "name": "auditor", "description": "Read-only incl. GET /events/audit, /approvals, /policy — no writes" },
+      { "name": "viewer", "description": "Read subset: GET /agents, /user/workflows, /events, dashboards" },
+      { "name": "agent", "description": "Service plane: /agents/register, /agents/{id}/gate, /tasks/execution/* (bundle agents, not humans)" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "awcp-ui",
+      "name": "AWCP Dashboard (Vite SPA)",
+      "description": "Public PKCE client for the React dashboard on :5173",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "rootUrl": "http://localhost:5173",
+      "baseUrl": "http://localhost:5173",
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173", "http://localhost:8000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*"
+      }
+    },
+    {
+      "clientId": "awcp-api",
+      "name": "AWCP Gateway API",
+      "description": "Bearer-only resource server — the FastAPI gateway on :8000 validates tokens against this audience",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "awcp-agent",
+      "name": "AWCP Bundle Agents (service account)",
+      "description": "Client-credentials service identity for awcp_kit agents (register/gate/execution routes). DEV secret — rotate outside local dev.",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "${AWCP_AGENT_CLIENT_SECRET}"
+    }
+  ],
+  "users": [
+    {
+      "username": "operator-test",
+      "enabled": true,
+      "email": "operator-test@example.com",
+      "emailVerified": true,
+      "firstName": "Operator",
+      "lastName": "Test",
+      "credentials": [
+        { "type": "password", "value": "${OPERATOR_TEST_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["operator"]
+    },
+    {
+      "username": "viewer-test",
+      "enabled": true,
+      "email": "viewer-test@example.com",
+      "emailVerified": true,
+      "firstName": "Viewer",
+      "lastName": "Test",
+      "credentials": [
+        { "type": "password", "value": "${VIEWER_TEST_PASSWORD}", "temporary": false }
+      ],
+      "realmRoles": ["viewer"]
+    }
+  ]
+}

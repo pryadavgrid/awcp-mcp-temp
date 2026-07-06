@@ -2,11 +2,19 @@
 // endpoints at runtime — nothing is hardcoded. The gateway already enables CORS
 // (allow_origins=*), so the dev server on :5173 can call it directly.
 import { API_BASE, TEMPORAL_BASE } from './config'
+import { getToken } from './lib/auth'
 
 async function call(method, path, body) {
+  const headers = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  // Attach the Keycloak bearer token whenever there's a session. No session (not
+  // logged in, or Keycloak off) → getToken() returns "" → no header, request goes
+  // out exactly as before.
+  const token = await getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: Object.keys(headers).length ? headers : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })
   const text = await res.text()
@@ -30,6 +38,9 @@ export const getHealth = () => call('GET', '/healthz')
 // process. health.sandbox (from getHealth) already carries the live status.
 export const getSandboxEvents = (limit = 50) => call('GET', `/sandbox/events?limit=${limit}`)
 export const getAgents = () => call('GET', '/agents')
+// A short, live-generated summary of what an agent is + is doing (recomputed
+// server-side on each call — see radar _agent_brief).
+export const getAgentBrief = (id) => call('GET', `/agents/${encodeURIComponent(id)}/brief`)
 // The bundle agents + their live tool catalogs (folder id, registry agent_id, tools).
 export const getUserAgents = () => call('GET', '/user/agents')
 export const getEvents = (limit = 50) => call('GET', `/events?limit=${limit}`)
@@ -117,6 +128,11 @@ export const decideApproval = (id, decision, decidedBy = 'awcp-ui') =>
     decision,
     decided_by: decidedBy,
   })
+
+// ── IAM: self-service signup (login page "Create account") ────────────────────
+// Public: creates a Keycloak account with the given username + password (default
+// role) so the user can sign in immediately. Returns { ok, username, role }.
+export const signup = (username, password) => call('POST', '/iam/signup', { username, password })
 
 // Build a Temporal Web UI deep link for any workflow id.
 export const temporalUrl = (wfId) =>

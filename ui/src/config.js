@@ -38,3 +38,11 @@ export function neo4jBrowserUrl(workflow) {
 
 // How often (ms) the views re-poll the gateway for live data.
 export const POLL_MS = Number(import.meta.env.VITE_POLL_MS || 4000)
+
+// ── IAM / Keycloak ───────────────────────────────────────────────────────────
+// The login button is wired to Keycloak (see lib/auth.js). These point the SPA at
+// the realm; defaults match the local IAM stack. A session's token is attached to
+// every API call automatically; with no session no header is sent.
+export const KEYCLOAK_URL = strip(import.meta.env.VITE_KEYCLOAK_URL || 'http://localhost:8083')
+export const KEYCLOAK_REALM = import.meta.env.VITE_KEYCLOAK_REALM || 'AWCP'
+export const KEYCLOAK_CLIENT = import.meta.env.VITE_KEYCLOAK_CLIENT || 'awcp-ui'
