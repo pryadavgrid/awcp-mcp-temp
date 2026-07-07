@@ -1463,6 +1463,38 @@ async def refresh_card(agent_id: str) -> dict:
     return {"ok": raw is not None, "note": note, "skills": skills}
 
 
+@router.post("/agents/{agent_id}/relink")
+async def relink_agent(agent_id: str) -> dict:
+    """Re-run card fetch + MCP tool enumeration for an already-admitted agent,
+    WITHOUT a full re-onboarding — so a tool the agent registered at runtime
+    (after link_mcp ran during onboarding) lands in entry.capabilities and
+    becomes callable through the governed executor's remote dispatch. Admission
+    is NOT re-decided here: status stays owned by the onboarding pipeline and
+    the observed-hook promotion paths. Both steps are best-effort, and
+    capabilities are only overwritten when the MCP link actually succeeds — a
+    transient link failure must not wipe a previously-enumerated tool list."""
+    e = _require(agent_id)
+    raw, skills, card_note = await onboarding.fetch_card(e)
+    if raw is not None:
+        REGISTRY.patch(agent_id, card=raw, skills=skills,
+                       card_url=(e.endpoint or "").rstrip("/") + "/.well-known/agent.json",
+                       card_fetched_at=time.time())
+        e = REGISTRY.get(agent_id) or e
+    caps, link_note = await onboarding.link_mcp(e)
+    linked = bool(link_note and link_note.startswith("linked via"))
+    if linked:
+        REGISTRY.patch(agent_id, capabilities=caps)
+    _record_event(
+        "relinked", agent_id,
+        f"card: {card_note or 'unchanged'}; link: {link_note or 'no endpoint'}",
+        capabilities=len(caps) if linked else len(e.capabilities or []),
+    )
+    updated = REGISTRY.get(agent_id)
+    return {"ok": linked, "capabilities": (updated.capabilities if updated else caps),
+            "skills": (updated.skills if updated else skills),
+            "card_note": card_note, "link_note": link_note}
+
+
 def _assert_safe_agent_urls(req: RegisterRequest) -> None:
     """SSRF guard at the registration boundary (hardening gap #2). An agent's
     declared endpoint (SSE link target) and control_endpoint (remote hard-stop

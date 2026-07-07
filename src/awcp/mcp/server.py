@@ -25,10 +25,12 @@ from awcp.runtime.tool_runtime import (
     TOOL_REGISTRY,
     discover_tools,
     execute_tool as run_tool,
+    get_remote_tool_risk,
     get_tool_risk,
     get_tool_scope,
     is_write_risk,
 )
+from awcp.radar.policy import more_restrictive
 from awcp.runtime.ollama_client import ask_ollama
 from awcp.runtime.config import SEARCH_MODEL
 from awcp.runtime.sandbox import (
@@ -108,6 +110,18 @@ GATE_FAIL_OPEN = os.getenv("AWCP_GATE_FAIL_OPEN", "true").lower() == "true"
 # agents their scopes, to turn on strict per-scope authorization.
 GATE_SEND_SCOPE = os.getenv("AWCP_GATE_SEND_SCOPE", "false").lower() == "true"
 
+# Remote (agent-hosted) tools — governed dispatch to a linked agent's own MCP
+# server. A namespaced "<agent-id>/<tool>" name routes to the owning agent's SSE
+# endpoint; the tool must have been enumerated into entry.capabilities by
+# link_mcp at onboarding (or via POST /agents/{id}/relink after a runtime tool
+# registration). Off by default until the SDK path is exercised end-to-end.
+REMOTE_TOOLS_ENABLED = os.getenv("AWCP_REMOTE_TOOLS", "false").lower() == "true"
+REMOTE_TOOL_TIMEOUT = float(os.getenv("AWCP_REMOTE_TOOL_TIMEOUT", "30"))
+# Cap on a remote tool's returned text — it is agent-supplied data, so bound it.
+REMOTE_TOOL_MAX_OUTPUT_CHARS = int(
+    os.getenv("AWCP_REMOTE_TOOL_MAX_OUTPUT_CHARS", "100000")
+)
+
 # Meter every governed tool call's REAL token footprint (its input + output) into
 # Laminar via the gateway, so each tool call shows in the Token Monitor / Laminar
 # with meaningful numbers — not only the LLM calls. The MCP server is the ONE place
@@ -135,19 +149,26 @@ SANDBOX_EXEC_TOOLS = {
 
 
 def _emit_exec_event(agent_id: str, task_id: str, tool_name: str, eff_risk: str,
-                     gate: dict, outcome: str, output: Any = "") -> None:
-    """Report a sandbox tool call to the radar as a `tool_called` execution event
-    so it appears as an activity in the task's AgentExecutionWorkflow (Temporal).
+                     gate: dict, outcome: str, output: Any = "",
+                     origin: str = "local", owner: str = "") -> None:
+    """Report a sandbox or REMOTE tool call to the radar as a `tool_called`
+    execution event so it appears as an activity in the task's
+    AgentExecutionWorkflow (Temporal).
 
-    No-op unless emission is enabled, the tool is a sandbox tool, and both an
-    agent_id and task_id are present (without a task_id there is no workflow to
-    attach the activity to — the radar replies "no_active_workflow"). The radar
-    only signals an already-running task workflow, so this can add a step but
-    never starts a stray workflow. Best-effort: a reporting hiccup never affects
-    the tool result."""
+    No-op unless emission is enabled, the tool is a sandbox tool or a remote
+    dispatch (both run ONLY inside this server, so this is the one place the call
+    can be reported), and both an agent_id and task_id are present (without a
+    task_id there is no workflow to attach the activity to — the radar replies
+    "no_active_workflow"). The radar only signals an already-running task
+    workflow, so this can add a step but never starts a stray workflow.
+    Best-effort: a reporting hiccup never affects the tool result."""
     if not (EMIT_SANDBOX_EXEC_EVENTS and agent_id and task_id
-            and tool_name in SANDBOX_EXEC_TOOLS):
+            and (tool_name in SANDBOX_EXEC_TOOLS or origin == "remote")):
         return
+    extra = {"sandbox": tool_name in SANDBOX_EXEC_TOOLS, "outcome": outcome,
+             "origin": origin}
+    if owner:
+        extra["owner"] = owner
     try:
         httpx.post(
             f"{RADAR_URL}/tasks/execution/{task_id}/event",
@@ -157,7 +178,7 @@ def _emit_exec_event(agent_id: str, task_id: str, tool_name: str, eff_risk: str,
                 "risk": eff_risk,
                 "gate": "blocked" if outcome == "blocked" else gate.get("decision", "allow"),
                 "result_len": len(str(output)) if output else 0,
-                "extra": {"sandbox": True, "outcome": outcome},
+                "extra": extra,
             },
             timeout=GATE_TIMEOUT,
         )
@@ -184,20 +205,27 @@ def _meter_tool_tokens(agent_id: str, task_id: str, tool_name: str,
 
 def _record_checkpoint(agent_id: str, task_id: str, tool_name: str,
                        tool_input: dict, gate: dict, eff_risk: str,
-                       outcome: str, error: str = "") -> None:
+                       outcome: str, error: str = "",
+                       origin: str = "local", owner: str = "") -> None:
     """Record this tool call as a node in the context graph (the governed-step
     trail). `outcome` is "succeeded" (the tool ran), "blocked" (the gate denied it
     before it ran), or "error" (the tool ran but raised) — all are part of the
-    trail. Best-effort HTTP to the radar; never breaks a tool call. The
-    resume_pointer marks where the run continues from; the context is the tool
-    input (so equal inputs get an equal context_hash)."""
+    trail. `origin` marks provenance: "local" output comes from audited in-repo
+    code, "remote" output is agent-supplied data produced on the owning agent's
+    own MCP server (`owner`) — the evidence trail must distinguish the two.
+    Best-effort HTTP to the radar; never breaks a tool call. The resume_pointer
+    marks where the run continues from; the context is the tool input (so equal
+    inputs get an equal context_hash)."""
     if not agent_id:
         return
     marker = {"blocked": "blocked-at", "error": "errored-at"}.get(outcome, "after")
     payload = {"tool": tool_name, "risk": eff_risk, "outcome": outcome,
                "decision": gate.get("decision", "allow"),
                "mode": gate.get("mode", ""),
-               "reason": error or gate.get("reason", "")}
+               "reason": error or gate.get("reason", ""),
+               "origin": origin}
+    if owner:
+        payload["owner"] = owner
     if error:
         payload["error"] = error[:500]
     _cg_record(
@@ -263,6 +291,111 @@ def _govern_span(name: str, trace_context: dict | None):
             yield None
 
     return _cm()
+
+
+# ======================================================================
+# Remote tools — dispatch to a linked agent's own MCP server.
+#
+# A namespaced tool name ("<agent-id>/<tool>") routes through the SAME governed
+# executor below (gate -> run -> record), but the run happens on the owning
+# agent's MCP SSE endpoint instead of the local TOOL_REGISTRY. Admission is
+# checked against the live registry at every call: the owner must be alive and
+# ACTIVE, and must actually advertise the tool (entry.capabilities, enumerated
+# by onboarding's link_mcp / the relink endpoint). Nothing here relaxes
+# governance — a remote tool's risk defaults to write-gated (see
+# get_remote_tool_risk) and its output is treated as agent-supplied data.
+# ======================================================================
+
+
+def _split_remote_tool(tool_name: str) -> "tuple[str, str] | None":
+    """("<agent-id>", "<tool>") for a namespaced remote tool name, else None."""
+    owner, sep, tool = (tool_name or "").partition("/")
+    return (owner, tool) if (sep and owner and tool) else None
+
+
+def _resolve_remote_owner(owner_id: str, tool: str) -> "tuple[dict | None, str]":
+    """Fetch the OWNING agent's live registry entry and admission-check it for a
+    remote tool call. Reading live status at call time is what couples a remote
+    tool's availability to its owner's lifecycle: the moment the owner dies, is
+    quarantined, or drops the tool, the call is refused. Returns (entry, "") on
+    success, else (None, reason)."""
+    try:
+        resp = httpx.get(f"{RADAR_URL}/agents/{owner_id}", timeout=GATE_TIMEOUT)
+    except Exception as exc:  # noqa: BLE001 — resolution failure = call refused
+        return None, f"radar unreachable resolving owner '{owner_id}': {type(exc).__name__}"
+    if resp.status_code == 404:
+        return None, f"owner agent '{owner_id}' is not registered"
+    if resp.status_code != 200:
+        return None, f"radar returned HTTP {resp.status_code} for owner '{owner_id}'"
+    entry = resp.json()
+    if not entry.get("alive", False):
+        return None, f"owner agent '{owner_id}' is not alive"
+    if entry.get("status") != "active":
+        return None, (f"owner agent '{owner_id}' is not active "
+                      f"(status={entry.get('status')!r}) — its tools are not callable")
+    if tool not in (entry.get("capabilities") or []):
+        return None, (f"tool '{tool}' is not among owner '{owner_id}' capabilities — "
+                      f"if it was registered after onboarding, POST "
+                      f"/agents/{owner_id}/relink first")
+    if not (entry.get("endpoint") or "").startswith(("http://", "https://")):
+        return None, f"owner agent '{owner_id}' has no http(s) MCP endpoint"
+    return entry, ""
+
+
+def _remote_skill_meta(entry: dict, tool: str) -> dict:
+    """The owner card's skill record for this tool, else {}. ADVISORY metadata
+    only — its declared risk may tighten the effective tier, never relax it
+    (get_remote_tool_risk), matching the card.py governance boundary."""
+    for s in ((entry.get("card") or {}).get("skills") or []):
+        if isinstance(s, dict) and s.get("id") == tool:
+            return s
+    return {}
+
+
+def _invoke_remote_mcp(endpoint: str, tool: str, tool_input: dict) -> str:
+    """Run one tool on the owning agent's MCP SSE server (ephemeral session — the
+    same client shape onboarding.link_mcp uses). The SSRF guard is re-asserted at
+    call time because DNS/endpoint can re-point between link and call; output is
+    size-capped because it is agent-supplied data. Raises on any failure — the
+    governed executor wraps it in the standard error envelope."""
+    url = endpoint if "/sse" in endpoint else endpoint.rstrip("/") + "/sse"
+    from awcp.radar.netguard import assert_safe_url
+    assert_safe_url(url)
+
+    import anyio
+    from mcp import ClientSession
+    from mcp.client.sse import sse_client
+
+    async def _call() -> str:
+        with anyio.fail_after(REMOTE_TOOL_TIMEOUT):
+            async with sse_client(url, headers={"ngrok-skip-browser-warning": "true"}) as (r, w):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool, tool_input)
+                    text = "\n".join(
+                        getattr(c, "text", "") for c in (result.content or [])
+                        if getattr(c, "type", "") == "text"
+                    )
+                    if getattr(result, "isError", False):
+                        raise RuntimeError(f"remote tool reported error: {text[:500]}")
+                    return text[:REMOTE_TOOL_MAX_OUTPUT_CHARS]
+
+    # This (sync) executor runs on FastMCP's worker thread, so there is no loop
+    # running here — anyio.run starts a fresh one for the client session.
+    try:
+        return anyio.run(_call)
+    except BaseException as exc:
+        # The SSE client + session run in anyio task groups, which wrap the real
+        # failure (remote isError, timeout, connect refused) in an
+        # ExceptionGroup — unwrap to the leaf so the error envelope carries the
+        # remote tool's actual message, not "unhandled errors in a TaskGroup".
+        leaf = exc
+        while True:
+            subs = getattr(leaf, "exceptions", None)
+            if not subs:
+                break
+            leaf = subs[0]
+        raise leaf from None
 
 
 # ======================================================================
@@ -466,10 +599,40 @@ def execute_tool(
     trace_context: Annotated[dict | None, Field(
         description="W3C trace context (traceparent) so the run links into the caller's trace.")] = None,
 ) -> str:
+    # A namespaced name is a REMOTE tool; refuse it outright when the feature is
+    # off, instead of falling through to a confusing "Unknown tool" error.
+    if "/" in (tool_name or "") and not REMOTE_TOOLS_ENABLED:
+        return json.dumps({
+            "status": "error",
+            "output": (f"Remote tool '{tool_name}' refused: remote tools are "
+                       "disabled (set AWCP_REMOTE_TOOLS=true)."),
+            "decision": "deny",
+            "mode": "remote_disabled",
+            "reason": "remote tools are disabled (AWCP_REMOTE_TOOLS)",
+            "risk": "",
+        })
+
     # Resolve governance facts dynamically: explicit overrides win, else the
     # tool's own declaration / env map / default. Nothing per-tool is hardcoded.
-    eff_risk = (risk or get_tool_risk(tool_name)).lower()
-    eff_scope = scope or get_tool_scope(tool_name)
+    # For a REMOTE tool the owner is resolved FIRST — its card supplies the
+    # advisory risk/scope metadata, and an unresolvable/inactive owner blocks the
+    # call before anything runs. A caller-supplied risk override may only
+    # TIGHTEN a remote tool's tier (local tools keep the trusted override).
+    remote = _split_remote_tool(tool_name) if REMOTE_TOOLS_ENABLED else None
+    owner_entry: dict | None = None
+    owner_id, remote_tool, origin, deny_reason = "", "", "local", ""
+    if remote:
+        owner_id, remote_tool = remote
+        origin = "remote"
+        owner_entry, deny_reason = _resolve_remote_owner(owner_id, remote_tool)
+        skill_meta = _remote_skill_meta(owner_entry or {}, remote_tool)
+        eff_risk = get_remote_tool_risk(tool_name, skill_meta.get("risk"))
+        if risk:
+            eff_risk = more_restrictive(risk, eff_risk)
+        eff_scope = scope or skill_meta.get("scope") or tool_name
+    else:
+        eff_risk = (risk or get_tool_risk(tool_name)).lower()
+        eff_scope = scope or get_tool_scope(tool_name)
     is_write = is_write_risk(eff_risk)
 
     with _govern_span(f"awcp.mcp.govern.{tool_name}", trace_context) as span:
@@ -477,11 +640,35 @@ def execute_tool(
             for k, v in (("agent.id", agent_id), ("task.id", task_id),
                          ("tool.name", tool_name), ("tool.risk", eff_risk),
                          ("tool.scope", eff_scope), ("tool.is_write", is_write),
-                         ("tool.approved", approved)):
+                         ("tool.approved", approved), ("tool.origin", origin),
+                         ("tool.owner", owner_id)):
                 try:
                     span.set_attribute(k, v if isinstance(v, bool) else str(v))
                 except Exception:  # noqa: BLE001
                     pass
+
+        # 0) Remote-owner admission — refused BEFORE the gate even runs when the
+        #    owning agent is unresolvable, dead, quarantined, or doesn't
+        #    advertise the tool. A refusal is part of the trail like any denial.
+        if remote and owner_entry is None:
+            gate = {"decision": "deny", "mode": "remote_unresolved",
+                    "reason": deny_reason}
+            logger.warning(
+                "mcp.execute.remote.refused agent_id=%s tool=%s owner=%s reason=%s",
+                agent_id, tool_name, owner_id, deny_reason,
+            )
+            _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
+                               eff_risk, "blocked", origin=origin, owner=owner_id)
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "blocked",
+                             origin=origin, owner=owner_id)
+            return json.dumps({
+                "status": "blocked",
+                "output": f"BLOCKED: remote tool '{tool_name}' refused — {deny_reason}",
+                "decision": "deny",
+                "mode": "remote_unresolved",
+                "reason": deny_reason,
+                "risk": eff_risk,
+            })
 
         # 1) Governance gate — consulted for EVERY tool, read or write. We still
         #    pass is_write, so the radar's BASE policy keeps its semantics (reads
@@ -511,9 +698,10 @@ def execute_tool(
             )
             # Record the blocked attempt as a node too — a denial is part of the trail.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
-                               eff_risk, "blocked")
+                               eff_risk, "blocked", origin=origin, owner=owner_id)
             # Surface a blocked sandbox call on Temporal as well (it's a real step).
-            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "blocked")
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "blocked",
+                             origin=origin, owner=owner_id)
             return json.dumps({
                 "status": "blocked",
                 "output": (f"BLOCKED: '{tool_name}' was denied by the AWCP "
@@ -524,16 +712,23 @@ def execute_tool(
                 "risk": eff_risk,
             })
 
-        # 2) Execute the registered tool (this is the ONLY place tools run).
+        # 2) Execute the tool (this is the ONLY place tools run) — locally from
+        #    TOOL_REGISTRY, or dispatched to the owning agent's MCP server for a
+        #    namespaced remote tool (the gate above has already allowed it).
         try:
-            result = run_tool(tool_name, tool_input or {})
+            if remote:
+                result = _invoke_remote_mcp((owner_entry or {})["endpoint"],
+                                            remote_tool, tool_input or {})
+            else:
+                result = run_tool(tool_name, tool_input or {})
             # Meter the call's real input+output tokens into Laminar (best-effort).
             _meter_tool_tokens(agent_id, task_id, tool_name, tool_input or {}, result)
             # Record the step in the context graph (governed-step trail, best-effort).
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
-                               eff_risk, "succeeded")
-            # Surface a sandbox tool run as a Temporal activity (run_command etc.).
-            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "succeeded", result)
+                               eff_risk, "succeeded", origin=origin, owner=owner_id)
+            # Surface a sandbox/remote tool run as a Temporal activity.
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "succeeded",
+                             result, origin=origin, owner=owner_id)
             logger.info(
                 "mcp.execute.ok agent_id=%s tool=%s risk=%s decision=%s",
                 agent_id, tool_name, eff_risk, decision,
@@ -555,9 +750,11 @@ def execute_tool(
             logger.warning("mcp.execute.error tool=%s error=%r", tool_name, e)
             # Record the failed step as an error node in the context graph.
             _record_checkpoint(agent_id, task_id, tool_name, tool_input or {}, gate,
-                               eff_risk, "error", error=str(e))
-            # Surface a failed sandbox call on Temporal as well.
-            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "error")
+                               eff_risk, "error", error=str(e),
+                               origin=origin, owner=owner_id)
+            # Surface a failed sandbox/remote call on Temporal as well.
+            _emit_exec_event(agent_id, task_id, tool_name, eff_risk, gate, "error",
+                             origin=origin, owner=owner_id)
             return json.dumps({
                 "status": "error",
                 "output": f"Error executing tool '{tool_name}': {str(e)}",

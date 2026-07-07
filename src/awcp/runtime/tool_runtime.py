@@ -90,6 +90,37 @@ def get_tool_scope(name: str) -> str:
     return (TOOL_META.get(name) or {}).get("scope") or name
 
 
+# Default risk for a REMOTE (agent-hosted, namespaced) tool that declares none.
+# Deliberately "medium" — i.e. write-gated — unlike the in-repo default above: a
+# remote tool is foreign code whose output is agent-supplied, so it must not
+# inherit the audited-tool default of "low", which bypasses the write gate.
+_DEFAULT_REMOTE_RISK = os.getenv("AWCP_DEFAULT_REMOTE_TOOL_RISK", "medium").lower()
+
+# Minimal tier ranking used only as the fallback when radar.policy is not
+# importable; keep in sync with policy.RISK_ORDER.
+_RISK_RANK_FALLBACK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def get_remote_tool_risk(name: str, declared: str | None = None) -> str:
+    """Effective risk for a remote tool (namespaced "<agent-id>/<tool>").
+    Precedence:
+      1. the AWCP_TOOL_RISK operator override map (name-keyed, wins outright),
+      2. the MORE RESTRICTIVE of the owner-declared tier (card skill metadata,
+         advisory) and the remote default — foreign code may tighten its own
+         tier, never relax it below AWCP_DEFAULT_REMOTE_TOOL_RISK."""
+    if name in _RISK_OVERRIDES:
+        return _RISK_OVERRIDES[name]
+    try:
+        from awcp.radar.policy import more_restrictive  # lazy: avoids an import cycle
+        return more_restrictive(declared, _DEFAULT_REMOTE_RISK)
+    except Exception:  # noqa: BLE001 — resolution must never break a call
+        d = (declared or "").strip().lower()
+        if (_RISK_RANK_FALLBACK.get(d, -1)
+                >= _RISK_RANK_FALLBACK.get(_DEFAULT_REMOTE_RISK, 1)):
+            return d
+        return _DEFAULT_REMOTE_RISK
+
+
 def is_write_risk(risk: str) -> bool:
     """True when a risk tier denotes a state-changing (gated) action."""
     return (risk or "").lower() in _WRITE_RISK_TIERS
