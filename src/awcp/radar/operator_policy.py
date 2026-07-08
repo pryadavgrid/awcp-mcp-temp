@@ -171,6 +171,25 @@ def validate_policy(doc: object) -> tuple[bool, str]:
         for key, rule in section.items():
             if err := _check_rule(grp, key, rule, tiers):
                 return False, err
+            # An AGENT rule may nest a "tools" map of per-tool overrides — each carries a
+            # "risk" (TOOL tier vocabulary) and/or "active" (bool) — so ONE agent can set
+            # its own tier / active flag for a specific tool.
+            if grp == "agents" and _is_rule(rule) and "tools" in rule:
+                nested = rule.get("tools")
+                if not isinstance(nested, dict):
+                    return False, f"agents['{key}'].tools must be an object of per-tool rules"
+                for tkey, trule in nested.items():
+                    where = f"agents['{key}'].tools"
+                    if not _is_rule(trule):
+                        return False, f"{where}['{tkey}'] must be an object"
+                    if "active" in trule and not (isinstance(trule["active"], bool) or _is_default(trule["active"])):
+                        return False, f"{where}['{tkey}'].active must be true/false (or \"default\")"
+                    r = trule.get("risk")
+                    if r not in (None, "") and not _is_default(r) and str(r).strip().lower() not in TOOL_RISK_TIERS:
+                        return False, (f"{where}['{tkey}'].risk '{r}' must be one of "
+                                       f"{sorted(TOOL_RISK_TIERS)} (or null / \"default\")")
+                    if "note" in trule and not isinstance(trule["note"], str):
+                        return False, f"{where}['{tkey}'].note must be a string"
 
     # "skills" section: match agents by a card-declared skill. Self-declared, so it
     # may only TIGHTEN — deny (allow:false) or raise risk — never whitelist.
@@ -374,7 +393,28 @@ def agent_risk_override(agent_id: str, name: str = "") -> str | None:
     return risk if risk in AGENT_RISK_TIERS else None
 
 
-def tool_decision(tool: str, slm_tier: str | None = None) -> dict | None:
+def _explicit_active(rule: dict) -> bool | None:
+    """The nested per-tool ``active`` flag as a bool, or None when absent / ``"default"``.
+    active:true → allow (block False); active:false → inactive/deny (block True)."""
+    a = rule.get("active")
+    return a if isinstance(a, bool) else None
+
+
+def agent_tool_override(agent_id: str, name: str, tool: str) -> dict | None:
+    """The per-tool override nested inside the CALLING agent's rule (``agents.<a>.tools.<t>``),
+    resolved by agent (id/name) then tool, exact before glob, or None. This lets ONE agent
+    carry its own risk tier / active flag for a specific tool — e.g. ``run_command`` is
+    ``medium`` + active for a trusted shell agent, ``severe`` + inactive for everyone else.
+    Absent map → None, so an agent with no nested tools behaves exactly as before."""
+    agent = _match(_doc().get("agents") or {}, agent_id or "", name or "")
+    nested = agent.get("tools") if isinstance(agent, dict) else None
+    if not isinstance(nested, dict):
+        return None
+    return _match(nested, tool or "")
+
+
+def tool_decision(tool: str, slm_tier: str | None = None,
+                  agent_id: str = "", name: str = "") -> dict | None:
     """Apply the operator policy to ONE tool call AFTER the OPA agent assigned
     ``slm_tier``. Returns the operator's adjustments, or None when inert/no rule:
 
@@ -383,27 +423,38 @@ def tool_decision(tool: str, slm_tier: str | None = None) -> dict | None:
          "source": "operator_policy",
          "note": <operator note>}
 
-    The OPA agent owns the baseline tier + the slider-threshold block (the DEFAULT
-    check); this only layers the operator's overrides on top. Semantics:
+    ASSESSMENT ORDER (most specific wins):
 
-      * an EXPLICIT per-tool ``allow`` is the ONLY override — true force-allows
-        (whitelist, overriding a threshold block), false force-blocks;
-      * ``risk`` RELABELS the tier the threshold compares against;
-      * with no explicit ``allow``, ``block`` is None → defer to the slider threshold.
+      1. NESTED per-agent-per-tool — ``agents.<a>.tools.<t>``: the calling agent's own
+         ``risk`` / ``active`` for THIS tool;
+      2. OVERALL tool — ``tools.<t>`` (+ ``defaults.tools``): the tool's ``risk`` / ``allow``;
+      3. OPA baseline — ``slm_tier`` when neither layer sets a tier.
+
+    ``active`` (nested) and ``allow`` (overall) are the same idea: true → force-allow,
+    false → force-block, absent / ``"default"`` → defer to the slider threshold. The nested
+    value overrides the overall one, so different agents get different tiers for the same tool.
     """
     if not enabled():
         return None
     try:
         explicit = _match(_doc().get("tools") or {}, tool or "") or {}
         default = _default("tools")
-        if not explicit and not default:
+        agent_ov = agent_tool_override(agent_id, name, tool) or {}
+        if not explicit and not default and not agent_ov:
             return None
-        risk = _explicit_risk(explicit.get("risk"), default.get("risk"))  # skips "default"
+        # risk precedence: nested agent-tool → overall tool → tools default → SLM tier
+        risk = _explicit_risk(agent_ov.get("risk"), explicit.get("risk"), default.get("risk"))
         tier = risk if risk in TOOL_RISK_TIERS else (slm_tier or None)
-        a = _explicit_allow(explicit)                    # bool, or None for absent / "default"
-        block: bool | None = (not a) if a is not None else None
+        # active/allow precedence: nested ``active`` → overall ``allow`` (else defer)
+        act = _explicit_active(agent_ov)
+        if act is not None:
+            block: bool | None = not act
+        else:
+            a = _explicit_allow(explicit)
+            block = (not a) if a is not None else None
+        note = agent_ov.get("note") or explicit.get("note") or ""
         return {"risk_tier": tier, "block": block,
-                "source": "operator_policy", "note": explicit.get("note") or ""}
+                "source": "operator_policy", "note": note}
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.operator_policy.tool_decision failed tool=%s error=%r", tool, exc)
         return None

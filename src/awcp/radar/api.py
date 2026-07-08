@@ -224,10 +224,16 @@ def _record_event(kind: str, agent_id: str = "", detail: str = "", **extra) -> N
 # ----------------------------------------------------------------------
 def _token_blocked(agent_id: str) -> dict | None:
     """Return the live budget evaluation when the agent is over its limit
-    (=> hard stop), else None. No-op (None) when laminar is absent/disabled."""
+    (=> hard stop), else None. No-op (None) when laminar is absent/disabled.
+
+    Checks the OVERALL SESSION limit first: once total tokens across ALL agents
+    reach LMNR_SESSION_TOKEN_LIMIT (default 15M), EVERY agent and tool call is
+    hard-blocked — regardless of any per-agent window budget."""
     if not (_LAMINAR and agent_id):
         return None
     try:
+        if _laminar.session_exhausted():
+            return _laminar.session_state()
         if _laminar.is_exhausted(agent_id):
             return _laminar.budget_state(agent_id)
     except Exception as exc:  # noqa: BLE001 — token control must never break a route
@@ -241,9 +247,11 @@ def _note_token_block(agent_id: str, evaluation: dict | None, where: str) -> Non
     control plane refused an over-budget agent at `where`."""
     used = (evaluation or {}).get("used_tokens")
     budget = (evaluation or {}).get("budget_tokens")
-    detail = f"blocked at {where} — token budget exhausted"
+    what = ("SESSION token limit reached" if (evaluation or {}).get("scope") == "session"
+            else "token budget exhausted")
+    detail = f"blocked at {where} — {what}"
     if budget:
-        detail = f"blocked at {where} — token budget exhausted ({used}/{budget})"
+        detail = f"blocked at {where} — {what} ({used}/{budget})"
     _record_event("token_hard_stop", agent_id, detail)
     log.warning("radar.token.hardstop agent_id=%s %s", agent_id, detail)
 
@@ -954,21 +962,33 @@ _bypass_seen: dict[str, float] = {}
 async def _bypass_detector() -> None:
     """Detect registered agents making direct connections to the upstream model port
     (bypassing the LLM gateway).  Fires a radar event and logs a warning once per
-    agent per 5-minute window — repeated connections produce one event, not many."""
+    agent per 5-minute window — repeated connections produce one event, not many.
+
+    Guarded by AGENT_RADAR_BYPASS_DETECTOR (default on). The socket enumeration
+    walks the whole OS process table, which on macOS can wedge UNINTERRUPTIBLY —
+    so it runs in a killable child process (scanner.net_connections_safe, same
+    pattern as the scan subprocess) and a wedged cycle is skipped, never blocks
+    the gateway. Set AGENT_RADAR_BYPASS_DETECTOR=false to disable it entirely —
+    the /llm gateway still meters tokens; only the extra "agent bypassed the
+    proxy" warning is lost."""
+    if os.getenv("AGENT_RADAR_BYPASS_DETECTOR", "true").lower() != "true":
+        log.info("radar.bypass_detector.disabled (AGENT_RADAR_BYPASS_DETECTOR=false)")
+        return
     port = _gateway_upstream_port()
     radar_pid = os.getpid()
     log.info("radar.bypass_detector.started upstream_port=%s", port)
+    from awcp.radar.scanner import net_connections_safe
     while True:
         try:
-            conns = await asyncio.to_thread(psutil.net_connections, "inet")
+            conns = await asyncio.to_thread(net_connections_safe)
             now = time.time()
-            for conn in conns:
-                if not (conn.raddr and conn.raddr.port == port and conn.pid):
+            for conn in conns or []:
+                if not (conn.get("raddr_port") == port and conn.get("pid")):
                     continue
-                if conn.pid == radar_pid:
+                if conn["pid"] == radar_pid:
                     continue               # the gateway itself
                 for e in REGISTRY.all():
-                    if getattr(e, "pid", None) == conn.pid:
+                    if getattr(e, "pid", None) == conn["pid"]:
                         if now - _bypass_seen.get(e.id, 0) < 300:
                             continue       # already reported within 5 min
                         _bypass_seen[e.id] = now
@@ -978,7 +998,7 @@ async def _bypass_detector() -> None:
                         )
                         log.warning(
                             "radar.bypass_detector agent_id=%s pid=%s upstream_port=%s",
-                            e.id, conn.pid, port,
+                            e.id, conn["pid"], port,
                         )
         except Exception as exc:           # noqa: BLE001
             log.debug("radar.bypass_detector.error error=%r", exc)
@@ -1228,7 +1248,8 @@ def _operator_policy_gate(entry: AgentEntry, decision: dict, action: str = "",
                                f"{thr.get('threshold')})" if thr.get("threshold")
                                else "agent not recognised by operator policy (allow=false)")}
         if action:
-            tov = operator_policy.tool_decision(action)
+            tov = operator_policy.tool_decision(
+                action, agent_id=entry.id, name=getattr(entry, "name", "") or "")
             if tov and tov.get("block") is True:
                 return {**decision, "decision": "deny", "gate": "denied", "mode": "operator_policy",
                         "reason": (tov.get("note") and f"tool '{action}' denied by operator policy "
@@ -1432,6 +1453,11 @@ def _agent_brief(e: AgentEntry) -> dict:
         "agent_id": e.id,
         "name": e.name,
         "brief": " ".join([who, state, act, live]),
+        # Structured pieces so the UI can show ONLY the live parts (activity + liveness)
+        # and not repeat identity/tools/risk it already renders above the brief.
+        "activity": act,
+        "liveness": live,
+        "governance": state,
         "generated_at": now,
         "live": e.alive,
         "status": e.status,
@@ -1864,14 +1890,16 @@ def gate(agent_id: str, req: GateRequest) -> dict:
     # the normal write-gate, which would otherwise let reads through.
     blocked = _token_blocked(agent_id)
     if blocked is not None:
+        why = ("overall session token limit reached — hard stop"
+               if blocked.get("scope") == "session" else "token budget exhausted — hard stop")
         METRICS.record_gate(decision="deny", mode="token_hard_stop", duration=0.0, risk=e.risk)
         _record_event("gate", agent_id, "deny (token_hard_stop)", action=req.action)
         if _HOOKS:
             _hook(_HT.ACTION_BLOCKED, agent_id=agent_id, action=req.action,
-                  reason="token budget exhausted — hard stop", mode="token_hard_stop", risk=e.risk)
+                  reason=why, mode="token_hard_stop", risk=e.risk)
         return {"agent_id": agent_id, "action": req.action, "mode": "token_hard_stop",
                 "decision": "deny",
-                "reason": "token budget exhausted — hard stop by control plane",
+                "reason": f"{why} by control plane",
                 "budget": blocked, "status": e.status,
                 "autonomy_profile": e.autonomy_profile}
 
@@ -2688,8 +2716,12 @@ async def execution_event(task_id: str, req: TaskExecEventRequest) -> dict:
         _tool = event.get("tool_name") or event.get("type")
         if _tool:
             _opa = await _opa_tool_evaluate(agent_id, task_id, _tool, event)
-            # Operator override applied AFTER the OPA tier assignment.
-            _ov = operator_policy.tool_decision(_tool, _opa.get("risk_tier"))
+            # Operator override applied AFTER the OPA tier assignment. Pass the calling
+            # agent so a per-agent tool override (tools.<t>.agents.<a>) resolves for it.
+            _ent_ov = REGISTRY.get(agent_id)
+            _ov = operator_policy.tool_decision(
+                _tool, _opa.get("risk_tier"), agent_id=agent_id,
+                name=(getattr(_ent_ov, "name", "") or "") if _ent_ov else "")
             if _ov:
                 if _ov.get("risk_tier"):
                     _opa["risk_tier"] = _ov["risk_tier"]

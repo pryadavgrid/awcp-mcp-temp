@@ -146,6 +146,11 @@ OVERSHOOT_RATIO: float = _env_float("LMNR_OVERSHOOT_RATIO", "0.0")
 # so enforcement fires before the hard limit, reducing overshoot for agents
 # that report tokens via execution events rather than the LLM gateway.
 ENFORCE_AT_WARN: bool = _env_bool("LMNR_ENFORCE_AT_WARN", "true")
+# Overall SESSION token ceiling across ALL agents (lifetime totals for this radar
+# process, not the sliding window). Once total tokens across every agent reach this,
+# the control plane hard-blocks EVERY agent and tool call until restart/reset.
+# 0 disables the session limit.
+SESSION_TOKEN_LIMIT: int = _env_int("LMNR_SESSION_TOKEN_LIMIT", "15000000")
 
 # When true (default), only LLM/token + AWCP governance spans (plus the
 # task-lifecycle request spans named in EXPORT_KEEP_SPAN_NAMES) are fanned out to

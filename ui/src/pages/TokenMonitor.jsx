@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { usePoll } from '../hooks/usePoll.js'
-import { getBudgets, getUsage, resetWindow, setBudget } from '../api.js'
+import { getBudgets, getLaminarStatus, getUsage, resetWindow, setBudget } from '../api.js'
 import { LAMINAR_URL } from '../config.js'
 import { Panel, Table, Td, EmptyRow } from '../components/Table.jsx'
 import { StatusBadge } from '../components/Badge.jsx'
 import { fmtCost, fmtInt, pctCapped, pctReal, shortId } from '../lib/format.js'
 
 const load = async () => {
-  const [usage, budgets] = await Promise.all([getUsage(), getBudgets().catch(() => null)])
-  return { usage, budgets }
+  const [usage, budgets, status] = await Promise.all([
+    getUsage(),
+    getBudgets().catch(() => null),
+    getLaminarStatus().catch(() => null),
+  ])
+  return { usage, budgets, session: status?.session || null }
 }
 
 const BAR = {
@@ -22,9 +26,27 @@ export default function TokenMonitor() {
   const usage = data?.usage || []
   const budgets = data?.budgets
   const overrides = budgets?.overrides || {}
+  const session = data?.session
 
   return (
     <div className="space-y-6">
+      {session && session.exhausted && (
+        <div className="flex items-center gap-3 rounded-xl border border-rose-300 bg-rose-50 px-5 py-4 dark:border-rose-500/40 dark:bg-rose-500/10">
+          <span className="text-xl">⛔</span>
+          <div>
+            <div className="text-sm font-bold text-rose-700 dark:text-rose-300">
+              Session token limit reached — all agents and tool calls are hard-blocked
+            </div>
+            <div className="mt-0.5 text-xs text-rose-600 dark:text-rose-400">
+              {fmtInt(session.used_tokens)} / {fmtInt(session.limit_tokens)} tokens used across all agents.
+              Restart the gateway (or raise <span className="font-mono">LMNR_SESSION_TOKEN_LIMIT</span>) to resume.
+            </div>
+          </div>
+        </div>
+      )}
+      {session && session.limit_tokens > 0 && (
+        <SessionBar session={session} />
+      )}
       <Panel
         title="Token Monitor"
         subtitle="Per-agent token usage, budget state, and cost over the sliding window"
@@ -270,5 +292,31 @@ function ResetButton({ agentId, onDone }) {
     >
       {busy ? 'resetting…' : 'reset window'}
     </button>
+  )
+}
+
+// Overall session usage vs the hard session limit (all agents combined, lifetime).
+// Green → amber (≥80%) → red (exhausted). At the limit every agent + tool call is
+// hard-blocked by the control plane (see the banner above the panels).
+function SessionBar({ session }) {
+  const ratio = session.limit_tokens > 0 ? session.used_tokens / session.limit_tokens : 0
+  const tone = session.exhausted ? 'exhausted' : ratio >= 0.8 ? 'warn' : 'ok'
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-5 py-3.5 dark:border-slate-700 dark:bg-slate-900/40">
+      <div className="mb-1.5 flex items-baseline justify-between gap-3 text-xs">
+        <span className="font-semibold uppercase tracking-wide text-slate-500">
+          Session token limit <span className="font-normal normal-case text-slate-400">— all agents combined; hard-blocks everything when reached</span>
+        </span>
+        <span className="whitespace-nowrap font-mono text-slate-600 dark:text-slate-300">
+          {fmtInt(session.used_tokens)} / {fmtInt(session.limit_tokens)} ({pctReal(ratio)}%)
+        </span>
+      </div>
+      <div className="h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+        <div
+          className={`h-full rounded-full transition-all ${BAR[tone]}`}
+          style={{ width: `${pctCapped(ratio)}%` }}
+        />
+      </div>
+    </div>
   )
 }

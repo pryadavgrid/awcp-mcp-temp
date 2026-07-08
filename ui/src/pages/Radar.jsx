@@ -117,7 +117,7 @@ export default function Radar() {
                     {a.card_summary && (
                       <button
                         type="button"
-                        onClick={() => setSel({ id: a.id, name: a.name })}
+                        onClick={() => setSel(a)}
                         className="cursor-pointer rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700 ring-1 ring-inset ring-brand-600/20 transition hover:bg-brand-200"
                         title="Click for a live brief of what this agent is doing"
                       >
@@ -207,6 +207,16 @@ function AgentBriefModal({ sel, onClose }) {
   }, [sel, onClose])
 
   if (!sel) return null
+  const desc = (sel.card_summary && sel.card_summary.description) || ''
+  const tools = (sel.card_summary && sel.card_summary.skills) || sel.skills || []
+  const fw = sel.framework || sel.runtime || ''
+  const kindWord =
+    { agent_framework: 'agent', orchestrator: 'orchestrator', mcp_server: 'MCP server', llm_runtime: 'LLM runtime' }[
+      sel.kind
+    ] ||
+    sel.kind ||
+    ''
+  const risk = sel.authoritative_risk || sel.risk || ''
   return (
     <div
       className="fixed inset-0 z-[80] grid place-items-center bg-black/40 p-4 backdrop-blur-sm"
@@ -215,12 +225,12 @@ function AgentBriefModal({ sel, onClose }) {
       aria-modal="true"
     >
       <div
-        className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-card-hover"
+        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-card-hover dark:bg-slate-900"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="truncate text-lg font-bold text-brand-900">{sel.name}</div>
+            <div className="truncate text-lg font-bold text-brand-900 dark:text-slate-100">{sel.name}</div>
             <div className="truncate font-mono text-[11px] text-slate-400">{sel.id}</div>
           </div>
           <button
@@ -233,24 +243,90 @@ function AgentBriefModal({ sel, onClose }) {
           </button>
         </div>
 
-        <div className="mt-4 rounded-xl bg-slate-50 p-4 text-sm leading-relaxed text-slate-700 dark:bg-slate-800/50">
-          {state.loading ? (
-            <span className="text-slate-400">Generating a live brief…</span>
-          ) : state.error ? (
-            <span className="text-rose-600">{state.error}</span>
-          ) : (
-            state.brief
+        {/* meta chips: framework · kind · risk tier · status */}
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px]">
+          {fw && <MetaChip>{fw}</MetaChip>}
+          {kindWord && <MetaChip>{kindWord}</MetaChip>}
+          {risk && (
+            <MetaChip>
+              risk <b className="font-semibold">{risk}</b>
+            </MetaChip>
           )}
+          {sel.status && <MetaChip>{sel.status}</MetaChip>}
         </div>
 
-        {!state.loading && !state.error && (
-          <div className="mt-3 flex items-center gap-2 text-[11px] text-slate-400">
-            <span className={`h-1.5 w-1.5 rounded-full ${state.live ? 'bg-brand-500' : 'bg-rose-500'}`} />
-            {state.status || '—'} · live view, refreshes every 5s
+        {/* What the agent is about — the agent card's own description (declared in its
+            JSON), rendered verbatim so multi-line descriptions keep their formatting. */}
+        <section className="mt-4">
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">About</h4>
+          {desc ? (
+            <p className="whitespace-pre-line text-sm leading-relaxed text-slate-700 dark:text-slate-200">{desc}</p>
+          ) : (
+            <p className="text-sm italic text-slate-400">No description declared for this agent.</p>
+          )}
+        </section>
+
+        {/* Tools it declares — the formatted section */}
+        <section className="mt-4">
+          <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">
+            Tools <span className="font-normal text-slate-400">({tools.length})</span>
+          </h4>
+          {tools.length ? (
+            <ul className="flex flex-wrap gap-1.5">
+              {tools.map((t) => (
+                <li
+                  key={t}
+                  className="rounded-md bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                >
+                  {t}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm italic text-slate-400">No declared tools yet.</p>
+          )}
+        </section>
+
+        {/* Live status — ONLY the dynamic parts (what it's doing + liveness); identity,
+            framework, tools and risk are already shown above, so they're dropped here. */}
+        <section className="mt-4">
+          <h4 className="mb-1.5 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-brand-700 dark:text-brand-300">
+            Live status
+            {!state.loading && !state.error && (
+              <span className="inline-flex items-center gap-1 text-[10px] font-normal normal-case text-slate-400">
+                <span className={`h-1.5 w-1.5 rounded-full ${state.live ? 'bg-brand-500' : 'bg-rose-500'}`} />
+                {state.live ? 'live' : 'stopped'} · refreshes every 5s
+              </span>
+            )}
+          </h4>
+          <div className="rounded-xl bg-slate-50 p-4 text-sm leading-relaxed text-slate-700 dark:bg-slate-800/50 dark:text-slate-200">
+            {state.loading ? (
+              <span className="text-slate-400">Generating a live brief…</span>
+            ) : state.error ? (
+              <span className="text-rose-600">{state.error}</span>
+            ) : state.activity || state.liveness ? (
+              <div className="space-y-1">
+                {state.activity && <p>{state.activity}</p>}
+                {state.liveness && <p className="text-[13px] text-slate-500 dark:text-slate-400">{state.liveness}</p>}
+              </div>
+            ) : (
+              // Fallback for an older backend that only returns the combined `brief`.
+              state.brief
+            )}
           </div>
-        )}
+        </section>
       </div>
     </div>
+  )
+}
+
+// A small pill for a single agent-meta fact (framework, kind, risk tier, status).
+// Brand-green tint so it reads as part of the app, not a cold slate/blue chip.
+function MetaChip({ children }) {
+  return (
+    <span className="rounded-full bg-brand-50 px-2 py-0.5 text-brand-700 ring-1 ring-inset ring-brand-600/15 dark:bg-brand-900/40 dark:text-brand-200 dark:ring-brand-400/20">
+      {children}
+    </span>
   )
 }
 

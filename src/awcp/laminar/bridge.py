@@ -556,6 +556,29 @@ def budget_state(agent_id: str) -> dict:
                            getattr(entry, "token_budget", None))
 
 
+def session_state() -> dict:
+    """LIVE overall-session evaluation: total tokens across ALL agents (lifetime, not
+    the sliding window) against config.SESSION_TOKEN_LIMIT. When exhausted the radar
+    hard-blocks EVERY agent and tool call — see _token_blocked. limit 0 => disabled."""
+    limit = int(config.SESSION_TOKEN_LIMIT or 0)
+    usage = LEDGER.session_usage()
+    used = usage["total_tokens"]
+    exhausted = bool(limit > 0 and used >= limit)
+    return {"scope": "session", "state": "exhausted" if exhausted else "ok",
+            "used_tokens": used, "budget_tokens": limit,
+            "limit_tokens": limit, "exhausted": exhausted,
+            "ratio": round(used / limit, 4) if limit > 0 else 0.0,
+            "calls": usage["calls"], "cost": usage["cost"]}
+
+
+def session_exhausted() -> bool:
+    """True iff the OVERALL session token limit has been reached. Fail-open when
+    laminar is disabled/uninitialised (no token control => no session control)."""
+    if not (config.ENABLED and _initialized):
+        return False
+    return session_state()["exhausted"]
+
+
 def is_exhausted(agent_id: str) -> bool:
     """True iff the agent has met/exceeded its token budget for the window.
 
@@ -654,4 +677,7 @@ def status_summary() -> dict:
         "price_table_models": sorted(config.PRICE_TABLE.keys()),
         "agents_tracked": len(LEDGER.agents()),
         "active_tasks": len(_tasks),
+        # Overall session ceiling across all agents (0 => disabled). When exhausted,
+        # the radar hard-blocks every agent and tool call.
+        "session": session_state(),
     }

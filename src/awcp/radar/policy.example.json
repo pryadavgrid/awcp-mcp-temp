@@ -3,6 +3,13 @@
     "Operator policy template for the Radar 'Policy' tab. The live policy is stored",
     "in Postgres (governance.operator_policy); paste an edited copy here and Save.",
     "",
+    "TWO SECTIONS, kept distinct:",
+    "  * 'agents' — WHICH detected agents are recognised (allowed) and at what tier.",
+    "               An agent may ALSO nest a 'tools' map: its OWN risk tier / active",
+    "               flag for specific tools (see PER-AGENT TOOL RISK below).",
+    "  * 'tools'  — the OVERALL allow + risk tier for each tool, used for any agent",
+    "               that does not nest its own override for that tool.",
+    "",
     "RISK-TIER FLOW (the main feature — agents AND tools):",
     "  1. OPA assigns a BASELINE risk tier first — the OPA agent's SLM tiers each",
     "     tool call; an agent's baseline is its authoritative (declared+magazine) tier.",
@@ -10,12 +17,20 @@
     "  3. The updated tier is APPLIED against the slider ('allowed risk level' on Tool",
     "     Risk Tiers): tier BELOW the slider -> allowed; AT OR ABOVE -> denied.",
     "",
-    "  So: OPA baseline -> your 'risk' -> slider decides. Set 'risk' lower to admit",
-    "  something under the slider, higher to push it over.",
+    "PER-AGENT TOOL RISK (nested, tools INSIDE agents): give ONE agent its own tier /",
+    "  active flag for a tool by nesting a 'tools' map inside its agent rule. Keys match",
+    "  the tool name (globs ok). Each entry has 'risk' (low|medium|high|severe) and/or",
+    "  'active' (true = allow, false = inactive/deny).",
     "",
-    "EXPLICIT OVERRIDE (optional): 'allow' beats the slider entirely —",
-    "  'allow': true  -> always allowed,  'allow': false -> always denied",
-    "  (use it for a hard pre-execution deny on dangerous tools). Omit 'allow' to let",
+    "  ASSESSMENT ORDER for a tool call, most specific first:",
+    "    1. the calling agent's NESTED risk / active  (agents.<a>.tools.<t>)",
+    "    2. the OVERALL tool risk / allow             (tools.<t>)",
+    "    3. the OPA-defined SLM tier",
+    "  This is why the Radar's tier bar can show the SAME tool at a different tier for",
+    "  different agents.",
+    "",
+    "EXPLICIT OVERRIDE: 'allow' (overall tool) and 'active' (nested per-agent) beat the",
+    "  slider entirely — true -> always allowed, false -> always denied. Omit them to let",
     "  the risk-tier + slider flow decide.",
     "",
     "Omitting a field — or the string \"default\" — means 'no opinion, use the OPA",
@@ -31,7 +46,7 @@
 
   "version": 1,
   "updated_by": "operator",
-  "note": "risk-tier overrides: OPA baseline -> JSON risk -> slider",
+  "note": "risk-tier overrides: nested per-agent tool risk -> overall tool -> OPA tier",
 
   "exclusion_list": [
     "claude",
@@ -43,10 +58,22 @@
   ],
 
   "agents": {
-    "agent-langgraph-*":   { "risk": "low",  "note": "override magazine tier -> recognised under the slider" },
-    "agent-crewai-*":      { "risk": "low" },
+    "agent-langgraph-*": {
+      "risk": "low",
+      "note": "override magazine tier -> recognised under the slider",
+      "tools": {
+        "run_command":  { "risk": "medium", "active": true, "note": "trusted shell agent -> medium + active" },
+        "external_post": { "active": false, "note": "but never let it post outbound" }
+      }
+    },
+    "agent-crewai-*": {
+      "risk": "low",
+      "tools": {
+        "external_post": { "risk": "low", "active": true, "note": "crewai poster is trusted -> low + active" }
+      }
+    },
     "agent-pydantic_ai-*": { "risk": "low" },
-    "*temporal*":          { "allow": true, "note": "explicit hard deny (infra)" }
+    "*temporal*":          { "allow": false, "note": "explicit hard deny (infra)" }
   },
 
   "tools": {
@@ -55,8 +82,8 @@
     "search_arxiv":        { "risk": "low" },
     "get_paper":           { "risk": "low" },
     "save_artifact":       { "risk": "low" },
-    "run_command":         { "risk": "severe", "allow": false, "note": "shell exec - severe tier + hard deny" },
-    "external_post":       { "risk": "high",   "allow": false, "note": "outbound write - hard deny" }
+    "run_command":         { "risk": "severe", "allow": false, "note": "shell exec - severe + hard deny by default" },
+    "external_post":       { "risk": "high",   "allow": false, "note": "outbound write - hard deny by default" }
   },
 
   "skills": {

@@ -73,16 +73,37 @@ _CONN_CACHE_TTL = float(os.getenv("AWCP_GATEWAY_CONN_TTL", "2"))
 _conn_cache: dict = {"ts": 0.0, "port2pid": {}}
 
 
+# Headerless source-port attribution needs a system-wide socket enumeration,
+# which walks the whole OS process table — on macOS that can wedge
+# UNINTERRUPTIBLY, so it runs in a killable child process
+# (scanner.net_connections_safe) and never in-process. Guard it (default on):
+# AWCP_GATEWAY_SOCKET_ATTRIBUTION=false skips the enumeration and falls back to
+# header-based attribution only (agents that send their id header — all AWCP kit
+# agents do — are unaffected; only headerless callers go unattributed).
+_SOCKET_ATTRIBUTION = os.getenv("AWCP_GATEWAY_SOCKET_ATTRIBUTION", "true").lower() == "true"
+# After a failed/timed-out enumeration, don't retry for this long — a wedged
+# process table would otherwise cost every cache-miss request a full child
+# timeout (AGENT_RADAR_NET_TIMEOUT) instead of one per backoff window.
+_CONN_FAIL_BACKOFF = float(os.getenv("AWCP_GATEWAY_CONN_FAIL_BACKOFF", "60"))
+
+
 def _port_to_pid() -> dict:
+    if not _SOCKET_ATTRIBUTION:
+        return {}
     now = time.time()
     if now - _conn_cache["ts"] <= _CONN_CACHE_TTL:
         return _conn_cache["port2pid"]
     mapping: dict = {}
     try:
-        import psutil
-        for c in psutil.net_connections(kind="inet"):
-            if c.laddr and c.pid:
-                mapping[c.laddr.port] = c.pid
+        from awcp.radar.scanner import net_connections_safe
+        conns = net_connections_safe()
+        if conns is None:                       # wedged/failed — back off, serve empty
+            _conn_cache["ts"] = now + _CONN_FAIL_BACKOFF - _CONN_CACHE_TTL
+            _conn_cache["port2pid"] = {}
+            return {}
+        for c in conns:
+            if c.get("laddr_port") and c.get("pid"):
+                mapping[c["laddr_port"]] = c["pid"]
     except Exception:                           # noqa: BLE001 — needs privilege; best-effort
         pass
     _conn_cache["ts"] = now

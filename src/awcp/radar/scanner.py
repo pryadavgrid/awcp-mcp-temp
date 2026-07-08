@@ -38,9 +38,16 @@ def scan_all_safe() -> list[AgentEntry]:
     env = dict(os.environ)
     env["PYTHONPATH"] = _SRC_ROOT + os.pathsep + env.get("PYTHONPATH", "")
     try:
+        # close_fds=False forces CPython's posix_spawn path on macOS. The default
+        # fork+exec path can wedge FOREVER despite the timeout: the forked child
+        # closes every inherited fd before exec, and close() on a poisoned kernel
+        # socket blocks uninterruptibly pre-exec — Popen.__init__ then blocks in
+        # read() of the exec pipe, and the timeout (which only arms after spawn)
+        # never fires. posix_spawn skips the child-side fd-close loop entirely.
         proc = subprocess.run(
             [sys.executable, "-m", "awcp.radar.detectors"],
             capture_output=True, text=True, timeout=SCAN_TIMEOUT, env=env,
+            close_fds=False,
         )
     except subprocess.TimeoutExpired:
         log.warning("radar.scan.subprocess timed out after %.0fs — OS process table "
@@ -57,6 +64,68 @@ def scan_all_safe() -> list[AgentEntry]:
     except Exception as exc:  # noqa: BLE001
         log.warning("radar.scan.subprocess parse failed error=%r — skipping cycle", exc)
         return []
+# System-wide socket enumeration, made safe the same way as scan_all_safe: run in
+# a killable CHILD process with a hard timeout. psutil.net_connections walks the
+# whole process table via a sysctl that can wedge UNINTERRUPTIBLY on macOS (a
+# single D/UN-state process poisons the walk for every caller); in-process that
+# wedge holds the GIL and freezes the gateway before uvicorn even binds its port.
+# Callers: the radar bypass detector and the /llm source-port attribution.
+NET_TIMEOUT = float(os.getenv("AGENT_RADAR_NET_TIMEOUT", "10"))
+
+_NET_CHILD_SRC = (
+    "import json, psutil\n"
+    "out = []\n"
+    "for c in psutil.net_connections(kind='inet'):\n"
+    "    if not c.pid:\n"
+    "        continue\n"
+    "    out.append({'pid': c.pid,\n"
+    "                'laddr_port': c.laddr.port if c.laddr else None,\n"
+    "                'raddr_port': c.raddr.port if c.raddr else None})\n"
+    "print(json.dumps(out))\n"
+)
+
+
+def net_connections_safe() -> list[dict] | None:
+    """Enumerate inet sockets (pid / laddr_port / raddr_port) WITHOUT risk of
+    freezing this process. Returns None when the enumeration failed or timed out
+    (wedged process table) — callers must skip that cycle, never block on it.
+
+    Uses Popen (not subprocess.run) so a child wedged UNINTERRUPTIBLY in the
+    sysctl — which then ignores even SIGKILL — can be ABANDONED after the kill
+    attempt instead of blocking this process forever in run()'s cleanup wait()."""
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _NET_CHILD_SRC],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            close_fds=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — enumeration is best-effort everywhere
+        log.debug("radar.net.subprocess spawn failed error=%r", exc)
+        return None
+    try:
+        stdout, _ = proc.communicate(timeout=NET_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.communicate(timeout=2)
+        except Exception:  # noqa: BLE001 — unkillable (UN state); abandon it
+            pass
+        log.warning("radar.net.subprocess timed out after %.0fs — OS process table "
+                    "may be wedged; skipping (gateway stays up)", NET_TIMEOUT)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("radar.net.subprocess failed error=%r", exc)
+        return None
+    out = (stdout or "").strip()
+    if not out:
+        return None
+    try:
+        return json.loads(out)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("radar.net.subprocess parse failed error=%r", exc)
+        return None
+
+
 # Passive AgentCard discovery on scan-sourced entries (additive enrichment). Each
 # entry is attempted at most once (the `not entry.card` guard), with a short
 # timeout so it can't stall the scan cycle. Env-gated off-switch; SSRF-guarded, so

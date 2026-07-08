@@ -400,7 +400,7 @@ services:
   lmnr-query-engine:
     image: ghcr.io/lmnr-ai/query-engine
     container_name: lmnr-query-engine
-    pull_policy: always
+    pull_policy: missing
     restart: unless-stopped
     ports:
       - "8903:8903"
@@ -417,7 +417,7 @@ services:
   lmnr-app-server:
     image: ghcr.io/lmnr-ai/app-server
     container_name: lmnr-app-server
-    pull_policy: always
+    pull_policy: missing
     restart: unless-stopped
     ports:
       - "8880:8000"   # HTTP API
@@ -454,7 +454,7 @@ services:
   lmnr-frontend:
     image: ghcr.io/lmnr-ai/frontend
     container_name: lmnr-frontend
-    pull_policy: always
+    pull_policy: missing
     restart: unless-stopped
     ports:
       - "5667:5667"   # Laminar Web UI → http://localhost:5667
