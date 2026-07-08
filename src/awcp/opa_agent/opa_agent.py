@@ -270,42 +270,68 @@ def _operator_policy_doc() -> dict:
     return doc
 
 
-def _match_tool_rule(tools: dict, tool: str) -> dict | None:
-    """Resolve a tool's rule: an EXACT name wins, else the first glob (fnmatch) pattern."""
-    if tool in tools:
-        return tools[tool]
-    for pat, rule in tools.items():
-        if any(ch in pat for ch in "*?[") and fnmatch.fnmatch(tool, pat):
+def _match_key_rule(rules: dict, *keys: str) -> dict | None:
+    """Resolve a rule for any of `keys` (e.g. a tool name, or an agent's id AND name):
+    an EXACT key wins, else the first glob (fnmatch) pattern that matches any key."""
+    cand = [k for k in keys if k]
+    for k in cand:
+        if k in rules:
+            return rules[k]
+    for pat, rule in rules.items():
+        if any(ch in pat for ch in "*?[") and any(fnmatch.fnmatch(k, pat) for k in cand):
             return rule
     return None
 
 
-def _operator_tool_override(tool: str) -> dict | None:
-    """The operator policy for ONE tool, or None when no policy / no rule applies.
+def _match_tool_rule(tools: dict, tool: str) -> dict | None:
+    """Resolve a tool's rule: an EXACT name wins, else the first glob (fnmatch) pattern."""
+    return _match_key_rule(tools, tool)
+
+
+def _first_risk(*vals) -> str:
+    """First usable risk tier among `vals` (lowercased), skipping absent / "default"."""
+    for v in vals:
+        if v not in (None, "") and not (isinstance(v, str) and v.strip().lower() == "default"):
+            return str(v).strip().lower()
+    return ""
+
+
+def _operator_tool_override(tool: str, agent_id: str = "", agent_name: str = "") -> dict | None:
+    """The operator policy for ONE tool call, or None when no policy / no rule applies.
     Returns {tier, block, note} where tier RELABELS the tier the slider threshold
     compares against (or None), and block is True (force block) / False (force allow)
-    / None (defer to the slider threshold — the DEFAULT check). Only an EXPLICIT
-    per-tool ``allow`` overrides the threshold. Mirrors the radar's
-    operator_policy.tool_decision so both paths agree."""
+    / None (defer to the slider threshold — the DEFAULT check). Mirrors the radar's
+    operator_policy.tool_decision so both paths agree.
+
+    ASSESSMENT ORDER (most specific wins): the CALLING agent's own nested per-tool rule
+    (``agents.<a>.tools.<t>`` — ``risk`` / ``active``) beats the OVERALL tool rule
+    (``tools.<t>`` — ``risk`` / ``allow``), which beats the SLM tier. So the tier RECORDED
+    for this call (the Radar bar) is the one that applies to THIS agent."""
     doc = _operator_policy_doc()
     if not doc:
         return None
     tools = doc.get("tools") or {}
     default = (doc.get("defaults") or {}).get("tools") or {}
     explicit = _match_tool_rule(tools, tool) or {}
-    if not explicit and not default:
+    # nested per-agent-per-tool override: agents.<agent>.tools.<tool>
+    agent_rule = _match_key_rule(doc.get("agents") or {}, agent_id, agent_name)
+    nested_tools = agent_rule.get("tools") if isinstance(agent_rule, dict) else None
+    agent_ov = _match_key_rule(nested_tools, tool) if isinstance(nested_tools, dict) else None
+    agent_ov = agent_ov or {}
+    if not explicit and not default and not agent_ov:
         return None
     # A field that is absent OR the literal "default" means 'no opinion — use the
-    # slider / SLM-suggested value', so it is skipped here.
-    risk = ""
-    for v in (explicit.get("risk"), default.get("risk")):
-        if v not in (None, "") and not (isinstance(v, str) and v.strip().lower() == "default"):
-            risk = str(v).strip().lower()
-            break
+    # slider / SLM-suggested value', so it is skipped here. Nested override wins.
+    risk = _first_risk(agent_ov.get("risk"), explicit.get("risk"), default.get("risk"))
     tier = risk if risk in RISK_TIERS else None
-    a = explicit.get("allow")
-    block = (not a) if isinstance(a, bool) else None   # "default"/absent -> defer to slider
-    return {"tier": tier, "block": block, "note": explicit.get("note") or ""}
+    act = agent_ov.get("active")
+    if isinstance(act, bool):
+        block = not act                 # active:false -> block; active:true -> allow
+    else:
+        a = explicit.get("allow")
+        block = (not a) if isinstance(a, bool) else None   # else defer to slider
+    note = agent_ov.get("note") or explicit.get("note") or ""
+    return {"tier": tier, "block": block, "note": note}
 
 
 def _log_laminar(agent_id: str, task_id: str, tool_name: str, tool_input) -> None:
@@ -428,7 +454,7 @@ def evaluate(req: EvaluateRequest) -> dict:
     # Operator policy override, applied AFTER the SLM tier. A relabeled tier is set
     # BEFORE the threshold decision so the block set re-evaluates against it; an explicit
     # allow/deny then overrides the threshold outright. No-op when no policy / no rule.
-    ov = _operator_tool_override(req.tool_name)
+    ov = _operator_tool_override(req.tool_name, req.agent_id)
     if ov and ov.get("tier"):
         tier = ov["tier"]
     decision, reason = _decide(req.tool_name, tier)

@@ -41,6 +41,8 @@ from awcp.laminar.bridge import (          # noqa: F401  (public surface)
     status_summary,
     budget_state,
     is_exhausted,
+    session_state,
+    session_exhausted,
     record_usage,
     pre_check,
     release_inflight,

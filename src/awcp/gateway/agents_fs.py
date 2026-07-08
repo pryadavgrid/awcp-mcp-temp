@@ -30,6 +30,14 @@ import subprocess
 # The bundle of standalone agents. Override with AWCP_AGENTS_DIR.
 AGENTS_DIR = os.getenv("AWCP_AGENTS_DIR", "/Users/pchandra/CAPSTONE/DEMO2/awcp-agents")
 
+# Hard timeout for the process-enumeration shell-outs (pgrep/lsof). Without it a
+# wedged macOS process table (a stuck syscall that never returns) freezes the
+# whole /user/agents discovery — so NO agent is detected, not just the one whose
+# lookup hung. With it, a stuck call is killed and that agent degrades to
+# "not running this cycle" while the rest are still enumerated. Same rationale as
+# the radar scanner's AGENT_RADAR_SCAN_TIMEOUT. Env-tunable; nothing hardcoded.
+_PROC_LOOKUP_TIMEOUT = float(os.getenv("AWCP_PROC_LOOKUP_TIMEOUT", "5"))
+
 
 # Where launched agents should send governance + execution events. Points at
 # THIS gateway's mounted radar so the agent -> radar -> Temporal/OTel pipeline is
@@ -85,10 +93,11 @@ def _pids(agent: dict) -> list[int]:
     """PIDs whose command line references this agent's own <folder>.py runtime."""
     try:
         out = subprocess.run(
-            ["pgrep", "-f", agent["runtime"]], capture_output=True, text=True
+            ["pgrep", "-f", agent["runtime"]], capture_output=True, text=True,
+            timeout=_PROC_LOOKUP_TIMEOUT,
         )
         return [int(p) for p in out.stdout.split() if p.strip()]
-    except Exception:
+    except Exception:  # includes TimeoutExpired — skip this cycle, don't freeze discovery
         return []
 
 
@@ -100,10 +109,11 @@ def _listening_port(pid: int) -> int | None:
             ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"],
             capture_output=True,
             text=True,
+            timeout=_PROC_LOOKUP_TIMEOUT,
         )
         m = re.search(r":(\d+)\s*\(LISTEN\)", out.stdout)
         return int(m.group(1)) if m else None
-    except Exception:
+    except Exception:  # includes TimeoutExpired — a wedged lsof must not stall discovery
         return None
 
 

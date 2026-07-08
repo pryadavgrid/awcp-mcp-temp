@@ -142,6 +142,22 @@ class TokenLedger:
                 "total_tokens": used_in + used_out, "cost": round(cost, 6),
                 "calls": calls, "last_model": last_model}
 
+    def session_usage(self) -> dict:
+        """Total tokens across ALL agents for this process's lifetime — the number the
+        overall session limit gates on. Lifetime totals are never pruned, so this only
+        grows until restart or an explicit session reset."""
+        used_in = used_out = calls = 0
+        cost = 0.0
+        with self._lock:
+            for lt in self._lifetime.values():
+                used_in += lt["input_tokens"]
+                used_out += lt["output_tokens"]
+                cost += lt["cost"]
+                calls += lt["calls"]
+        return {"input_tokens": used_in, "output_tokens": used_out,
+                "total_tokens": used_in + used_out, "cost": round(cost, 6),
+                "calls": calls}
+
     def lifetime_usage(self, agent_id: str) -> dict:
         with self._lock:
             lt = dict(self._lifetime.get(

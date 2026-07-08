@@ -4,7 +4,7 @@
   "displayName": "Agent Workforce Control Plane",
   "registrationAllowed": false,
   "resetPasswordAllowed": false,
-  "sslRequired": "external",
+  "sslRequired": "none",
   "accessTokenLifespan": 900,
   "ssoSessionIdleTimeout": 28800,
   "ssoSessionMaxLifespan": 86400,
@@ -33,8 +33,8 @@
       "serviceAccountsEnabled": false,
       "rootUrl": "http://localhost:5173",
       "baseUrl": "http://localhost:5173",
-      "redirectUris": ["http://localhost:5173/*"],
-      "webOrigins": ["http://localhost:5173", "http://localhost:8000"],
+      "redirectUris": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
+      "webOrigins": ["*"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:5173/*"

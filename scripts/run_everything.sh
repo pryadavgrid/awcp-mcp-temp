@@ -122,6 +122,16 @@ export AWCP_RADAR_URL="${AWCP_RADAR_URL:-http://localhost:${GATEWAY_PORT}}"
 export AWCP_GATEWAY_UPSTREAM="${AWCP_GATEWAY_UPSTREAM:-http://localhost:11434}"
 export OLLAMA_BASE="${OLLAMA_BASE:-http://localhost:${GATEWAY_PORT}/llm}"
 
+# macOS: psutil.net_connections walks the whole process table via a sysctl that
+# can block UNINTERRUPTIBLY on a poisoned kernel socket while holding the GIL —
+# the gateway then freezes (dashboard shows every service offline) and the
+# wedged process survives kill -9, holding :8000 until reboot. Disable both
+# in-process callers; the sandboxed scanner subprocess still enumerates agents.
+# Cost: no "agent bypassed /llm proxy" warning, and headerless /llm callers go
+# unattributed (all AWCP kit agents send their id header, so unaffected).
+export AGENT_RADAR_BYPASS_DETECTOR="${AGENT_RADAR_BYPASS_DETECTOR:-false}"
+export AWCP_GATEWAY_SOCKET_ATTRIBUTION="${AWCP_GATEWAY_SOCKET_ATTRIBUTION:-false}"
+
 # Canonical control-plane DB (registry / governance / evidence / ops). When the
 # observability Postgres is up (docker compose, schema from observability/init-db)
 # the registry persists to registry.agents instead of the local JSON file, and
@@ -266,11 +276,14 @@ cleanup(){
   [ -n "$OPA_SERVER_PID" ] && kill "$OPA_SERVER_PID" 2>/dev/null || true
   [ -n "$MCP_PID" ]        && kill "$MCP_PID"        2>/dev/null || true
   [ -n "$SANDBOX_PID" ]    && kill "$SANDBOX_PID"    2>/dev/null || true
-  [ -n "$OLLAMA_PID" ]   && kill "$OLLAMA_PID"   2>/dev/null || true
-  [ -n "$TEMPORAL_PID" ] && kill "$TEMPORAL_PID" 2>/dev/null || true
-  say "Stopped the gateway (+ Temporal/MCP/Ollama/UI if this script started them)."
-  echo "  Telemetry stack left running — stop it with:"
-  echo "    docker compose -f observability/docker-compose.yml down"
+  # Temporal and Ollama are shared infrastructure: killing them here meant any
+  # exit of this script (Ctrl+C, gateway crash, closed terminal) silently took
+  # down workflows + the LLM runtime for everything else. Leave them running;
+  # stop_everything.sh tears Temporal down by port when you actually want that.
+  say "Stopped the gateway (+ MCP/OPA/UI/sandbox if this script started them)."
+  echo "  Left running: Temporal (:7233), Ollama (:11434), telemetry stack."
+  echo "  Stop them explicitly with:"
+  echo "    bash scripts/stop_everything.sh --docker"
 }
 trap cleanup EXIT INT TERM
 

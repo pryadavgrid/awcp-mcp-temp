@@ -14,16 +14,80 @@ const TEMPLATE = {
     '*temporal*': { allow: false, note: 'EXPLICIT DENY — infra, never recognised' },
     Python: { allow: false, note: 'EXPLICIT DENY — bare interpreter' },
     'agent-crewai-*': { allow: true, note: 'EXPLICIT ALLOW — whitelist past the slider' },
-    'agent-langgraph-*': { risk: 'low', note: 'RISK OVERRIDE — relabel to low so the slider lets it through' },
+    'agent-langgraph-*': {
+      risk: 'low',
+      note: 'RISK OVERRIDE — relabel to low so the slider lets it through',
+      tools: {
+        run_command: { risk: 'medium', active: true, note: 'PER-TOOL — trusted shell agent' },
+        external_post: { active: false, note: 'PER-TOOL — but never post outbound' },
+      },
+    },
     'agent-pydantic_ai-*': { allow: 'default', note: 'DEFAULT — defer to the slider' },
   },
   tools: {
-    run_command: { allow: false, note: 'EXPLICIT DENY — shell exec' },
-    external_post: { allow: false, note: 'EXPLICIT DENY — outbound write' },
+    run_command: { allow: false, risk: 'severe', note: 'EXPLICIT DENY — shell exec' },
+    external_post: { allow: false, risk: 'high', note: 'EXPLICIT DENY — outbound write' },
     web_search: { allow: true, note: 'EXPLICIT ALLOW — whitelist past the slider' },
     save_artifact: { risk: 'medium', note: 'RISK OVERRIDE — relabel tier' },
     search_arxiv: { risk: 'default', note: 'DEFAULT — SLM tier + slider decide' },
   },
+}
+
+// A documented, mostly-empty policy the operator can download, fill in, and re-import.
+// The `_README` lines (ignored by the engine — every '_'-prefixed key is) explain each
+// field; the single example under agents/tools shows the exact shape + tier vocabulary.
+const BLANK_TEMPLATE = {
+  _README: [
+    'AWCP Operator Policy — fill this in, then Import it (or paste into the JSON view) and Save.',
+    '',
+    'agents: WHICH detected agents are recognised, and at what risk tier.',
+    "  key   = agent id or name, globs ok (e.g. 'agent-langgraph-*').",
+    '  risk  = low | medium | high          (operator override of the baseline tier)',
+    '  allow = true (always allow) | false (always deny) | omit (let the slider decide)',
+    "  tools = OPTIONAL nested map — this agent's OWN tier/active for a specific tool,",
+    '          overriding the overall tools entry for THIS agent only (see per-tool below).',
+    '',
+    'tools: the OVERALL allow + risk tier for a tool (used when an agent has no nested override).',
+    "  key   = tool name, globs ok (e.g. 'run_command').",
+    '  risk  = low | medium | high | severe',
+    '  allow = true | false | omit',
+    '',
+    'per-tool (nested at agents.<agent>.tools.<tool>):',
+    '  risk   = low | medium | high | severe',
+    '  active = true (allow this tool for this agent) | false (deny) | omit',
+    '',
+    'ASSESSMENT ORDER for a tool call: nested agent-tool (risk/active) -> overall tool (risk/allow) -> OPA baseline tier.',
+    'Omit any field (or use "default") to defer to the OPA baseline + slider. Keys starting with "_" are ignored.',
+  ],
+  version: 1,
+  updated_by: 'your-name',
+  note: 'describe this policy version',
+  agents: {
+    'agent-example-*': {
+      risk: 'low',
+      allow: true,
+      tools: {
+        run_command: { risk: 'medium', active: true },
+      },
+    },
+  },
+  tools: {
+    run_command: { risk: 'severe', allow: false },
+    web_search: { risk: 'low' },
+  },
+}
+
+// Download BLANK_TEMPLATE as a .json file (no server round-trip — a client-side Blob).
+function downloadTemplate() {
+  const blob = new Blob([JSON.stringify(BLANK_TEMPLATE, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'awcp-policy-template.json'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 // Risk-tier vocabularies + colours (shared with Radar's Tool Risk Tiers): agents
@@ -245,7 +309,9 @@ export default function Policy() {
     setSaving(true)
     setMsg(null)
     try {
-      const r = await putPolicy(doc)
+      // Honour the document's own updated_by / note instead of hardcoding — so a
+      // "updated_by": "sarthak" in the JSON is what the store (and the meta) shows.
+      const r = await putPolicy(doc, doc.updated_by || 'awcp-ui', doc.note || '')
       setDirty(false)
       setMsg({ tone: 'green', text: `✓ saved v${r.version} (${r.enabled ? 'active' : 'inert'})` })
       refresh()
@@ -258,11 +324,7 @@ export default function Policy() {
 
   return (
     <div className="space-y-6">
-      <Panel
-        title="Operator Policy"
-        subtitle="Operator overrides for which agents and tools are allowed, and at what risk tier — applied on top of the OPA-assigned baseline."
-        right={<span className="text-xs text-slate-500">{meta}</span>}
-      >
+      <Panel>
         <div className="space-y-4 px-5 py-4">
           {/* View toggle (the "slider"): Visual builder is the default; flip it to
               show the current policy as raw, editable JSON. Both edit one document. */}
@@ -278,7 +340,12 @@ export default function Policy() {
               <LegendDot hex={TIER_HEX.high} label="high" />
               <LegendDot hex={TIER_HEX.severe} label="severe" />
             </div>
-            <ViewToggle view={view} setView={setView} />
+            <div className="flex items-center gap-3">
+              <span className="rounded-md border border-slate-300 bg-slate-50 px-2.5 py-1 font-mono text-[11px] text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                {meta}
+              </span>
+              <ViewToggle view={view} setView={setView} />
+            </div>
           </div>
 
           {view === 'builder' ? (
@@ -374,6 +441,13 @@ export default function Policy() {
               className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
             >
               Reload from store
+            </button>
+            <button
+              onClick={downloadTemplate}
+              title="Download a documented blank policy JSON to fill in"
+              className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:bg-slate-50"
+            >
+              ↓ Blank template
             </button>
             {view === 'json' && (
               <>
@@ -528,21 +602,63 @@ function PolicyBuilder({ text, setText, setDirty, onGotoJson }) {
     write(next)
   }
 
+  // ── nested per-tool overrides, stored at agents.<agent>.tools.<toolKey> ───────
+  // ONE agent can carry its own risk tier / active flag for a specific tool; a tool
+  // the agent doesn't nest falls back to the overall tools.<tool> rule.
+  const updateNested = (agentKey, toolKey, patch) => {
+    const next = { ...policy, agents: { ...(policy.agents || {}) } }
+    const agent = { ...(next.agents[agentKey] || {}) }
+    const toolsMap = { ...(agent.tools || {}) }
+    const entry = { ...(toolsMap[toolKey] || {}) }
+    for (const [pk, pv] of Object.entries(patch)) {
+      if (pv === undefined) delete entry[pk]
+      else entry[pk] = pv
+    }
+    toolsMap[toolKey] = entry
+    agent.tools = toolsMap
+    next.agents[agentKey] = agent
+    write(next)
+  }
+  const removeNested = (agentKey, toolKey) => {
+    const next = { ...policy, agents: { ...(policy.agents || {}) } }
+    const agent = { ...(next.agents[agentKey] || {}) }
+    const toolsMap = { ...(agent.tools || {}) }
+    delete toolsMap[toolKey]
+    if (Object.keys(toolsMap).length) agent.tools = toolsMap
+    else delete agent.tools // drop an empty map so the JSON stays clean
+    next.agents[agentKey] = agent
+    write(next)
+  }
+  const addNested = (agentKey, toolKey) => {
+    const k = (toolKey || '').trim()
+    if (!k) return
+    const next = { ...policy, agents: { ...(policy.agents || {}) } }
+    const agent = { ...(next.agents[agentKey] || {}) }
+    const toolsMap = { ...(agent.tools || {}) }
+    if (!toolsMap[k]) toolsMap[k] = {}
+    agent.tools = toolsMap
+    next.agents[agentKey] = agent
+    write(next)
+  }
+
   return (
     <div className="space-y-5">
       <BuilderSection
         title="Agents"
-        hint="match by agent id / name (globs ok)"
+        accent="#6366f1"
+        hint="recognition + tier · match by agent id / name (globs ok) · expand an agent for per-tool overrides"
         section="agents"
         entries={policy.agents || {}}
         tiers={AGENT_TIERS}
         update={update}
         remove={remove}
         add={add}
+        nested={{ update: updateNested, remove: removeNested, add: addNested }}
       />
       <BuilderSection
         title="Tools"
-        hint="match by tool name (globs ok)"
+        accent="#0ea5e9"
+        hint="overall allow + tier · match by tool name (globs ok)"
         section="tools"
         entries={policy.tools || {}}
         tiers={TOOL_TIERS}
@@ -554,7 +670,7 @@ function PolicyBuilder({ text, setText, setDirty, onGotoJson }) {
   )
 }
 
-function BuilderSection({ title, hint, section, entries, tiers, update, remove, add }) {
+function BuilderSection({ title, hint, section, entries, tiers, update, remove, add, accent, nested }) {
   const [newKey, setNewKey] = useState('')
   const keys = Object.keys(entries).filter((k) => !k.startsWith('_'))
   const submit = () => {
@@ -562,13 +678,24 @@ function BuilderSection({ title, hint, section, entries, tiers, update, remove, 
     setNewKey('')
   }
   return (
-    <div>
-      <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-sm font-bold text-brand-900">{title}</h3>
+    <section
+      className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900/40"
+      style={{ borderTop: `3px solid ${accent}` }}
+    >
+      {/* Labeled section header — Agents vs Tools read as two distinct blocks. */}
+      <header className="flex items-baseline gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2.5 dark:border-slate-700 dark:bg-slate-800/40">
+        <span
+          className="inline-block h-2.5 w-2.5 rounded-full"
+          style={{ background: accent }}
+          aria-hidden="true"
+        />
+        <h3 className="text-lg font-bold uppercase tracking-wide text-brand-900 dark:text-slate-100">{title}</h3>
         <span className="text-[11px] text-slate-400">{hint}</span>
-        <span className="ml-auto text-[11px] text-slate-400">{keys.length} rule{keys.length === 1 ? '' : 's'}</span>
-      </div>
-      <div className="space-y-2">
+        <span className="ml-auto text-[11px] font-medium text-slate-400">
+          {keys.length} rule{keys.length === 1 ? '' : 's'}
+        </span>
+      </header>
+      <div className="space-y-2 px-4 py-3">
         {keys.length === 0 && (
           <div className="rounded-lg border border-dashed border-slate-300 px-3 py-3 text-xs text-slate-400">
             No {title.toLowerCase()} rules yet — add one below.
@@ -582,60 +709,198 @@ function BuilderSection({ title, hint, section, entries, tiers, update, remove, 
             tiers={tiers}
             onChange={(patch) => update(section, k, patch)}
             onRemove={() => remove(section, k)}
+            nested={
+              nested
+                ? {
+                    // per-tool overrides nested under this agent (agents.<a>.tools.<t>);
+                    // nested rows always use the TOOL tier vocabulary.
+                    entries: (entries[k] && entries[k].tools) || {},
+                    tiers: TOOL_TIERS,
+                    update: (toolKey, patch) => nested.update(k, toolKey, patch),
+                    remove: (toolKey) => nested.remove(k, toolKey),
+                    add: (toolKey) => nested.add(k, toolKey),
+                  }
+                : null
+            }
           />
         ))}
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            value={newKey}
+            onChange={(e) => setNewKey(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && submit()}
+            placeholder={`add ${title.slice(0, -1).toLowerCase()} rule (e.g. ${section === 'tools' ? 'run_command' : 'agent-langgraph-*'})`}
+            className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-brand-900 outline-none focus:border-brand-500"
+          />
+          <button
+            onClick={submit}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+          >
+            + Add
+          </button>
+        </div>
       </div>
+    </section>
+  )
+}
+
+// Fixed control-column widths so the risk slider, on/off and trailing buttons line up
+// across EVERY row regardless of name length or the per-tool badge — shared by the
+// top-level rows and the nested per-tool rows so both grids align.
+const COL_RISK = 'flex w-[15rem] shrink-0 items-center gap-2'
+const COL_ONOFF = 'w-[10rem] shrink-0' // fits "Active / Inactive" without wrapping
+const COL_TRAIL = 'w-[6.5rem] shrink-0' // per-tool button / spacer, kept constant width
+
+// One top-level rule row (agents or tools). Writes `allow`; agent rows also expose the
+// per-tool expander.
+function EntryRow({ entry, name, tiers, onChange, onRemove, nested }) {
+  const risk = entry.risk && tiers.includes(entry.risk) ? entry.risk : 'default'
+  const allow = entry.allow === true ? true : entry.allow === false ? false : undefined
+  // Left accent shows the effective decision at a glance: allow=green, deny=red, else
+  // the risk tier's colour (slate for "default / no opinion").
+  const accent = allow === true ? '#22c55e' : allow === false ? '#f43f5e' : tierHex(risk)
+  const overrideKeys = nested ? Object.keys(nested.entries).filter((k) => !k.startsWith('_')) : []
+  const [open, setOpen] = useState(overrideKeys.length > 0)
+  return (
+    <div
+      className="rounded-lg border border-slate-200 bg-white dark:border-slate-700"
+      style={{ borderLeft: `4px solid ${accent}` }}
+    >
+      <div className="flex items-center gap-x-4 py-2.5 pl-3 pr-3">
+        <div className="min-w-[8rem] flex-1">
+          <div className="truncate font-mono text-sm text-brand-900">{name}</div>
+        </div>
+
+        <div className={COL_RISK}>
+          <span className="w-9 text-[10px] font-semibold uppercase tracking-wide text-slate-400">risk</span>
+          <TierSlider
+            options={['default', ...tiers]}
+            value={risk}
+            onChange={(v) => onChange({ risk: v === 'default' ? undefined : v })}
+          />
+        </div>
+
+        <div className={COL_ONOFF}>
+          <OnOff mode="allow" value={allow} onChange={(v) => onChange({ allow: v })} />
+        </div>
+
+        {nested ? (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            title="Per-tool overrides for this agent"
+            className={`flex ${COL_TRAIL} items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition ${
+              overrideKeys.length
+                ? 'bg-sky-50 text-sky-700 hover:bg-sky-100 dark:bg-sky-500/15 dark:text-sky-300'
+                : 'text-slate-400 hover:bg-slate-50 hover:text-slate-600'
+            }`}
+          >
+            <span className={`transition ${open ? 'rotate-90' : ''}`}>▸</span>
+            per-tool
+            {overrideKeys.length > 0 && (
+              <span className="rounded-full bg-sky-600 px-1.5 text-[10px] font-semibold text-white">
+                {overrideKeys.length}
+              </span>
+            )}
+          </button>
+        ) : (
+          <span className={COL_TRAIL} aria-hidden="true" />
+        )}
+
+        <button
+          onClick={onRemove}
+          title="Remove rule"
+          aria-label="Remove rule"
+          className="w-5 shrink-0 text-slate-300 transition hover:text-rose-500"
+        >
+          ✕
+        </button>
+      </div>
+
+      {nested && open && <NestedToolOverrides nested={nested} overrideKeys={overrideKeys} />}
+    </div>
+  )
+}
+
+// Per-tool overrides nested under one agent — all rows in ONE bounding box (not a box
+// each) for readability. Each row sets a risk tier / active flag for a specific tool the
+// agent calls; a tool the agent doesn't list falls back to the overall Tools rule.
+function NestedToolOverrides({ nested, overrideKeys }) {
+  const [newKey, setNewKey] = useState('')
+  const submit = () => {
+    nested.add(newKey)
+    setNewKey('')
+  }
+  return (
+    <div className="border-t border-dashed border-slate-200 bg-slate-50/60 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/30">
+      <div className="mb-1.5 flex items-center gap-2 text-[11px] text-slate-500">
+        <span className="font-semibold uppercase tracking-wide">Per-tool overrides</span>
+        <span className="text-slate-400">this agent’s own tier / active for a tool — else the overall Tools rule</span>
+      </div>
+      {overrideKeys.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-slate-300 px-3 py-2 text-[11px] text-slate-400">
+          No per-tool overrides — this agent uses the overall Tools rules.
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-200 overflow-hidden rounded-lg border border-slate-200 bg-white dark:divide-slate-700 dark:border-slate-700 dark:bg-slate-900/40">
+          {overrideKeys.map((tk) => (
+            <NestedToolRow
+              key={tk}
+              entry={nested.entries[tk] || {}}
+              name={tk}
+              tiers={nested.tiers}
+              onChange={(patch) => nested.update(tk, patch)}
+              onRemove={() => nested.remove(tk)}
+            />
+          ))}
+        </div>
+      )}
       <div className="mt-2 flex items-center gap-2">
         <input
           value={newKey}
           onChange={(e) => setNewKey(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && submit()}
-          placeholder={`add ${title.slice(0, -1).toLowerCase()} rule (e.g. ${section === 'tools' ? 'run_command' : 'agent-langgraph-*'})`}
-          className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-mono text-xs text-brand-900 outline-none focus:border-brand-500"
+          placeholder="tool name (e.g. run_command)"
+          className="flex-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 font-mono text-[11px] text-brand-900 outline-none focus:border-brand-500"
         />
         <button
           onClick={submit}
-          className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
+          className="rounded-md border border-slate-300 px-2.5 py-1 text-[11px] font-medium text-slate-600 transition hover:bg-slate-50"
         >
-          + Add
+          + Add tool
         </button>
       </div>
     </div>
   )
 }
 
-function EntryRow({ entry, name, tiers, onChange, onRemove }) {
+// A single per-tool override row INSIDE the shared bounding box — no per-row border box,
+// just a thin colour accent + divider. Writes `active` (Active/Inactive). Same fixed
+// control columns as EntryRow so the sliders line up.
+function NestedToolRow({ entry, name, tiers, onChange, onRemove }) {
   const risk = entry.risk && tiers.includes(entry.risk) ? entry.risk : 'default'
-  const allow = entry.allow === true ? true : entry.allow === false ? false : undefined
-  // Left accent shows the effective decision at a glance: allow=green, deny=red,
-  // else the risk tier's colour (slate for "default / no opinion").
-  const accent = allow === true ? '#22c55e' : allow === false ? '#f43f5e' : tierHex(risk)
+  const active = entry.active === true ? true : entry.active === false ? false : undefined
+  const accent = active === true ? '#22c55e' : active === false ? '#f43f5e' : tierHex(risk)
   return (
-    <div
-      className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-slate-200 bg-white py-2.5 pl-3 pr-3 dark:border-slate-700"
-      style={{ borderLeft: `4px solid ${accent}` }}
-    >
-      <div className="min-w-[10rem] flex-1">
-        <div className="truncate font-mono text-sm text-brand-900">{name}</div>
-        {entry.note && <div className="truncate text-[11px] text-slate-400">{entry.note}</div>}
+    <div className="flex items-center gap-x-4 py-2 pl-3 pr-3" style={{ borderLeft: `3px solid ${accent}` }}>
+      <div className="min-w-[8rem] flex-1">
+        <div className="truncate font-mono text-[13px] text-brand-900">{name}</div>
       </div>
-
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">risk</span>
+      <div className={COL_RISK}>
+        <span className="w-9 text-[10px] font-semibold uppercase tracking-wide text-slate-400">risk</span>
         <TierSlider
           options={['default', ...tiers]}
           value={risk}
           onChange={(v) => onChange({ risk: v === 'default' ? undefined : v })}
         />
       </div>
-
-      <AllowDeny value={allow} onChange={(v) => onChange({ allow: v })} />
-
+      <div className={COL_ONOFF}>
+        <OnOff mode="active" value={active} onChange={(v) => onChange({ active: v })} />
+      </div>
       <button
         onClick={onRemove}
-        title="Remove rule"
-        aria-label="Remove rule"
-        className="text-slate-300 transition hover:text-rose-500"
+        title="Remove override"
+        aria-label="Remove override"
+        className="w-5 shrink-0 text-slate-300 transition hover:text-rose-500"
       >
         ✕
       </button>
@@ -673,11 +938,14 @@ function TierSlider({ options, value, onChange }) {
   )
 }
 
-// Explicit Allow / Deny checkboxes — mutually exclusive; neither ticked = default
-// (defer to the slider). Green for allow, red for deny.
-function AllowDeny({ value, onChange }) {
+// Explicit on/off checkboxes — mutually exclusive; neither ticked = default (defer to
+// the slider). `mode` picks the labels: 'allow' → Allow / Deny (top-level tools+agents,
+// writes `allow`); 'active' → Active / Inactive (nested per-tool, writes `active`).
+// Green for on, red for off.
+function OnOff({ value, onChange, mode = 'allow' }) {
+  const [onLabel, offLabel] = mode === 'active' ? ['Active', 'Inactive'] : ['Allow', 'Deny']
   return (
-    <div className="flex items-center gap-3 text-xs">
+    <div className="flex items-center gap-3 whitespace-nowrap text-xs">
       <label
         className={`flex cursor-pointer items-center gap-1.5 ${
           value === true ? 'font-semibold text-brand-700' : 'text-slate-500'
@@ -689,7 +957,7 @@ function AllowDeny({ value, onChange }) {
           onChange={() => onChange(value === true ? undefined : true)}
           className="h-3.5 w-3.5 accent-[#22c55e]"
         />
-        Allow
+        {onLabel}
       </label>
       <label
         className={`flex cursor-pointer items-center gap-1.5 ${
@@ -702,7 +970,7 @@ function AllowDeny({ value, onChange }) {
           onChange={() => onChange(value === false ? undefined : false)}
           className="h-3.5 w-3.5 accent-[#f43f5e]"
         />
-        Deny
+        {offLabel}
       </label>
     </div>
   )
